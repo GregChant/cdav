@@ -198,10 +198,10 @@ $CDAV_GENTASK_END1=$conf->global->CDAV_GENTASK_END1;
 $CDAV_GENTASK_END2=$conf->global->CDAV_GENTASK_END2;
 $CDAV_GENTASK_END3=$conf->global->CDAV_GENTASK_END3;
 $CDAV_PROJ_USER_ROLE=$conf->global->CDAV_PROJ_USER_ROLE;
-$CDAV_GENTASK_SERVICE_TAG=$conf->global->CDAV_GENTASK_SERVICE_TAG;
+$CDAV_GENTASK_SERVICE_TAG=$conf->global->CDAV_GENTASK_SERVICE_TA ?? 0;
 $CDAV_EXTRAFIELD_DURATION=$conf->global->CDAV_EXTRAFIELD_DURATION;
-$CDAV_TASK_HOUR_INI=$conf->global->CDAV_TASK_HOUR_INI;
-$CDAV_TASK_HOUR_END=$conf->global->CDAV_TASK_HOUR_END;
+$CDAV_TASK_HOUR_INI=$conf->global->CDAV_TASK_HOUR_INI ?? 8;
+$CDAV_TASK_HOUR_END=$conf->global->CDAV_TASK_HOUR_END ?? 17;
 $CDAV_QRCODE_DAVX5_ENABLED=$conf->global->CDAV_QRCODE_DAVX5_ENABLED;
 
 
@@ -335,11 +335,11 @@ print '</form>';
 // Show errors
 print "<br>";
 
-dol_htmloutput_errors($object->error, $object->errors);
+if (isset($object->error)) dol_htmloutput_errors($object->error, $object->errors);
 
 // Show messages
-dol_htmloutput_mesg($object->mesg, '', 'ok');
+if (isset($object->mesg)) dol_htmloutput_mesg($object->mesg, '', 'ok');
 
-// Footer
+// Footer)
 llxFooter();
 $db->close();
