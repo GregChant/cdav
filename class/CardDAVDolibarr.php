@@ -1711,7 +1711,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$this->db->query($sql);
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRigh('adherent','creer'))
+		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRight('adherent','creer'))
 		{
 			$rdata = $this->_parseDataMember($cardData, 'U');
 
