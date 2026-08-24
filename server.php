@@ -29,7 +29,7 @@ function exception_error_handler($errno, $errstr, $errfile, $errline) {
 }
 
 // debug
-// $debug_file = fopen('/tmp/cdav_'.date('Ymd').'.log','a');
+//$debug_file = fopen( sys_get_temp_dir() . '/cdav_'.date('Ymd').'.log','a');
 $debug_file = false;
 
 function debug_log($txt)
@@ -80,17 +80,34 @@ function llxFooter() { }
 // Load Dolibarr environment
 $res = 0;
 // Try main.inc.php into web root known defined into CONTEXT_DOCUMENT_ROOT (not always defined)
-if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) $res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) {
+	$res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+}
 // Try main.inc.php into web root detected using web root calculated from SCRIPT_FILENAME
 $tmp = empty($_SERVER['SCRIPT_FILENAME']) ? '' : $_SERVER['SCRIPT_FILENAME']; $tmp2 = realpath(__FILE__); $i = strlen($tmp) - 1; $j = strlen($tmp2) - 1;
-while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) { $i--; $j--; }
-if (!$res && $i > 0 && @file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) $res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
-if (!$res && $i > 0 && @file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) $res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) {
+	$i--;
+	$j--;
+}
+if (!$res && $i > 0 && file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) {
+	$res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
+}
+if (!$res && $i > 0 && file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) {
+	$res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+}
 // Try main.inc.php using relative path
-if (!$res && @file_exists("../main.inc.php")) $res = @include "../main.inc.php";
-if (!$res && @file_exists("../../main.inc.php")) $res = @include "../../main.inc.php";
-if (!$res && @file_exists("../../../main.inc.php")) $res = @include "../../../main.inc.php";
-if (!$res) die("Include of main fails");
+if (!$res && file_exists("../main.inc.php")) {
+	$res = @include "../main.inc.php";
+}
+if (!$res && file_exists("../../main.inc.php")) {
+	$res = @include "../../main.inc.php";
+}
+if (!$res && file_exists("../../../main.inc.php")) {
+	$res = @include "../../../main.inc.php";
+}
+if (!$res) {
+	die("Include of main fails");
+}
 
 if(!defined('DOL_DOCUMENT_ROOT'))
 	define('DOL_DOCUMENT_ROOT', $dolibarr_main_document_root);
@@ -101,8 +118,8 @@ require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 if(!$conf->cdav->enabled)
 	die('module CDav not enabled !');
 
-set_error_handler("exception_error_handler", E_ERROR | E_USER_ERROR |
-				E_CORE_ERROR | E_COMPILE_ERROR | E_RECOVERABLE_ERROR );
+//set_error_handler("exception_error_handler", E_ERROR | E_USER_ERROR |
+//				E_CORE_ERROR | E_COMPILE_ERROR | E_RECOVERABLE_ERROR );
 
 
 require_once './lib/cdav.lib.php';
@@ -159,6 +176,24 @@ if(!defined('CDAV_TASK_SYNC'))
 		define('CDAV_TASK_SYNC', $conf->global->CDAV_TASK_SYNC);
 	else
 		define('CDAV_TASK_SYNC', '0');
+}
+
+// define CDAV_INTERV_SYNC if not
+if(!defined('CDAV_INTERV_SYNC'))
+{
+	if(isset($conf->global->CDAV_INTERV_SYNC))
+		define('CDAV_INTERV_SYNC', $conf->global->CDAV_INTERV_SYNC);
+	else
+		define('CDAV_INTERV_SYNC', '0');
+}
+
+// define CDAV_INTERV_USER_ROLE if not
+if(!defined('CDAV_INTERV_USER_ROLE'))
+{
+	if(isset($conf->global->CDAV_INTERV_USER_ROLE))
+		define('CDAV_INTERV_USER_ROLE', $conf->global->CDAV_INTERV_USER_ROLE);
+	else
+		define('CDAV_INTERV_USER_ROLE', '0');
 }
 
 // define CDAV_THIRD_SYNC if not

@@ -31,17 +31,34 @@ function base64url_decode($data) {
 // Load Dolibarr environment
 $res = 0;
 // Try main.inc.php into web root known defined into CONTEXT_DOCUMENT_ROOT (not always defined)
-if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) $res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) {
+	$res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+}
 // Try main.inc.php into web root detected using web root calculated from SCRIPT_FILENAME
 $tmp = empty($_SERVER['SCRIPT_FILENAME']) ? '' : $_SERVER['SCRIPT_FILENAME']; $tmp2 = realpath(__FILE__); $i = strlen($tmp) - 1; $j = strlen($tmp2) - 1;
-while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) { $i--; $j--; }
-if (!$res && $i > 0 && @file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) $res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
-if (!$res && $i > 0 && @file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) $res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) {
+	$i--;
+	$j--;
+}
+if (!$res && $i > 0 && file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) {
+	$res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
+}
+if (!$res && $i > 0 && file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) {
+	$res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+}
 // Try main.inc.php using relative path
-if (!$res && @file_exists("../main.inc.php")) $res = @include "../main.inc.php";
-if (!$res && @file_exists("../../main.inc.php")) $res = @include "../../main.inc.php";
-if (!$res && @file_exists("../../../main.inc.php")) $res = @include "../../../main.inc.php";
-if (!$res) die("Include of main fails");
+if (!$res && file_exists("../main.inc.php")) {
+	$res = @include "../main.inc.php";
+}
+if (!$res && file_exists("../../main.inc.php")) {
+	$res = @include "../../main.inc.php";
+}
+if (!$res && file_exists("../../../main.inc.php")) {
+	$res = @include "../../../main.inc.php";
+}
+if (!$res) {
+	die("Include of main fails");
+}
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 
@@ -107,6 +124,24 @@ if(!defined('CDAV_TASK_SYNC'))
 		define('CDAV_TASK_SYNC', '0');
 }
 
+// define CDAV_INTERV_SYNC if not
+if(!defined('CDAV_INTERV_SYNC'))
+{
+	if(isset($conf->global->CDAV_INTERV_SYNC))
+		define('CDAV_INTERV_SYNC', $conf->global->CDAV_INTERV_SYNC);
+	else
+		define('CDAV_INTERV_SYNC', '0');
+}
+
+// define CDAV_INTERV_USER_ROLE if not
+if(!defined('CDAV_INTERV_USER_ROLE'))
+{
+	if(isset($conf->global->CDAV_INTERV_USER_ROLE))
+		define('CDAV_INTERV_USER_ROLE', $conf->global->CDAV_INTERV_USER_ROLE);
+	else
+		define('CDAV_INTERV_USER_ROLE', '0');
+}
+
 // define CDAV_THIRD_SYNC if not
 if(!defined('CDAV_THIRD_SYNC'))
 {
@@ -131,7 +166,13 @@ if(!defined('CDAV_MEMBER_SYNC'))
 define('CDAV_ADDRESSBOOK_ID_SHIFT', 100000);
 
 //parse Token
-$arrTmp = explode('+ø+', openssl_decrypt(base64url_decode(GETPOST('token')), 'bf-ecb', CDAV_URI_KEY, true));
+$arrTmp = explode('+ø+', openssl_decrypt(base64url_decode(GETPOST('token')), 'aes-256-cbc', CDAV_URI_KEY, true));
+
+if(!is_array($arrTmp) || count($arrTmp)<2)
+{
+	// use old encryption algo bf-ecb
+	$arrTmp = explode('+ø+', openssl_decrypt(base64url_decode(GETPOST('token')), 'bf-ecb', CDAV_URI_KEY, true));
+}
 
 if (! isset($arrTmp[1]) || ! in_array(trim($arrTmp[1]), array('nolabel', 'full')))
 {

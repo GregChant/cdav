@@ -24,17 +24,34 @@
 // Load Dolibarr environment
 $res = 0;
 // Try main.inc.php into web root known defined into CONTEXT_DOCUMENT_ROOT (not always defined)
-if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) $res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) {
+	$res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+}
 // Try main.inc.php into web root detected using web root calculated from SCRIPT_FILENAME
 $tmp = empty($_SERVER['SCRIPT_FILENAME']) ? '' : $_SERVER['SCRIPT_FILENAME']; $tmp2 = realpath(__FILE__); $i = strlen($tmp) - 1; $j = strlen($tmp2) - 1;
-while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) { $i--; $j--; }
-if (!$res && $i > 0 && @file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) $res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
-if (!$res && $i > 0 && @file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) $res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) {
+	$i--;
+	$j--;
+}
+if (!$res && $i > 0 && file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) {
+	$res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
+}
+if (!$res && $i > 0 && file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) {
+	$res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+}
 // Try main.inc.php using relative path
-if (!$res && @file_exists("../main.inc.php")) $res = @include "../main.inc.php";
-if (!$res && @file_exists("../../main.inc.php")) $res = @include "../../main.inc.php";
-if (!$res && @file_exists("../../../main.inc.php")) $res = @include "../../../main.inc.php";
-if (!$res) die("Include of main fails");
+if (!$res && file_exists("../main.inc.php")) {
+	$res = @include "../main.inc.php";
+}
+if (!$res && file_exists("../../main.inc.php")) {
+	$res = @include "../../main.inc.php";
+}
+if (!$res && file_exists("../../../main.inc.php")) {
+	$res = @include "../../../main.inc.php";
+}
+if (!$res) {
+	die("Include of main fails");
+}
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/barcode.lib.php'; // This is to include def like $genbarcode_loc and $font_loc
@@ -60,10 +77,10 @@ if(!defined('CDAV_URI_KEY'))
 $id			= GETPOST('id','int');
 $action		= GETPOST('action','alpha');
 $backtopage = GETPOST('backtopage');
-$type		= GETPOST('type','CalDAV');
+$type		= GETPOST('type','alpha');
 
 // Protection if external user
-if ($user->societe_id > 0)
+if (!empty($user->societe_id) || !empty($user->socid)) // external user
 {
 	accessforbidden();
 }
@@ -125,6 +142,7 @@ elseif($type=='CalDAV')
 
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname
 			FROM '.MAIN_DB_PREFIX.'user u WHERE '.$fk_soc_fieldname.' IS NULL
+			AND u.fk_soc IS NULL AND u.statut = 1
 			ORDER BY login';
 		$result = $db->query($sql);
 		while($row = $db->fetch_array($result))
@@ -157,21 +175,22 @@ elseif($type=='ICS')
 
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname
 			FROM '.MAIN_DB_PREFIX.'user u WHERE '.$fk_soc_fieldname.' IS NULL
+			AND u.fk_soc IS NULL  AND u.statut = 1
 			ORDER BY login';
 		$result = $db->query($sql);
 		while($row = $db->fetch_array($result))
 		{
 			echo '<h4>'.$row['firstname'].' '.$row['lastname'].' :</h4>';
 
-			echo "<PRE>".$langs->trans('Full')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($row['rowid'].'+ø+full', 'bf-ecb', CDAV_URI_KEY, true))."\n\n";
-			echo $langs->trans('NoLabel')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($row['rowid'].'+ø+nolabel', 'bf-ecb', CDAV_URI_KEY, true)).'</PRE><br/>';
+			echo "<PRE>".$langs->trans('Full')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($row['rowid'].'+ø+full', 'aes-256-cbc', CDAV_URI_KEY, true))."\n\n";
+			echo $langs->trans('NoLabel')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($row['rowid'].'+ø+nolabel', 'aes-256-cbc', CDAV_URI_KEY, true)).'</PRE><br/>';
 
 		}
 	}
 	else
 	{
-		echo "<PRE>".$langs->trans('Full')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($user->id.'+ø+full', 'bf-ecb', CDAV_URI_KEY, true))."\n\n";
-		echo $langs->trans('NoLabel')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($user->id.'+ø+nolabel', 'bf-ecb', CDAV_URI_KEY, true)).'</PRE><br/>';
+		echo "<PRE>".$langs->trans('Full')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($user->id.'+ø+full', 'aes-256-cbc', CDAV_URI_KEY, true))."\n\n";
+		echo $langs->trans('NoLabel')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($user->id.'+ø+nolabel', 'aes-256-cbc', CDAV_URI_KEY, true)).'</PRE><br/>';
 	}
 
 }

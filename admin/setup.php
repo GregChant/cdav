@@ -20,13 +20,39 @@
  *  \brief        Setup page  of module cdav
  */
 
-$res=0;
-if (! $res && file_exists("../../main.inc.php"))
-        $res=@include("../../main.inc.php");                                    // For root directory
-if (! $res && file_exists("../../../main.inc.php"))
-        $res=@include("../../../main.inc.php"); // For "custom" directory
+// Load Dolibarr environment
+$res = 0;
+// Try main.inc.php into web root known defined into CONTEXT_DOCUMENT_ROOT (not always defined)
+if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) {
+	$res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
+}
+// Try main.inc.php into web root detected using web root calculated from SCRIPT_FILENAME
+$tmp = empty($_SERVER['SCRIPT_FILENAME']) ? '' : $_SERVER['SCRIPT_FILENAME']; $tmp2 = realpath(__FILE__); $i = strlen($tmp) - 1; $j = strlen($tmp2) - 1;
+while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) {
+	$i--;
+	$j--;
+}
+if (!$res && $i > 0 && file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) {
+	$res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
+}
+if (!$res && $i > 0 && file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) {
+	$res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
+}
+// Try main.inc.php using relative path
+if (!$res && file_exists("../main.inc.php")) {
+	$res = @include "../main.inc.php";
+}
+if (!$res && file_exists("../../main.inc.php")) {
+	$res = @include "../../main.inc.php";
+}
+if (!$res && file_exists("../../../main.inc.php")) {
+	$res = @include "../../../main.inc.php";
+}
+if (!$res) {
+	die("Include of main fails");
+}
 
-dol_include_once("/cdav/core/lib/cdav.lib.php");
+dol_include_once("/cdav/lib/cdav.lib.php");
 require_once(DOL_DOCUMENT_ROOT."/core/lib/admin.lib.php");
 require_once(DOL_DOCUMENT_ROOT."/core/class/html.formadmin.class.php");
 require_once(DOL_DOCUMENT_ROOT."/core/class/html.form.class.php");
@@ -37,7 +63,7 @@ $langs->load("other");
 $langs->load("cdav@cdav");
 
 // Security check
-if (! $user->admin || $user->design) accessforbidden();
+if (! $user->admin || !empty($user->design)) accessforbidden();
 
 $action = GETPOST('action', 'alpha');
 
@@ -57,12 +83,25 @@ if ($result!==false)
 	while(($row=$db->fetch_object($result))!==null)
 		$projcontact_types[$row->rowid] = $row->libelle;
 }
+$intervcontact_types=array();
+$sql = 'SELECT rowid, libelle FROM '.MAIN_DB_PREFIX.'c_type_contact WHERE element="fichinter" AND source="internal" AND active=1';
+$result = $db->query($sql);
+if ($result!==false)
+{
+	while(($row=$db->fetch_object($result))!==null)
+		$intervcontact_types[$row->rowid] = $row->libelle;
+}
 
 $tasksync_method=array(
 	'0' => $langs->trans("Not synchonized"),
 	'1' => $langs->trans("Sync as calendar events only"),
 	'2' => $langs->trans("Sync as todo tasks only"),
 	'3' => $langs->trans("Sync as calendar events and todo tasks"),
+);
+
+$intervsync_method=array(
+	'0' => $langs->trans("Not synchonized"),
+	'1' => $langs->trans("Sync as calendar events"),
 );
 
 $thirdsync_method=array(
@@ -110,6 +149,14 @@ if ($action == 'setvalue') {
 	dolibarr_set_const(
 									$db, "CDAV_TASK_SYNC",
 									GETPOST('CDAV_TASK_SYNC', 'alphanohtml'), 'chaine', 0, '', $conf->entity
+	);
+	dolibarr_set_const(
+									$db, "CDAV_INTERV_SYNC",
+									GETPOST('CDAV_INTERV_SYNC', 'alphanohtml'), 'chaine', 0, '', $conf->entity
+	);
+	dolibarr_set_const(
+									$db, "CDAV_INTERV_USER_ROLE",
+									GETPOST('CDAV_INTERV_USER_ROLE', 'alphanohtml'), 'chaine', 0, '', $conf->entity
 	);
 	dolibarr_set_const(
 									$db, "CDAV_TASK_USER_ROLE",
@@ -180,7 +227,7 @@ $page_name = $langs->trans("CDav Setup") . " - " . $langs->trans("CDav General S
 llxHeader('', $page_name);
 
 $linkback='<a href="'.DOL_URL_ROOT.'/admin/modules.php">'.$langs->trans("BackToModuleList").'</a>';
-load_fiche_titre($page_name, $linkback, 'title_setup');
+print_fiche_titre($page_name, $linkback, 'title_setup');
 
 $CDAV_URI_KEY=substr($conf->global->CDAV_URI_KEY,0,8);
 $CDAV_CONTACT_TAG=$conf->global->CDAV_CONTACT_TAG;
@@ -189,6 +236,8 @@ $CDAV_MEMBER_SYNC=$conf->global->CDAV_MEMBER_SYNC;
 $CDAV_SYNC_PAST=$conf->global->CDAV_SYNC_PAST;
 $CDAV_SYNC_FUTURE=$conf->global->CDAV_SYNC_FUTURE;
 $CDAV_TASK_SYNC=$conf->global->CDAV_TASK_SYNC;
+$CDAV_INTERV_SYNC=$conf->global->CDAV_INTERV_SYNC;
+$CDAV_INTERV_USER_ROLE=$conf->global->CDAV_INTERV_USER_ROLE;
 $CDAV_TASK_USER_ROLE=$conf->global->CDAV_TASK_USER_ROLE;
 $CDAV_GENTASK=$conf->global->CDAV_GENTASK;
 $CDAV_GENTASK_INI1=$conf->global->CDAV_GENTASK_INI1;
@@ -198,16 +247,16 @@ $CDAV_GENTASK_END1=$conf->global->CDAV_GENTASK_END1;
 $CDAV_GENTASK_END2=$conf->global->CDAV_GENTASK_END2;
 $CDAV_GENTASK_END3=$conf->global->CDAV_GENTASK_END3;
 $CDAV_PROJ_USER_ROLE=$conf->global->CDAV_PROJ_USER_ROLE;
-$CDAV_GENTASK_SERVICE_TAG=$conf->global->CDAV_GENTASK_SERVICE_TA ?? 0;
+$CDAV_GENTASK_SERVICE_TAG=$conf->global->CDAV_GENTASK_SERVICE_TAG ?? 0;
 $CDAV_EXTRAFIELD_DURATION=$conf->global->CDAV_EXTRAFIELD_DURATION;
 $CDAV_TASK_HOUR_INI=$conf->global->CDAV_TASK_HOUR_INI ?? 8;
 $CDAV_TASK_HOUR_END=$conf->global->CDAV_TASK_HOUR_END ?? 17;
 $CDAV_QRCODE_DAVX5_ENABLED=$conf->global->CDAV_QRCODE_DAVX5_ENABLED;
 
 
-dol_get_fiche_head('', 'setup', $langs->trans("CDav"), 0, "cdav@cdav");
+dol_fiche_head('', 'setup', $langs->trans("CDav"), 0, "cdav@cdav");
 
-load_fiche_titre($langs->trans("CDav Setting Value"));
+print_titre($langs->trans("CDav Setting Value"));
 print '<br>';
 print '<form method="post" action="setup.php">';
 print '<input type="hidden" name="token" value="'.newToken().'">';
@@ -221,7 +270,7 @@ print '</tr>'."\n";
 print '<tr >';
 print '<td  align=left><strong>'.$langs->trans("Sync token").'</strong><br/>'.$langs->trans("Change it to force client to resync").'</td>';
 print '<td  align=left>';
-print '<input size="8" type="alphanohtml" class="flat" name="CDAV_URI_KEY" value="'.htmlentities($CDAV_URI_KEY).'">';
+print '<input size="8" type="text" class="flat" name="CDAV_URI_KEY" value="'.htmlentities($CDAV_URI_KEY).'">';
 print '</td></tr>'."\n";
 
 print '<tr >';
@@ -242,12 +291,25 @@ print '<td  align=left>';
 print $form->selectyesno('CDAV_MEMBER_SYNC', $CDAV_MEMBER_SYNC, 1);
 print '</td></tr>'."\n";
 
+
+print '<tr >';
+print '<td  align=left><strong>'.$langs->trans("Enable intervention cards sync").'</strong><br/>'.$langs->trans("How to synchronize intervention cards").'</td>';
+print '<td  align=left>';
+print $form->selectarray('CDAV_INTERV_SYNC', $intervsync_method, $CDAV_INTERV_SYNC);
+print '</td></tr>'."\n";
+
+print '<tr >';
+print '<td  align=left><strong>'.$langs->trans("Intervention user role").'</strong><br/>'.$langs->trans("User role when attaching a user to an intervention from a caldav client").'</td>';
+print '<td  align=left>';
+print $form->selectarray('CDAV_INTERV_USER_ROLE', $intervcontact_types, $CDAV_INTERV_USER_ROLE);
+print '</td></tr>'."\n";
+
 print '<tr >';
 print '<td  align=left><strong>'.$langs->trans("Period to sync").'</strong><br/>'.$langs->trans("Number of days to sync before and after today").'</td>';
 print '<td  align=left>';
-print $langs->trans("In past:").' <input size="4" type="alphanohtml" class="flat" name="CDAV_SYNC_PAST" value="'.htmlentities($CDAV_SYNC_PAST).'"> '.$langs->trans("days");
+print $langs->trans("In past:").' <input size="4" type="text" class="flat" name="CDAV_SYNC_PAST" value="'.htmlentities($CDAV_SYNC_PAST).'"> '.$langs->trans("days");
 print '<br />';
-print $langs->trans("In future:").' <input size="4" type="alphanohtml" class="flat" name="CDAV_SYNC_FUTURE" value="'.htmlentities($CDAV_SYNC_FUTURE).'"> '.$langs->trans("days");
+print $langs->trans("In future:").' <input size="4" type="text" class="flat" name="CDAV_SYNC_FUTURE" value="'.htmlentities($CDAV_SYNC_FUTURE).'"> '.$langs->trans("days");
 print '</td></tr>'."\n";
 
 print '<tr class="liste_titre">';
@@ -301,9 +363,9 @@ print '</td></tr>'."\n";
 print '<tr >';
 print '<td  align=left><strong>'.$langs->trans("Project task working hours").'</strong><br/>'.$langs->trans("Start and end time of a working day").'</td>';
 print '<td  align=left>';
-print $langs->trans("Begining at:").' <input size="4" type="alphanohtml" class="flat" name="CDAV_TASK_HOUR_INI" value="'.htmlentities($CDAV_TASK_HOUR_INI).'"> '.$langs->trans("hour");
+print $langs->trans("Begining at:").' <input size="4" type="text" class="flat" name="CDAV_TASK_HOUR_INI" value="'.htmlentities($CDAV_TASK_HOUR_INI).'"> '.$langs->trans("hour");
 print '<br />';
-print $langs->trans("Ending at:").' <input size="4" type="alphanohtml" class="flat" name="CDAV_TASK_HOUR_END" value="'.htmlentities($CDAV_TASK_HOUR_END).'"> '.$langs->trans("hour");
+print $langs->trans("Ending at:").' <input size="4" type="text" class="flat" name="CDAV_TASK_HOUR_END" value="'.htmlentities($CDAV_TASK_HOUR_END).'"> '.$langs->trans("hour");
 print '</td></tr>'."\n";
 
 print '<tr >';
@@ -335,11 +397,12 @@ print '</form>';
 // Show errors
 print "<br>";
 
-if (isset($object->error)) dol_htmloutput_errors($object->error, $object->errors);
+if(!empty($object)) { // Fix Warning: Attempt to read property "error" on null : Is $object really used on this page?
+	dol_htmloutput_errors($object->error, $object->errors);
+	// Show messages
+	dol_htmloutput_mesg($object->mesg, '', 'ok');
+}
 
-// Show messages
-if (isset($object->mesg)) dol_htmloutput_mesg($object->mesg, '', 'ok');
-
-// Footer)
+// Footer
 llxFooter();
 $db->close();
