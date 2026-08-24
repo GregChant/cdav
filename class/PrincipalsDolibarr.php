@@ -3,7 +3,6 @@
 namespace Sabre\DAVACL\PrincipalBackend;
 
 use Sabre\DAV;
-use Sabre\DAV\MkCol;
 
 /**
  * PDO principal backend
@@ -16,7 +15,7 @@ use Sabre\DAV\MkCol;
  * @author Evert Pot (http://evertpot.com/)
  * @license http://sabre.io/license/ Modified BSD License
  */
-class Dolibarr extends AbstractBackend implements CreatePrincipalSupport {
+class Dolibarr extends AbstractBackend {
 
 	/**
 	 * Dolibarr user object
@@ -282,7 +281,7 @@ class Dolibarr extends AbstractBackend implements CreatePrincipalSupport {
 	 * @param MkCol $mkCol
 	 * @return void
 	 */
-	function createPrincipal($path, MkCol $mkCol) {
+	function createPrincipal($path, $mkCol) {
 		// not supported
 		return;
 	}

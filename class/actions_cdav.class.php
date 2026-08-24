@@ -17,35 +17,33 @@ class ActionsCDav
 	 */
 	public function doActions($parameters, &$object, &$action, $hookmanager)
 	{
-		global $user, $conf, $db;
+		global $user, $db;
 
 		// echo "action: " . $action;
 		// echo "parameters: ";
 		// print_r($parameters);
 
-		if (!isset($conf->global->CDAV_GENTASK) || intval($conf->global->CDAV_GENTASK) == 0 || $parameters['currentcontext'] != 'projectcard')
+		if (!getDolGlobalInt('CDAV_GENTASK') || ($parameters['currentcontext'] ?? '') != 'projectcard')
 			return 0;
 
 		if ($action == "confirm_validate" && isset($object->id) && $object->id > 0) {
 			//ok go ahead
-		} elseif (GETPOST('status') != 1 && $action != "confirm_validateProject" || !isset($object->id) || $object->id <= 0)
+		} elseif ((GETPOST('status') != 1 && $action != "confirm_validateProject") || !isset($object->id) || $object->id <= 0)
 			return 0;
 
-		$CDAV_PROJ_USER_ROLE = $conf->global->CDAV_PROJ_USER_ROLE;        // to pick good user in project
-		$CDAV_TASK_USER_ROLE = $conf->global->CDAV_TASK_USER_ROLE;        // role to put on task
-		$CDAV_GENTASK_INI1 = $conf->global->CDAV_GENTASK_INI1;        // initial service
-		$CDAV_GENTASK_INI2 = $conf->global->CDAV_GENTASK_INI2;        // initial service
-		$CDAV_GENTASK_INI3 = $conf->global->CDAV_GENTASK_INI3;        // initial service
-		$CDAV_GENTASK_END1 = $conf->global->CDAV_GENTASK_END1;        // final service
-		$CDAV_GENTASK_END2 = $conf->global->CDAV_GENTASK_END2;        // final service
-		$CDAV_GENTASK_END3 = $conf->global->CDAV_GENTASK_END3;        // final service
-		$CDAV_GENTASK_SERVICE_TAG = $conf->global->CDAV_GENTASK_SERVICE_TAG;        // restrict services
-		$CDAV_EXTRAFIELD_DURATION = $conf->global->CDAV_EXTRAFIELD_DURATION;        // duration in propaldet & commandedet extrafields
-		$CDAV_TASK_HOUR_INI = $conf->global->CDAV_TASK_HOUR_INI;        // begining of a working day
-		$CDAV_TASK_HOUR_END = $conf->global->CDAV_TASK_HOUR_END;        // ending of a working day
-
-		if (isset($conf->global->WEEE_PRODUCT_ID) && intval($conf->global->WEEE_PRODUCT_ID) != 0)
-			$WEEE_PRODUCT_ID = intval($conf->global->WEEE_PRODUCT_ID);        // DEEE ?
+		$CDAV_PROJ_USER_ROLE = getDolGlobalInt('CDAV_PROJ_USER_ROLE');
+		$CDAV_TASK_USER_ROLE = getDolGlobalInt('CDAV_TASK_USER_ROLE');
+		$CDAV_GENTASK_INI1 = getDolGlobalInt('CDAV_GENTASK_INI1');
+		$CDAV_GENTASK_INI2 = getDolGlobalInt('CDAV_GENTASK_INI2');
+		$CDAV_GENTASK_INI3 = getDolGlobalInt('CDAV_GENTASK_INI3');
+		$CDAV_GENTASK_END1 = getDolGlobalInt('CDAV_GENTASK_END1');
+		$CDAV_GENTASK_END2 = getDolGlobalInt('CDAV_GENTASK_END2');
+		$CDAV_GENTASK_END3 = getDolGlobalInt('CDAV_GENTASK_END3');
+		$CDAV_GENTASK_SERVICE_TAG = getDolGlobalInt('CDAV_GENTASK_SERVICE_TAG');
+		$CDAV_EXTRAFIELD_DURATION = getDolGlobalInt('CDAV_EXTRAFIELD_DURATION');
+		$CDAV_TASK_HOUR_INI = getDolGlobalInt('CDAV_TASK_HOUR_INI', 8);
+		$CDAV_TASK_HOUR_END = getDolGlobalInt('CDAV_TASK_HOUR_END', 17);
+		$WEEE_PRODUCT_ID = getDolGlobalInt('WEEE_PRODUCT_ID');
 
 		if ($action == "confirm_validate") {  // button Validate
 			$date_start = $object->date_start;
@@ -69,9 +67,12 @@ class ActionsCDav
 
 		$sql = "SELECT * FROM " . MAIN_DB_PREFIX . "projet_task WHERE fk_projet = " . intval($object->id);
 		$result = $db->query($sql);
+		if (!$result) {
+			return -1;
+		}
 		// echo "Result ";
 		// print_r($result);
-		if ($db->num_rows($result) == 0 && isset($user->rights->agenda->allactions->read)) {
+		if ($db->num_rows($result) == 0 && $user->hasRight('projet', 'creer')) {
 			$db->free($result);
 			//echo "NOTASK";
 
@@ -118,13 +119,13 @@ class ActionsCDav
 				$sqldet .= " LEFT OUTER JOIN " . MAIN_DB_PREFIX . "commandedet_extrafields AS ef ON (ef.fk_object=det.rowid)";
 				$sqldet .= " LEFT OUTER JOIN " . MAIN_DB_PREFIX . "element_element elt ON ( elt.sourcetype='propal' AND elt.targettype='commande' AND elt.fk_target = " . intval($res->rowid) . ")
 							WHERE fk_commande = " . intval($res->rowid) . " AND qty > 0 AND product_type=1 ";
-				if ($CDAV_GENTASK_SERVICE_TAG > 0 && $CDAV_EXTRAFIELD_DURATION !== false)
+				if ($CDAV_GENTASK_SERVICE_TAG > 0 && $CDAV_EXTRAFIELD_DURATION > 0)
 					$sqldet .= " AND (cat.fk_categorie IS NOT NULL OR COALESCE(ef.cdav_duration,'') <> '' )";
-				elseif ($CDAV_EXTRAFIELD_DURATION !== false)
-					$sqldet .= " AND COALESCE(duration,'') <> '' ";
+				elseif ($CDAV_EXTRAFIELD_DURATION > 0)
+					$sqldet .= " AND COALESCE(ef.cdav_duration, pro.duration, '') <> '' ";
 				elseif ($CDAV_GENTASK_SERVICE_TAG > 0)
 					$sqldet .= " AND cat.fk_categorie IS NOT NULL";
-				$sqldet .= " ORDER BY rowid";
+				$sqldet .= " ORDER BY det.rowid";
 				//echo "\n\n $sqldet \n\n";
 
 				$querydet = $db->query($sqldet);
@@ -176,13 +177,13 @@ class ActionsCDav
 
 				$sqldet .= " LEFT OUTER JOIN " . MAIN_DB_PREFIX . "propaldet_extrafields AS ef ON (ef.fk_object=det.rowid)";
 				$sqldet .= " WHERE fk_propal = " . intval($res->rowid) . " AND qty > 0 AND product_type=1";
-				if ($CDAV_GENTASK_SERVICE_TAG > 0 && $CDAV_EXTRAFIELD_DURATION !== false)
+				if ($CDAV_GENTASK_SERVICE_TAG > 0 && $CDAV_EXTRAFIELD_DURATION > 0)
 					$sqldet .= " AND (cat.fk_categorie IS NOT NULL OR COALESCE(ef.cdav_duration,'') <> '' )";
-				elseif ($CDAV_EXTRAFIELD_DURATION !== false)
+				elseif ($CDAV_EXTRAFIELD_DURATION > 0)
 					$sqldet .= " AND COALESCE(ef.cdav_duration,'') <> '' ";
 				elseif ($CDAV_GENTASK_SERVICE_TAG > 0)
 					$sqldet .= " AND cat.fk_categorie IS NOT NULL";
-				$sqldet .= " ORDER BY rowid";
+				$sqldet .= " ORDER BY det.rowid";
 
 				//echo "\n\n $sqldet \n\n";
 				$querydet = $db->query($sqldet);
@@ -217,7 +218,7 @@ class ActionsCDav
 				$db->free($querydet);
 			}
 			$db->free($query);
-			$sql = "SELECT fk_socpeople FROM llx_element_contact WHERE fk_c_type_contact = " . intval($CDAV_PROJ_USER_ROLE) . " AND element_id = " . intval($object->id);
+			$sql = "SELECT fk_socpeople FROM " . MAIN_DB_PREFIX . "element_contact WHERE fk_c_type_contact = " . intval($CDAV_PROJ_USER_ROLE) . " AND element_id = " . intval($object->id);
 			$querydet = $db->query($sql);
 			if ($querydet && ($row = $db->fetch_object($querydet)) !== null)
 				$task_user = $row->fk_socpeople;
@@ -273,11 +274,12 @@ class ActionsCDav
 					$hEnd = $hTmp;
 				}
 
+				$projectTaskAddon = getDolGlobalString('PROJECT_TASK_ADDON', 'mod_task_simple');
 				foreach ($rTasksLib as $taskid => $label) {
 					$defaultref = '';
-					$obj = empty($conf->global->PROJECT_TASK_ADDON) ? 'mod_task_simple' : $conf->global->PROJECT_TASK_ADDON;
-					if (!empty($conf->global->PROJECT_TASK_ADDON) && is_readable(DOL_DOCUMENT_ROOT . "/core/modules/project/task/" . $conf->global->PROJECT_TASK_ADDON . ".php")) {
-						require_once DOL_DOCUMENT_ROOT . "/core/modules/project/task/" . $conf->global->PROJECT_TASK_ADDON . '.php';
+					$obj = $projectTaskAddon;
+					if (is_readable(DOL_DOCUMENT_ROOT . "/core/modules/project/task/" . $projectTaskAddon . ".php")) {
+						require_once DOL_DOCUMENT_ROOT . "/core/modules/project/task/" . $projectTaskAddon . '.php';
 						$modTask = new $obj;
 						$defaultref = $modTask->getNextValue($object->thirdparty, null);
 					}
@@ -321,7 +323,7 @@ class ActionsCDav
 					// echo "Task ";
 					// print_r($task);
 
-					if ($task_id > 0) {
+					if ($task_id > 0 && $CDAV_TASK_USER_ROLE > 0) {
 						$sql = "INSERT INTO " . MAIN_DB_PREFIX . "element_contact (`datecreate`, `statut`, `element_id`, `fk_c_type_contact`, `fk_socpeople` )
 							VALUES (
 								NOW(),
@@ -330,8 +332,12 @@ class ActionsCDav
 								" . (int) $CDAV_TASK_USER_ROLE . ",
 								" . (int) $task_user . "
 							)";
+						if (!$db->query($sql)) {
+							$error++;
+						}
+					} elseif ($task_id <= 0) {
+						$error++;
 					}
-					$db->query($sql);
 
 					/*$ref = "TK".date("ym")."-".$tasknum;
 					$sql = "INSERT INTO ".MAIN_DB_PREFIX."projet_task (`ref`, `entity`, `fk_projet`, `datec`, `label`, `description`, ``, ``, ``, ``, ``)
@@ -343,6 +349,8 @@ class ActionsCDav
 					//$db->query($sql);
 				}
 			}
+		} else {
+			$db->free($result);
 		}
 
 
@@ -359,7 +367,7 @@ class ActionsCDav
 			return -1;
 		}
 		*/
-		return 0;
+		return $error > 0 ? -1 : 0;
 	}
 
 
@@ -373,7 +381,7 @@ class ActionsCDav
 	 */
 	public function formObjectOptions($parameters, &$object, &$action)
 	{
-		global $user, $conf, $db;
+		global $db;
 
 		// echo "formObjectOptions parameters: ";
 		// print_r($parameters);
@@ -382,19 +390,20 @@ class ActionsCDav
 		// echo "formObjectOptions action: ";
 		// print_r($action);
 
-		if ($parameters['currentcontext'] == 'projecttaskscard' && $parameters['id'] > 0) {
+		if (($parameters['currentcontext'] ?? '') == 'projecttaskscard' && ($parameters['id'] ?? 0) > 0) {
 			$sql = 'SELECT pt.rowid, us.color, us.login, us.firstname, us.lastname
 				FROM ' . MAIN_DB_PREFIX . 'projet_task AS pt
 				LEFT JOIN ' . MAIN_DB_PREFIX . 'element_contact as ec ON (ec.element_id=pt.rowid)
 				LEFT JOIN ' . MAIN_DB_PREFIX . 'user as us ON (us.rowid=ec.fk_socpeople)
 				LEFT JOIN ' . MAIN_DB_PREFIX . 'c_type_contact as tc ON (tc.rowid=ec.fk_c_type_contact AND tc.element="project_task" AND tc.source="internal")
 				WHERE tc.element="project_task" AND tc.source="internal" AND us.login IS NOT NULL
-				AND pt.fk_projet=' . intval($parameters['id']) . ' AND pt.entity IN (' . getEntity('societe', 1) . ')
+				AND pt.fk_projet=' . intval($parameters['id']) . ' AND pt.entity IN (' . getEntity('project') . ')
 				ORDER BY pt.rowid, us.login';
 			$result = $db->query($sql);
 			echo "\n<script>\n$(function() {\n";
 			while ($result && ($res = $db->fetch_object($result)) !== null) {
-				echo "$('tr#row-" . $res->rowid . " td:first-child').append('&nbsp<span class=\"fa fa-user\" style=\"padding:1px 3px; border:#000 solid 1px;color:" . ($res->color != '' ? '#' . $res->color : 'inherit') . ";\" alt=\"" . dol_htmlentities($res->login) . "\" title=\"" . dol_htmlentities($res->login) . "\"></span>');\n";
+				$color = preg_match('/^[0-9a-f]{6}$/i', (string) $res->color) ? '#' . $res->color : 'inherit';
+				echo "$('tr#row-" . $res->rowid . " td:first-child').append('&nbsp;<span class=\"fa fa-user\" style=\"padding:1px 3px; border:#000 solid 1px;color:" . $color . ";\" alt=\"" . dol_escape_js($res->login) . "\" title=\"" . dol_escape_js($res->login) . "\"></span>');\n";
 			}
 			echo "});\n</script>\n";
 		}

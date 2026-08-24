@@ -15,11 +15,112 @@ class CdavLib
 
 	private $langs;
 
+	/** @var bool|null Whether the optional iCalendar metadata table exists. */
+	private $hasSchedulingTable = null;
+
 	function __construct($user, $db, $langs)
 	{
 		$this->user 	= $user;
 		$this->db 		= $db;
 		$this->langs 	= $langs;
+	}
+
+	private function schedulingTableAvailable()
+	{
+		if ($this->hasSchedulingTable !== null) {
+			return $this->hasSchedulingTable;
+		}
+		$tableName = MAIN_DB_PREFIX.'cdav_scheduling';
+		$result = $this->db->query("SELECT COUNT(*) AS nb FROM information_schema.tables
+			WHERE table_schema = DATABASE() AND table_name = '".$this->db->escape($tableName)."'");
+		$row = $result ? $this->db->fetch_object($result) : null;
+		$this->hasSchedulingTable = $row && (int) $row->nb > 0;
+		return $this->hasSchedulingTable;
+	}
+
+	/**
+	 * Reapply RFC properties that have no native ActionComm field.  Dolibarr
+	 * remains authoritative for the title, dates, notes and free/busy value.
+	 */
+	private function mergeCalendarMetadata($eventId, $calendarData)
+	{
+		if (!$this->schedulingTableAvailable()) {
+			return $calendarData;
+		}
+		$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling
+			WHERE fk_actioncomm = '.((int) $eventId));
+		if (!$result || !($row = $this->db->fetch_object($result)) || empty($row->calendardata)) {
+			return $calendarData;
+		}
+
+		try {
+			$generated = \Sabre\VObject\Reader::read($calendarData);
+			$stored = \Sabre\VObject\Reader::read($row->calendardata);
+			$target = null;
+			$source = null;
+			foreach ($generated->getComponents() as $component) {
+				if (in_array($component->name, array('VEVENT', 'VTODO'), true)) {
+					$target = $component;
+					break;
+				}
+			}
+			foreach ($stored->getComponents() as $component) {
+				if ($target !== null && $component->name === $target->name) {
+					$source = $component;
+					break;
+				}
+			}
+			if ($target === null || $source === null) {
+				return $calendarData;
+			}
+
+			$propertyNames = array(
+				'ORGANIZER', 'ATTENDEE', 'RRULE', 'RDATE', 'EXDATE',
+				'RECURRENCE-ID', 'SEQUENCE',
+			);
+			foreach ($propertyNames as $propertyName) {
+				$target->remove($propertyName);
+				foreach ($source->select($propertyName) as $property) {
+					$target->add(clone $property);
+				}
+			}
+			if (isset($source->STATUS)) {
+				$target->remove('STATUS');
+				foreach ($source->select('STATUS') as $property) {
+					$target->add(clone $property);
+				}
+			}
+			$target->remove('VALARM');
+			foreach ($source->getComponents() as $component) {
+				if ($component->name === 'VALARM') {
+					$target->add(clone $component);
+				}
+			}
+
+			$seenMaster = false;
+			foreach ($stored->getComponents() as $component) {
+				if ($component->name === 'VTIMEZONE') {
+					$generated->add(clone $component);
+					continue;
+				}
+				if ($component->name === $target->name) {
+					if (!$seenMaster) {
+						$seenMaster = true;
+						continue;
+					}
+					// RECURRENCE-ID exceptions are independent components and must
+					// survive the Dolibarr round-trip unchanged.
+					$generated->add(clone $component);
+				}
+			}
+
+			return $generated->serialize();
+		} catch (\Throwable $e) {
+			if (function_exists('debug_log')) {
+				debug_log('Unable to restore CalDAV metadata for event '.$eventId.': '.$e->getMessage());
+			}
+			return $calendarData;
+		}
 	}
 
 	/**
@@ -55,6 +156,13 @@ class CdavLib
 					p.title proj_title,
 					p.description proj_desc,
 					ac.sourceuid,
+					ac.uuidext,
+					(SELECT COUNT(*)
+						FROM '.MAIN_DB_PREFIX.'actioncomm_cdav acdup
+						INNER JOIN '.MAIN_DB_PREFIX.'actioncomm adup ON adup.id = acdup.fk_object
+						WHERE acdup.uuidext = ac.uuidext) AS uuidext_count,
+					arcal.transparency AS calendar_transparency,
+					arcal.answer_status AS calendar_answer_status,
 					(SELECT GROUP_CONCAT(u.login) FROM '.MAIN_DB_PREFIX.'actioncomm_resources ar
 						LEFT OUTER JOIN '.MAIN_DB_PREFIX.'user AS u ON (u.rowid=fk_element)
 						WHERE ar.element_type=\'user\' AND fk_actioncomm=a.id) AS other_users
@@ -73,12 +181,13 @@ class CdavLib
 					LEFT JOIN '.MAIN_DB_PREFIX.'actioncomm_cdav AS ac ON (a.id = ac.fk_object)';
 		}
 
-		$sql.=' LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = a.fk_project)
+		$sql.=' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources AS arcal
+					ON (arcal.fk_actioncomm = a.id AND arcal.element_type = \'user\' AND arcal.fk_element = '.intval($calid).')
+				LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = a.fk_project)
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = sp.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
-				WHERE 	a.id IN (SELECT ar.fk_actioncomm FROM '.MAIN_DB_PREFIX.'actioncomm_resources ar WHERE ar.element_type=\'user\' AND ar.fk_element='.intval($calid).')
-						AND a.code IN (SELECT cac.code FROM '.MAIN_DB_PREFIX.'c_actioncomm cac WHERE cac.type<>\'systemauto\')
-						AND a.entity IN ('.getEntity('societe', 1).')';
+				WHERE 	a.code IN (SELECT cac.code FROM '.MAIN_DB_PREFIX.'c_actioncomm cac WHERE cac.type<>\'systemauto\')
+						AND a.entity IN ('.getEntity('agenda').')';
 		if($oid!==false) {
 			if($ouri===false)
 			{
@@ -91,12 +200,56 @@ class CdavLib
 		}
 		else
 		{
-			$sql.='	AND COALESCE(a.datep2,a.datep)>="'.date('Y-m-d 00:00:00',time()-86400*CDAV_SYNC_PAST).'"
-					AND a.datep<="'.date('Y-m-d 23:59:59',time()+86400*CDAV_SYNC_FUTURE).'"';
+			$range = '(COALESCE(a.datep2,a.datep)>="'.date('Y-m-d 00:00:00',time()-86400*CDAV_SYNC_PAST).'"
+					AND a.datep<="'.date('Y-m-d 23:59:59',time()+86400*CDAV_SYNC_FUTURE).'")';
+			if ($this->schedulingTableAvailable()) {
+				$range = '('.$range.' OR EXISTS (
+					SELECT 1 FROM '.MAIN_DB_PREFIX.'cdav_scheduling cds
+					WHERE cds.fk_actioncomm = a.id
+					AND (cds.calendardata LIKE \'%RRULE:%\' OR cds.calendardata LIKE \'%RDATE:%\')
+				))';
+			}
+			$sql .= ' AND '.$range;
 		}
 
 		return $sql;
 
+	}
+
+	/**
+	 * Build a collection tag that changes on additions, updates, removals and
+	 * assignment changes.  We deliberately do not advertise DAV sync tokens:
+	 * Dolibarr has no tombstone log from which deleted object names can be
+	 * reconstructed reliably.
+	 *
+	 * @param int $calendarId Calendar owner user id
+	 * @return string
+	 */
+	public function getCalendarCollectionTag($calendarId)
+	{
+		$tokens = array();
+		$queries = array(
+			'ev' => $this->getSqlCalEvents($calendarId),
+			'pe' => $this->getSqlProjectTasks($calendarId, false, 'pe'),
+			'pt' => $this->getSqlProjectTasks($calendarId, false, 'pt'),
+			'fi' => $this->getSqlIntervEvents($calendarId),
+		);
+
+		foreach ($queries as $source => $sql) {
+			if (empty($sql)) {
+				continue;
+			}
+			$result = $this->db->query($sql);
+			if (!$result) {
+				continue;
+			}
+			while ($obj = $this->db->fetch_object($result)) {
+				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd);
+			}
+		}
+
+		sort($tokens, SORT_STRING);
+		return sha1(CDAV_URI_KEY.'|'.implode('|', $tokens));
 	}
 	/**
 	 * Base sql request for project tasks
@@ -110,7 +263,7 @@ class CdavLib
 	{
 		global $conf;
 
-		if(empty($conf->project->enabled) || (isset($conf->global->PROJECT_HIDE_TASKS) && $conf->global->PROJECT_HIDE_TASKS))
+		if(!isModEnabled('project') || getDolGlobalInt('PROJECT_HIDE_TASKS'))
 			return false;
 
 		if(intval(CDAV_TASK_SYNC)==0 || (intval(CDAV_TASK_SYNC)==1 && $elem_source=='pt'))
@@ -149,7 +302,7 @@ class CdavLib
 				LEFT JOIN '.MAIN_DB_PREFIX.'element_contact as ec ON (ec.element_id=pt.rowid)
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_type_contact as tc ON (tc.rowid=ec.fk_c_type_contact AND tc.element="project_task" AND tc.source="internal")
 				WHERE tc.element="project_task" AND tc.source="internal" AND ec.fk_socpeople='.intval($calid).'
-				AND pt.entity IN ('.getEntity('societe', 1).')';
+				AND pt.entity IN ('.getEntity('project').')';
 		if($oid!==false)
 		{
 			$sql.=' AND pt.rowid = '.intval($oid);
@@ -174,7 +327,7 @@ class CdavLib
 	{
 		global $conf;
 
-		if(empty($conf->ficheinter->enabled))
+		if(!isModEnabled('ficheinter'))
 			return false;
 
 		if(intval(CDAV_INTERV_SYNC)==0)
@@ -218,7 +371,7 @@ class CdavLib
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_type_contact as gtc ON (gtc.rowid=ec.fk_c_type_contact AND gtc.element="fichinter" AND gtc.source="internal")
 				WHERE gtc.element="fichinter" AND gtc.source="internal" AND ec.fk_socpeople='.intval($calid).'
 				AND fid.date IS NOT NULL
-				AND fi.entity IN ('.getEntity('societe', 1).')';
+				AND fi.entity IN ('.getEntity('intervention').')';
 		if($oid!==false)
 		{
 			$sql.=' AND fid.rowid = '.intval($oid);
@@ -330,10 +483,11 @@ class CdavLib
 					$caldata.="DUE;TZID=".$timezone.":".strtr($obj->datep2,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 			}
 			$caldata.="CLASS:PUBLIC\n";
-			if($obj->transparency==1)
-				$caldata.="TRANSP:TRANSPARENT\n";
-			else
-				$caldata.="TRANSP:OPAQUE\n";
+				$calendarTransparency = isset($obj->calendar_transparency) ? (int) $obj->calendar_transparency : (int) $obj->transparency;
+				if($calendarTransparency > 0)
+					$caldata.="TRANSP:OPAQUE\n";
+				else
+					$caldata.="TRANSP:TRANSPARENT\n";
 
 			if($type=='VEVENT')
 				$caldata.="STATUS:CONFIRMED\n";
@@ -372,8 +526,10 @@ class CdavLib
 			$caldata.="\n";
 
 			$caldata.="END:".$type."\n";
-			if($bHeader)
+			if($bHeader) {
 				$caldata.="END:VCALENDAR\n";
+				$caldata = $this->mergeCalendarMetadata((int) $obj->id, $caldata);
+			}
 		}
 	   elseif(substr($obj->elem_source,0,1)=='p')		// Project Task  pe/pt
 	   {
@@ -540,6 +696,25 @@ class CdavLib
 		return $caldata;
 	}
 
+	/**
+	 * Return the stable DAV resource name for a calendar row.
+	 *
+	 * Client-created resources keep their original URI.  Old recurring rows
+	 * may share the same external URI; those must retain their unique internal
+	 * URI to avoid duplicate WebDAV collection members.
+	 *
+	 * @param object $obj Calendar database row
+	 * @param string $source Element source (ev, pe, pt or fi)
+	 * @return string
+	 */
+	public function getCalendarObjectUri($obj, $source)
+	{
+		if ($source === 'ev' && !empty($obj->uuidext) && (int) ($obj->uuidext_count ?? 1) === 1) {
+			return (string) $obj->uuidext;
+		}
+		return ((int) $obj->id).'-'.$source.'-'.CDAV_URI_KEY;
+	}
+
 	public function getFullCalendarObjects($calendarId, $bCalendarData)
 	{
 		if(function_exists("debug_log"))
@@ -570,30 +745,32 @@ class CdavLib
 			{
 				while ($obj = $this->db->fetch_object($result))
 				{
-					$calendardata = $this->toVCalendar($calid, $obj, false);
+					// Use the exact same representation as getCalendarObject so ETags
+					// stay stable between collection listings and individual GETs.
+					$calendardata = $this->toVCalendar($calid, $obj, true);
 
 					if($bCalendarData)
 					{
 						$calevents[] = [
 							'calendardata' => $calendardata,
-							'uri' => $obj->id.'-'.$elem_source.'-'.CDAV_URI_KEY,
+							'uri' => $this->getCalendarObjectUri($obj, $elem_source),
 							'lastmodified' => strtotime($obj->lastupd),
 							'etag' => '"'.md5($calendardata).'"',
 							'calendarid'   => $calendarId,
 							'size' => strlen($calendardata),
-							'component' => strpos($calendardata, 'BEGIN:VEVENT')>0 ? 'vevent' : 'vtodo',
+							'component' => strpos($calendardata, 'BEGIN:VEVENT') !== false ? 'vevent' : 'vtodo',
 						];
 					}
 					else
 					{
 						$calevents[] = [
 							// 'calendardata' => $calendardata,  not necessary because etag+size are present
-							'uri' => $obj->id.'-'.$elem_source.'-'.CDAV_URI_KEY,
+							'uri' => $this->getCalendarObjectUri($obj, $elem_source),
 							'lastmodified' => strtotime($obj->lastupd),
 							'etag' => '"'.md5($calendardata).'"',
 							'calendarid'   => $calendarId,
 							'size' => strlen($calendardata),
-							'component' => strpos($calendardata, 'BEGIN:VEVENT')>0 ? 'vevent' : 'vtodo',
+							'component' => strpos($calendardata, 'BEGIN:VEVENT') !== false ? 'vevent' : 'vtodo',
 						];
 					}
 				}

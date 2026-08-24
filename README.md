@@ -2,7 +2,7 @@
 
 ## What is it ?
 
-This module for Dolibarr 16.0/22.0 adds CardDAV / CalDAV and ICS synchronisation. It uses Dolibarr [Sabre/DAV](http://sabre.io/dav/) server library.
+This branch targets Dolibarr 23.0 (tested with 23.0.3) and adds CardDAV / CalDAV and ICS synchronisation. It uses Dolibarr [Sabre/DAV](http://sabre.io/dav/) server library.
 
 You can :
 
@@ -26,7 +26,9 @@ It is possible to select which contacts to sync with CDAV_CONTACT_TAG configurat
 
 Calendar records with "Status / Percentage" set to "Not applicable" are converted to events in CalDAV (VEVENT), others are converted to tasks (VTODO).
 
-Recurring events are partially handled (Dolibarr does not handle them fully), when a recurring event is created, it is duplicated automatically until the date specified (exculded) or the max synchronisation time range.
+Recurring events are kept as one DAV resource. Their recurrence rules, exceptions,
+invitations and alarms are preserved in the CDav metadata table while Dolibarr
+continues to own the event's title, dates, notes, location and availability.
 
 Automatic tasks generation in projects with services from linked Propositions and/or Orders 
 Module setup offer you to :
@@ -66,7 +68,7 @@ If you find the module is useful and want to finance improvements, consider to p
 
 ## How to install
 
-PHP 8.0+ is required.
+PHP 8.0+ and Dolibarr 23.0+ are required.
 
 Dolibarr native calendar module must be activated *before* installing CDav module.
 
@@ -84,6 +86,10 @@ Use these URLs in your CardDAV or CalDAV client software.
 * Disable CDav module in Interfaces Modules list.
 * Unzip last version or _git pull_ in dolibarr/htdocs/cdav
 * Enable CDav module in Modules list.
+
+After updating an existing installation, disable and enable the module once so it
+creates the `llx_cdav_scheduling` metadata table used for recurrence, invitations
+and alarms.
 
 
 ## DAV URLs
@@ -163,5 +169,3 @@ or
 To solve authentication loop, add this directive to your nginx "location" rubrique :
 
     proxy_pass_header Authorization;
-
-

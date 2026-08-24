@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '3.1.4';
+		$this->version = '4.0.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Where to store the module in setup page (0=common,1=interface,2=others,3=very specific)
@@ -104,7 +104,7 @@ class modCDav extends DolibarrModules
 		$this->requiredby = array();	// List of modules id to disable if this one is disabled
 		$this->conflictwith = array();	// List of modules id this module is in conflict with
 		$this->phpmin = array(8,0);					// Minimum version of PHP required by module
-		$this->need_dolibarr_version = array(16,0);	// Minimum version of Dolibarr required by module
+		$this->need_dolibarr_version = array(23,0);	// Minimum version of Dolibarr required by module
 		$this->langfiles = array();
 
 		// Constants
@@ -165,11 +165,6 @@ class modCDav extends DolibarrModules
         $this->tabs = array();
 
         // Dictionaries
-	    if (! isset($conf->cdav->enabled))
-        {
-        	$conf->cdav=new stdClass();
-        	$conf->cdav->enabled=0;
-        }
 		$this->dictionaries=array();
         /* Example:
         if (! isset($conf->mymodule->enabled)) $conf->mymodule->enabled=0;	// This is to avoid warnings
@@ -219,7 +214,7 @@ class modCDav extends DolibarrModules
 									'url'=>'/cdav/cdavurls.php?type=CardDAV&amp;leftmenu=contacts',
 									'langs'=>'cdav@cdav',	        // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
 									'position'=>190,
-									'enabled'=>'$conf->cdav->enabled',	// Define condition to show or hide menu entry. Use '$conf->mymodule->enabled' if entry must be visible if module is enabled.
+									'enabled'=>'isModEnabled("cdav")',
 									'perms'=>'$user->rights->societe->contact->lire', // Use 'perms'=>'$user->rights->mymodule->level1->level2' if you want your menu with a permission rules
 									'target'=>'',
 									'user'=>0);
@@ -231,7 +226,7 @@ class modCDav extends DolibarrModules
 									'url'=>'/cdav/cdavurls.php?type=CalDAV&amp;mainmenu=agenda',
 									'langs'=>'cdav@cdav',	        // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
 									'position'=>190,
-									'enabled'=>'$conf->cdav->enabled',	// Define condition to show or hide menu entry. Use '$conf->mymodule->enabled' if entry must be visible if module is enabled.
+									'enabled'=>'isModEnabled("cdav")',
 									'perms'=>'$user->rights->agenda->myactions->read', // Use 'perms'=>'$user->rights->mymodule->level1->level2' if you want your menu with a permission rules
 									'target'=>'',
 									'user'=>0);
@@ -243,7 +238,7 @@ class modCDav extends DolibarrModules
 									'url'=>'/cdav/cdavurls.php?type=ICS&amp;mainmenu=agenda',
 									'langs'=>'cdav@cdav',	        // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
 									'position'=>190,
-									'enabled'=>'$conf->cdav->enabled',	// Define condition to show or hide menu entry. Use '$conf->mymodule->enabled' if entry must be visible if module is enabled.
+									'enabled'=>'isModEnabled("cdav")',
 									'perms'=>'$user->rights->agenda->myactions->read', // Use 'perms'=>'$user->rights->mymodule->level1->level2' if you want your menu with a permission rules
 									'target'=>'',
 									'user'=>0);
@@ -330,7 +325,10 @@ class modCDav extends DolibarrModules
 				$this->error=$extrafields_prop->error;
 			}
 			
-			$result=$this->_load_tables('/cdav/sql/');
+			$result = $this->_load_tables('/cdav/sql/');
+			if ($result <= 0) {
+				return 0;
+			}
 		}
 		catch(Exception $ex)
 		{
@@ -356,4 +354,3 @@ class modCDav extends DolibarrModules
 	}
 
 }
-

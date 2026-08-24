@@ -67,10 +67,7 @@ $langs->load("cdav");
 // define CDAV_URI_KEY if not
 if(!defined('CDAV_URI_KEY'))
 {
-	if(isset($conf->global->CDAV_URI_KEY))
-		define('CDAV_URI_KEY', $conf->global->CDAV_URI_KEY);
-	else
-		define('CDAV_URI_KEY', substr(md5($_SERVER['HTTP_HOST']),0,8));
+	define('CDAV_URI_KEY', getDolGlobalString('CDAV_URI_KEY', substr(md5($_SERVER['HTTP_HOST'] ?? 'localhost'), 0, 8)));
 }
 
 // Get parameters
@@ -95,7 +92,7 @@ llxHeader('',$langs->trans($type.'url'),'');
 
 echo '<H2>'.$langs->trans($type.'url').'</H2>';
 
-if(!empty($conf->global->CDAV_QRCODE_DAVX5_ENABLED)) {
+if(getDolGlobalInt('CDAV_QRCODE_DAVX5_ENABLED')) {
 	echo '<h3>'.$langs->trans('URLForDavX5').'</h3>';
 	echo '<p>'.$langs->trans('URLForDavX5Tooltip').'</p>';
 

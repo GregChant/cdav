@@ -115,103 +115,73 @@ if(!defined('DOL_DOCUMENT_ROOT'))
 require DOL_DOCUMENT_ROOT.'/core/lib/security2.lib.php';	// auth method
 require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 
-if(!$conf->cdav->enabled)
+if(!isModEnabled('cdav'))
 	die('module CDav not enabled !');
 
 //set_error_handler("exception_error_handler", E_ERROR | E_USER_ERROR |
 //				E_CORE_ERROR | E_COMPILE_ERROR | E_RECOVERABLE_ERROR );
 
 
-require_once './lib/cdav.lib.php';
+require_once __DIR__.'/lib/cdav.lib.php';
 
 // define CDAV_CONTACT_TAG if not
 if(!defined('CDAV_CONTACT_TAG'))
 {
-	if(isset($conf->global->CDAV_CONTACT_TAG))
-		define('CDAV_CONTACT_TAG', $conf->global->CDAV_CONTACT_TAG);
-	else
-		define('CDAV_CONTACT_TAG', '');
+	define('CDAV_CONTACT_TAG', getDolGlobalInt('CDAV_CONTACT_TAG'));
 }
 
 // define CDAV_URI_KEY if not
 if(!defined('CDAV_URI_KEY'))
 {
-	if(isset($conf->global->CDAV_URI_KEY))
-		define('CDAV_URI_KEY', $conf->global->CDAV_URI_KEY);
-	else
-		define('CDAV_URI_KEY', substr(md5($_SERVER['HTTP_HOST']),0,8));
+	define('CDAV_URI_KEY', getDolGlobalString('CDAV_URI_KEY', substr(md5($_SERVER['HTTP_HOST'] ?? 'localhost'), 0, 8)));
 }
 
 // define CDAV_TASK_USER_ROLE if not
 if(!defined('CDAV_TASK_USER_ROLE'))
 {
-	if(isset($conf->global->CDAV_TASK_USER_ROLE))
-		define('CDAV_TASK_USER_ROLE', $conf->global->CDAV_TASK_USER_ROLE);
-	else
-		die('Module CDav is not properly configured : Project user role not set !');
+	define('CDAV_TASK_USER_ROLE', getDolGlobalInt('CDAV_TASK_USER_ROLE'));
 }
 
 // define CDAV_SYNC_PAST if not
 if(!defined('CDAV_SYNC_PAST'))
 {
-	if(isset($conf->global->CDAV_SYNC_PAST))
-		define('CDAV_SYNC_PAST', $conf->global->CDAV_SYNC_PAST);
-	else
-		die('Module CDav is not properly configured : Period to sync not set !');
+	define('CDAV_SYNC_PAST', getDolGlobalInt('CDAV_SYNC_PAST', 31));
 }
 
 // define CDAV_SYNC_FUTURE if not
 if(!defined('CDAV_SYNC_FUTURE'))
 {
-	if(isset($conf->global->CDAV_SYNC_FUTURE))
-		define('CDAV_SYNC_FUTURE', $conf->global->CDAV_SYNC_FUTURE);
-	else
-		die('Module CDav is not properly configured : Period to sync not set !');
+	define('CDAV_SYNC_FUTURE', getDolGlobalInt('CDAV_SYNC_FUTURE', 365));
 }
 
 // define CDAV_TASK_SYNC if not
 if(!defined('CDAV_TASK_SYNC'))
 {
-	if(isset($conf->global->CDAV_TASK_SYNC))
-		define('CDAV_TASK_SYNC', $conf->global->CDAV_TASK_SYNC);
-	else
-		define('CDAV_TASK_SYNC', '0');
+	define('CDAV_TASK_SYNC', getDolGlobalInt('CDAV_TASK_SYNC'));
 }
 
 // define CDAV_INTERV_SYNC if not
 if(!defined('CDAV_INTERV_SYNC'))
 {
-	if(isset($conf->global->CDAV_INTERV_SYNC))
-		define('CDAV_INTERV_SYNC', $conf->global->CDAV_INTERV_SYNC);
-	else
-		define('CDAV_INTERV_SYNC', '0');
+	define('CDAV_INTERV_SYNC', getDolGlobalInt('CDAV_INTERV_SYNC'));
 }
 
 // define CDAV_INTERV_USER_ROLE if not
 if(!defined('CDAV_INTERV_USER_ROLE'))
 {
-	if(isset($conf->global->CDAV_INTERV_USER_ROLE))
-		define('CDAV_INTERV_USER_ROLE', $conf->global->CDAV_INTERV_USER_ROLE);
-	else
-		define('CDAV_INTERV_USER_ROLE', '0');
+	define('CDAV_INTERV_USER_ROLE', getDolGlobalInt('CDAV_INTERV_USER_ROLE'));
 }
 
 // define CDAV_THIRD_SYNC if not
 if(!defined('CDAV_THIRD_SYNC'))
 {
-	if(isset($conf->global->CDAV_THIRD_SYNC))
-		define('CDAV_THIRD_SYNC', $conf->global->CDAV_THIRD_SYNC);
-	else
-		define('CDAV_THIRD_SYNC', '0');
+	define('CDAV_THIRD_SYNC', getDolGlobalInt('CDAV_THIRD_SYNC'));
 }
 
 // define CDAV_MEMBER_SYNC if not
 if(!defined('CDAV_MEMBER_SYNC'))
 {
-	if(isset($conf->global->CDAV_MEMBER_SYNC))
-		define('CDAV_MEMBER_SYNC', $conf->global->CDAV_MEMBER_SYNC);
-	else
-		define('CDAV_MEMBER_SYNC', '0');
+	define('CDAV_MEMBER_SYNC', getDolGlobalInt('CDAV_MEMBER_SYNC'));
 }
 
 // 0 < CDAV_ADDRESSBOOK_ID_SHIFT = Contacts
@@ -226,9 +196,9 @@ use Sabre\DAVACL;
 
 // The autoloader
 require DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
-require './class/PrincipalsDolibarr.php';
-require './class/CardDAVDolibarr.php';
-require './class/CalDAVDolibarr.php';
+require __DIR__.'/class/PrincipalsDolibarr.php';
+require __DIR__.'/class/CardDAVDolibarr.php';
+require __DIR__.'/class/CalDAVDolibarr.php';
 
 $user = new User($db);
 
@@ -273,9 +243,9 @@ $authBackend = new DAV\Auth\Backend\BasicCallBack(function ($username, $password
 		$dolibarr_main_authentication='http,dolibarr';
 	$authmode = explode(',',$dolibarr_main_authentication);
 	$entity = (GETPOST('entity','int') ? GETPOST('entity','int') : (!empty($conf->entity) ? $conf->entity : 1));
-	if( ((float) DOL_VERSION < 11.0) && checkLoginPassEntity($username,$password,$entity,$authmode)!=$username
+	if( (version_compare(DOL_VERSION, '11.0', '<')) && checkLoginPassEntity($username,$password,$entity,$authmode)!=$username
 		||
-		((float) DOL_VERSION >= 11.0) && checkLoginPassEntity($username,$password,$entity,$authmode,'dav')!=$username )
+		(version_compare(DOL_VERSION, '11.0', '>=')) && checkLoginPassEntity($username,$password,$entity,$authmode,'dav')!=$username )
 	{
 		debug_log("Authentication failed 4 for user $username with pass ".str_pad('', strlen($password), '*'));
 		return false;
