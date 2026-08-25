@@ -57,7 +57,13 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/barcode.lib.php'; // This is to include def like $genbarcode_loc and $font_loc
 
 function base64url_encode($data) {
-  return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+	return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+}
+
+/** Build a tamper-proof ICS subscription token. */
+function cdav_create_ics_token($userId, $type) {
+	$payload = ((int) $userId).'+ø+'.(string) $type;
+	return base64url_encode($payload.'.'.hash_hmac('sha256', $payload, CDAV_URI_KEY, true));
 }
 
 // Load traductions files requiredby by page
@@ -110,51 +116,52 @@ if(getDolGlobalInt('CDAV_QRCODE_DAVX5_ENABLED')) {
 if($type=='CardDAV')
 {
 	echo '<h3>'.$langs->trans('URLGeneric').'</h3>';
+	$serverUrl = dol_buildpath('cdav/server.php', 2);
+	$principalUrl = $serverUrl.'/principals/'.rawurlencode($user->login).'/';
 	echo '<PRE>';
-	echo dol_buildpath('cdav', 2)."\n";
-	echo dol_buildpath('cdav/server.php', 2)."\n";
-	echo dol_buildpath('cdav', 2)."/server.php/principals/".$user->login."/";
+	echo dol_escape_htmltag(dol_buildpath('cdav', 2))."\n";
+	echo dol_escape_htmltag($serverUrl)."\n";
+	echo dol_escape_htmltag($principalUrl);
 	echo '</PRE>';
 
 	echo '<h3>'.$langs->trans('URLforCardDAV', 2).'</h3>';
-	echo '<PRE>'.dol_buildpath('cdav/server.php', 2).'/addressbooks/'.$user->login.'/default/</PRE>';
+	echo '<PRE>'.dol_escape_htmltag($serverUrl.'/addressbooks/'.rawurlencode($user->login).'/default/').'</PRE>';
 }
 elseif($type=='CalDAV')
 {
 	echo '<h3>'.$langs->trans('URLGeneric').'</h3>';
+	$serverUrl = dol_buildpath('cdav/server.php', 2);
+	$principalUrl = $serverUrl.'/principals/'.rawurlencode($user->login).'/';
 	echo '<PRE>';
-	echo dol_buildpath('cdav', 2)."\n";
-	echo dol_buildpath('cdav/server.php', 2)."\n";
-	echo dol_buildpath('cdav', 2)."/server.php/principals/".$user->login."/";
+	echo dol_escape_htmltag(dol_buildpath('cdav', 2))."\n";
+	echo dol_escape_htmltag($serverUrl)."\n";
+	echo dol_escape_htmltag($principalUrl);
 	echo '</PRE>';
 
 	echo '<h3>'.$langs->trans('URLforCalDAV').'</h3>';
 
 	if(isset($user->rights->agenda->allactions->read) && $user->rights->agenda->allactions->read)
 	{
-		if (versioncompare(versiondolibarrarray(), array(3,7,9))>0)
-			$fk_soc_fieldname = 'fk_soc';
-		else
-			$fk_soc_fieldname = 'fk_societe';
-
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname
-			FROM '.MAIN_DB_PREFIX.'user u WHERE '.$fk_soc_fieldname.' IS NULL
-			AND u.fk_soc IS NULL AND u.statut = 1
-			ORDER BY login';
+			FROM '.MAIN_DB_PREFIX.'user u WHERE u.fk_soc IS NULL
+			AND u.statut = 1 AND u.entity IN ('.getEntity('user').')
+			ORDER BY u.login';
 		$result = $db->query($sql);
 		while($row = $db->fetch_array($result))
 		{
 			if($row['rowid'] == $user->id)
 				echo '<strong>';
-			echo $row['firstname'].' '.$row['lastname'].' :';
-			echo '<PRE>'.dol_buildpath('cdav/server.php', 2).'/calendars/'.$user->login.'/'.$row['rowid'].'-cal-'.$row['login'].'</PRE><br/>';
+			echo dol_escape_htmltag(trim($row['firstname'].' '.$row['lastname'])).' :';
+			$calendarUrl = $serverUrl.'/calendars/'.rawurlencode($user->login).'/'.$row['rowid'].'-cal-'.rawurlencode($row['login']);
+			echo '<PRE>'.dol_escape_htmltag($calendarUrl).'</PRE><br/>';
 			if($row['rowid'] == $user->id)
 				echo '</strong>';
 		}
 	}
 	else
 	{
-		echo '<PRE>'.dol_buildpath('cdav/server.php', 2).'/calendars/'.$user->login.'/'.$user->id.'-cal-'.$user->login.'</PRE>';
+		$calendarUrl = $serverUrl.'/calendars/'.rawurlencode($user->login).'/'.$user->id.'-cal-'.rawurlencode($user->login);
+		echo '<PRE>'.dol_escape_htmltag($calendarUrl).'</PRE>';
 	}
 
 }
@@ -165,29 +172,28 @@ elseif($type=='ICS')
 
 	if(isset($user->rights->agenda->allactions->read) && $user->rights->agenda->allactions->read)
 	{
-		if (versioncompare(versiondolibarrarray(), array(3,7,9))>0)
-			$fk_soc_fieldname = 'fk_soc';
-		else
-			$fk_soc_fieldname = 'fk_societe';
-
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname
-			FROM '.MAIN_DB_PREFIX.'user u WHERE '.$fk_soc_fieldname.' IS NULL
-			AND u.fk_soc IS NULL  AND u.statut = 1
-			ORDER BY login';
+			FROM '.MAIN_DB_PREFIX.'user u WHERE u.fk_soc IS NULL
+			AND u.statut = 1 AND u.entity IN ('.getEntity('user').')
+			ORDER BY u.login';
 		$result = $db->query($sql);
 		while($row = $db->fetch_array($result))
 		{
-			echo '<h4>'.$row['firstname'].' '.$row['lastname'].' :</h4>';
+			echo '<h4>'.dol_escape_htmltag(trim($row['firstname'].' '.$row['lastname'])).' :</h4>';
 
-			echo "<PRE>".$langs->trans('Full')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($row['rowid'].'+ø+full', 'aes-256-cbc', CDAV_URI_KEY, true))."\n\n";
-			echo $langs->trans('NoLabel')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($row['rowid'].'+ø+nolabel', 'aes-256-cbc', CDAV_URI_KEY, true)).'</PRE><br/>';
+			$fullUrl = dol_buildpath('cdav/ics.php', 2).'?token='.cdav_create_ics_token($row['rowid'], 'full');
+			$busyUrl = dol_buildpath('cdav/ics.php', 2).'?token='.cdav_create_ics_token($row['rowid'], 'nolabel');
+			echo '<PRE>'.dol_escape_htmltag($langs->trans('Full')." :\n".$fullUrl."\n\n");
+			echo dol_escape_htmltag($langs->trans('NoLabel')." :\n".$busyUrl).'</PRE><br/>';
 
 		}
 	}
 	else
 	{
-		echo "<PRE>".$langs->trans('Full')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($user->id.'+ø+full', 'aes-256-cbc', CDAV_URI_KEY, true))."\n\n";
-		echo $langs->trans('NoLabel')." :\n".dol_buildpath('cdav/ics.php', 2).'?token='.base64url_encode(openssl_encrypt($user->id.'+ø+nolabel', 'aes-256-cbc', CDAV_URI_KEY, true)).'</PRE><br/>';
+		$fullUrl = dol_buildpath('cdav/ics.php', 2).'?token='.cdav_create_ics_token($user->id, 'full');
+		$busyUrl = dol_buildpath('cdav/ics.php', 2).'?token='.cdav_create_ics_token($user->id, 'nolabel');
+		echo '<PRE>'.dol_escape_htmltag($langs->trans('Full')." :\n".$fullUrl."\n\n");
+		echo dol_escape_htmltag($langs->trans('NoLabel')." :\n".$busyUrl).'</PRE><br/>';
 	}
 
 }

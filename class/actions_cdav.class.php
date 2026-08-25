@@ -286,7 +286,9 @@ class ActionsCDav
 					if (is_numeric($defaultref) && $defaultref <= 0) $defaultref = '';
 
 					$label = trim($label);
-					$desc = trim(strip_tags($rTasksDesc[$taskid]));
+					// Use Dolibarr's native rich-text cleaner so entities and line
+					// breaks from the WYSIWYG editor are preserved correctly.
+					$desc = dol_string_nohtmltag($rTasksDesc[$taskid], 0, 'UTF-8');
 
 					if (empty($label)) {
 						$descLines = explode("\n", $desc);

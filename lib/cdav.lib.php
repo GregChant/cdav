@@ -8,6 +8,8 @@
 
 class CdavLib
 {
+	/** Change this value whenever the generated DAV representation changes. */
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-08-html-text-v1';
 
 	private $db;
 
@@ -23,6 +25,72 @@ class CdavLib
 		$this->user 	= $user;
 		$this->db 		= $db;
 		$this->langs 	= $langs;
+	}
+
+	/**
+	 * Convert Dolibarr rich text to readable plain text while preserving lines.
+	 * dol_string_nohtmltag() is the canonical Dolibarr HTML/entity cleaner.
+	 */
+	private function cleanDolibarrText($value)
+	{
+		$value = (string) $value;
+		if ($value === '') {
+			return '';
+		}
+
+		// Preserve the visual structure of WYSIWYG block elements before the
+		// native cleaner removes their tags. It already converts <br> itself.
+		$value = preg_replace('/<\s*li\b[^>]*>/i', '- ', $value);
+		$value = preg_replace('/<\s*\/\s*(?:p|div|li|ul|ol|h[1-6]|blockquote|tr)\s*>/i', "\n", $value);
+		$value = dol_string_nohtmltag($value, 0, 'UTF-8');
+		$value = str_replace("\xC2\xA0", ' ', $value);
+		$value = str_replace(array("\r\n", "\r"), "\n", $value);
+		$value = preg_replace('/[ \t]+\n/', "\n", $value);
+		$value = preg_replace('/\n{3,}/', "\n\n", $value);
+		return trim($value);
+	}
+
+	/** RFC 5545 TEXT escaping. */
+	private function escapeICalendarText($value)
+	{
+		return strtr((string) $value, array(
+			'\\' => '\\\\',
+			';' => '\\;',
+			',' => '\\,',
+			"\r\n" => '\\n',
+			"\r" => '\\n',
+			"\n" => '\\n',
+		));
+	}
+
+	private function cleanAndEscapeICalendarText($value)
+	{
+		return $this->escapeICalendarText($this->cleanDolibarrText($value));
+	}
+
+	private function formatChecklistText($value)
+	{
+		$value = $this->cleanDolibarrText($value);
+		return ltrim(strtr("\n".$value, array(
+			"\n- [" => "\n[",
+			"\n- " => "\n[ ] ",
+			"[x] [ ]" => "[x]",
+			"[ ] [x]" => "[x]",
+			"[x] [x]" => "[x]",
+			"[ ] [ ]" => "[ ]",
+		)), "\n");
+	}
+
+	private function addDescriptionPart(array &$parts, $prefix, $value, $repeatPrefix = false)
+	{
+		$value = $this->cleanDolibarrText($value);
+		if ($value === '') {
+			return;
+		}
+		if ($repeatPrefix) {
+			$value = str_replace("\n", "\n".$prefix, $value);
+		}
+		$parts[] = $prefix.$value;
 	}
 
 	private function schedulingTableAvailable()
@@ -249,7 +317,7 @@ class CdavLib
 		}
 
 		sort($tokens, SORT_STRING);
-		return sha1(CDAV_URI_KEY.'|'.implode('|', $tokens));
+		return sha1(CDAV_URI_KEY.'|'.self::CALENDAR_SERIALIZATION_VERSION.'|'.implode('|', $tokens));
 	}
 	/**
 	 * Base sql request for project tasks
@@ -451,10 +519,10 @@ class CdavLib
 			if($obj->sourceuid=='')
 				$caldata.="UID:".$obj->id.'-ev-'./*$calid.'-cal-'.*/ CDAV_URI_KEY."\n";
 			else
-				$caldata.="UID:".$obj->sourceuid."\n";
-			$caldata.="SUMMARY:".strtr(trim($obj->label), array("\n"=>"\\n", "\r"=>""))."\n";
+				$caldata.="UID:".$this->escapeICalendarText($obj->sourceuid)."\n";
+			$caldata.="SUMMARY:".$this->cleanAndEscapeICalendarText($obj->label)."\n";
 			$caldata.="URL:".dol_buildpath("/comm/action/card.php?id=".$obj->id, 2)."\n";
-			$caldata.="LOCATION:".strtr(trim($location), array("\n"=>"\\n", "\r"=>""))."\n";
+			$caldata.="LOCATION:".$this->cleanAndEscapeICalendarText($location)."\n";
 			$caldata.="PRIORITY:".$obj->priority."\n";
 			if($obj->fulldayevent)
 			{
@@ -501,29 +569,28 @@ class CdavLib
 				$caldata.="PERCENT-COMPLETE:".$obj->percent."\n";
 			}
 
-			$caldata.="DESCRIPTION:";
-			if(!empty($obj->proj_ref))
-				$caldata.="💼📋 [".$obj->proj_ref."] ".$obj->proj_title."\\n";
-			if(!empty($obj->proj_desc))
-				$caldata.="💼⚠️ ".strtr(trim(strip_tags($obj->proj_desc)), array("\n"=>"\\n💼⚠️ ", "\r"=>""))."\\n";
-			if(!empty($obj->soc_town))
-				$caldata.="💼🏁 ".strtr(trim($obj->soc_town), array("\n"=>"\\n", "\r"=>""))."\\n";
-			if(!empty($obj->soc_nom))
-				$caldata.="💼🏢 ".strtr(trim($obj->soc_nom), array("\n"=>"\\n", "\r"=>""))."\\n";
-			if(!empty($obj->soc_phone))
-				$caldata.="💼☎️ ".$obj->soc_phone."\\n";
-			if(!empty($obj->firstname) || !empty($obj->lastname))
-				$caldata.="💼👨 ".trim($obj->firstname.' '.$obj->lastname)."\\n";
-			if(!empty($obj->phone) || !empty($obj->phone_perso) || !empty($obj->phone_mobile))
-				$caldata.="💼📞 ".trim($obj->phone.' '.$obj->phone_perso.' '.$obj->phone_mobile)."\\n";
+			$descriptionParts = array();
+			if (!empty($obj->proj_ref))
+				$this->addDescriptionPart($descriptionParts, '💼📋 ', '['.$obj->proj_ref.'] '.$obj->proj_title);
+			if (!empty($obj->proj_desc))
+				$this->addDescriptionPart($descriptionParts, '💼⚠️ ', $obj->proj_desc, true);
+			if (!empty($obj->soc_town))
+				$this->addDescriptionPart($descriptionParts, '💼🏁 ', $obj->soc_town);
+			if (!empty($obj->soc_nom))
+				$this->addDescriptionPart($descriptionParts, '💼🏢 ', $obj->soc_nom);
+			if (!empty($obj->soc_phone))
+				$this->addDescriptionPart($descriptionParts, '💼☎️ ', $obj->soc_phone);
+			if (!empty($obj->firstname) || !empty($obj->lastname))
+				$this->addDescriptionPart($descriptionParts, '💼👨 ', trim($obj->firstname.' '.$obj->lastname));
+			if (!empty($obj->phone) || !empty($obj->phone_perso) || !empty($obj->phone_mobile))
+				$this->addDescriptionPart($descriptionParts, '💼📞 ', trim($obj->phone.' '.$obj->phone_perso.' '.$obj->phone_mobile));
 	// removed because unable to swap from one calendar to an other with extrenal client
 	//		if(strpos($obj->other_users,',')) // several
-	//			$caldata.="💼USR: ".$obj->other_users."\\n";
-			if($type=='VEVENT')
-				$caldata.=strtr(trim($obj->note), array("\n"=>"\\n", "\r"=>""));
-			else
-				$caldata.=strtr("\n".trim($obj->note), array("\n- ["=>"\\n[", "\n- "=>"\\n[ ] ", "[x] [ ]"=>"[x]", "[ ] [x]"=>"[x]", "[x] [x]"=>"[x]", "[ ] [ ]"=>"[ ]", "\n"=>"\\n", "\r"=>""));
-			$caldata.="\n";
+	//			$this->addDescriptionPart($descriptionParts, '💼USR: ', $obj->other_users);
+			$note = $type == 'VEVENT' ? $this->cleanDolibarrText($obj->note) : $this->formatChecklistText($obj->note);
+			if ($note !== '')
+				$descriptionParts[] = $note;
+			$caldata.="DESCRIPTION:".$this->escapeICalendarText(implode("\n", $descriptionParts))."\n";
 
 			$caldata.="END:".$type."\n";
 			if($bHeader) {
@@ -551,17 +618,22 @@ class CdavLib
 
 			$timezone = date_default_timezone_get();
 
-			$caldata ="BEGIN:VCALENDAR\n";
-			$caldata.="VERSION:2.0\n";
-			$caldata.="PRODID:-//Dolibarr CDav//FR\n";
+			$caldata ="";
+			if($bHeader)
+			{
+				$caldata ="BEGIN:VCALENDAR\n";
+				$caldata.="VERSION:2.0\n";
+				$caldata.="PRODID:-//Dolibarr CDav//FR\n";
+			}
 			$caldata.="BEGIN:".$type."\n";
 			$caldata.="CREATED:".gmdate('Ymd\THis', strtotime($obj->datec))."Z\n";
 			$caldata.="LAST-MODIFIED:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
 			$caldata.="DTSTAMP:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
 			$caldata.="UID:".$obj->id.'-'.$obj->elem_source.'-'./*$calid.'-cal-'.*/ CDAV_URI_KEY."\n";
-			$caldata.="SUMMARY:[".strtr(trim($obj->proj_title), array("\n"=>"\\n", "\r"=>""))."]".strtr(trim($obj->label), array("\n"=>"\\n", "\r"=>""))."\n";
+			$summary = '['.$this->cleanDolibarrText($obj->proj_title).'] '.$this->cleanDolibarrText($obj->label);
+			$caldata.="SUMMARY:".$this->escapeICalendarText(trim($summary))."\n";
 			$caldata.="URL:".dol_buildpath("/projet/tasks/task.php?id=".$obj->id."&withproject=".$obj->fk_projet,2)."\n";
-			$caldata.="LOCATION:".strtr(trim($location), array("\n"=>"\\n", "\r"=>""))."\n";
+			$caldata.="LOCATION:".$this->cleanAndEscapeICalendarText($location)."\n";
 			$caldata.="PRIORITY:".$obj->priority."\n";
 
 			$caldata.="DTSTART;TZID=".$timezone.":".strtr($obj->dateo,array(" "=>"T", ":"=>"", "-"=>""))."\n";
@@ -590,29 +662,31 @@ class CdavLib
 				$caldata.="PERCENT-COMPLETE:".$obj->progress."\n";
 			}
 
-			$caldata.="DESCRIPTION:";
+			$descriptionParts = array();
 			if(!empty($obj->proj_desc))
-				$caldata.="💼⚠️ ".strtr(trim(strip_tags($obj->proj_desc)), array("\n"=>"\\n💼⚠️ ", "\r"=>""))."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼⚠️ ', $obj->proj_desc, true);
 			if(!empty($obj->soc_town))
-				$caldata.="💼🏁 ".$obj->soc_town."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼🏁 ', $obj->soc_town);
 			if(!empty($obj->soc_nom))
-				$caldata.="💼🏢 ".$obj->soc_nom."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼🏢 ', $obj->soc_nom);
 			if(!empty($obj->soc_phone))
-				$caldata.="💼☎️ ".$obj->soc_phone."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼☎️ ', $obj->soc_phone);
 			if(!empty($obj->other_contacts))
-				$caldata.="💼👨 ".$obj->other_contacts."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼👨 ', $obj->other_contacts);
 			if(!empty($obj->proj_ref))
-				$caldata.="💼📋 [".$obj->proj_ref."/".$obj->ref."] ".$obj->proj_title."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼📋 ', '['.$obj->proj_ref.'/'.$obj->ref.'] '.$obj->proj_title);
 			if(!empty($obj->note_public))
-				$caldata.="💼📝 ".strtr(trim(strip_tags($obj->note_public)), array("\n"=>"\\n💼📝 ", "\r"=>""))."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼📝 ', $obj->note_public, true);
 	//removed because unable to swap from one calendar to an other with external client
 	//		if(!empty($obj->note_private))
-	//			$caldata.="💼🔒 ".strtr(trim(strip_tags($obj->note_private)), array("\n"=>"\\n💼🔒 ", "\r"=>""))."\\n";
-			$caldata.=strtr("\n".trim($obj->description), array("\n- ["=>"\\n[", "\n- "=>"\\n[ ] ", "[x] [ ]"=>"[x]", "[ ] [x]"=>"[x]", "[x] [x]"=>"[x]", "[ ] [ ]"=>"[ ]", "\n"=>"\\n", "\r"=>""));
+	//			$this->addDescriptionPart($descriptionParts, '💼🔒 ', $obj->note_private, true);
+			$description = $this->formatChecklistText($obj->description);
+			if ($description !== '')
+				$descriptionParts[] = $description;
 	// removed because unable to swap from one calendar to an other with external client
 	//		if(strpos($obj->other_users,',')) // several
-	//			$caldata.="💼USR: ".$obj->other_users."\\n";
-			$caldata.="\n";
+	//			$this->addDescriptionPart($descriptionParts, '💼USR: ', $obj->other_users);
+			$caldata.="DESCRIPTION:".$this->escapeICalendarText(implode("\n", $descriptionParts))."\n";
 
 			$caldata.="END:".$type."\n";
 			if($bHeader)
@@ -651,9 +725,9 @@ class CdavLib
 			if($summary=='')
 				$summary = trim($obj->soc_nom);
 			$summary = '['.trim($obj->fi_ref).'] '.$summary;
-			$caldata.="SUMMARY:".strtr($summary, array("\n"=>" ", "\r"=>""))."\n";
+			$caldata.="SUMMARY:".$this->cleanAndEscapeICalendarText($summary)."\n";
 			$caldata.="URL:".dol_buildpath("/fichinter/card.php?id=".$obj->fi_id, 2)."\n";
-			$caldata.="LOCATION:".strtr(trim($location), array("\n"=>"\\n", "\r"=>""))."\n";
+			$caldata.="LOCATION:".$this->cleanAndEscapeICalendarText($location)."\n";
 
 			// fichinterdet.date is DATETIME, fichinterdet.duree is in seconds
 			$startTs = strtotime($obj->det_date);
@@ -667,30 +741,37 @@ class CdavLib
 			$caldata.="TRANSP:OPAQUE\n";
 			$caldata.="STATUS:CONFIRMED\n";
 
-			$caldata.="DESCRIPTION:";
+			$descriptionParts = array();
 			if(!empty($obj->proj_ref))
-				$caldata.="💼📋 [".$obj->proj_ref."] ".$obj->proj_title."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼📋 ', '['.$obj->proj_ref.'] '.$obj->proj_title);
 			if(!empty($obj->proj_desc))
-				$caldata.="💼⚠️ ".strtr(trim(strip_tags($obj->proj_desc)), array("\n"=>"\\n💼⚠️ ", "\r"=>""))."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼⚠️ ', $obj->proj_desc, true);
 			if(!empty($obj->soc_nom))
-				$caldata.="💼🏢 ".$obj->soc_nom."\\n";
-			if(!empty($obj->proj_ref))
-				$caldata.="💼📋 [".$obj->proj_ref."] ".$obj->proj_title."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼🏢 ', $obj->soc_nom);
 			if(!empty($obj->soc_town))
-				$caldata.="💼🏁 ".$obj->soc_town."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼🏁 ', $obj->soc_town);
 			if(!empty($obj->soc_phone))
-				$caldata.="💼☎️ ".$obj->soc_phone."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼☎️ ', $obj->soc_phone);
 			if(!empty($obj->other_contacts))
-				$caldata.="💼👨 ".$obj->other_contacts."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼👨 ', $obj->other_contacts);
 			if(!empty($obj->fi_note_public))
-				$caldata.="💼📝 ".strtr(trim(strip_tags($obj->fi_note_public)), array("\n"=>"\\n💼📝 ", "\r"=>""))."\\n";
+				$this->addDescriptionPart($descriptionParts, '💼📝 ', $obj->fi_note_public, true);
 			if(!empty($obj->det_description))
-				$caldata.=strtr(trim(strip_tags($obj->det_description)), array("\n"=>"\\n", "\r"=>""));
-			$caldata.="\n";
+				$descriptionParts[] = $this->cleanDolibarrText($obj->det_description);
+			$caldata.="DESCRIPTION:".$this->escapeICalendarText(implode("\n", $descriptionParts))."\n";
 
 			$caldata.="END:".$type."\n";
 			if($bHeader)
 				$caldata.="END:VCALENDAR\n";
+		}
+
+		if ($bHeader && $caldata !== '') {
+			try {
+				// Let Sabre normalize CRLF, escape properties and fold long lines.
+				$caldata = \Sabre\VObject\Reader::read($caldata)->serialize();
+			} catch (\Throwable $e) {
+				dol_syslog(__METHOD__.': invalid generated calendar: '.$e->getMessage(), LOG_ERR);
+			}
 		}
 
 		return $caldata;

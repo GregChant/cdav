@@ -25,7 +25,9 @@ function llxHeader() { }
 function llxFooter() { }
 
 function base64url_decode($data) {
-  return base64_decode(str_pad(strtr($data, '-_', '+/'), strlen($data) % 4, '=', STR_PAD_RIGHT));
+	$data = strtr((string) $data, '-_', '+/');
+	$data .= str_repeat('=', (4 - strlen($data) % 4) % 4);
+	return base64_decode($data, true);
 } 
 
 // Load Dolibarr environment
@@ -61,6 +63,7 @@ if (!$res) {
 }
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
+require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
 
 // Load traductions files requiredby by page
 $langs->load("cdav");
@@ -135,61 +138,103 @@ if(!defined('CDAV_MEMBER_SYNC'))
 // 2*CDAV_ADDRESSBOOK_ID_SHIFT < 3*CDAV_ADDRESSBOOK_ID_SHIFT = Members
 define('CDAV_ADDRESSBOOK_ID_SHIFT', 100000);
 
-//parse Token
-$arrTmp = explode('+ø+', openssl_decrypt(base64url_decode(GETPOST('token')), 'aes-256-cbc', CDAV_URI_KEY, true));
-
-if(!is_array($arrTmp) || count($arrTmp)<2)
-{
-	// use old encryption algo bf-ecb
-	$arrTmp = explode('+ø+', openssl_decrypt(base64url_decode(GETPOST('token')), 'bf-ecb', CDAV_URI_KEY, true));
+// Parse the signed token. Keep the historical encrypted formats readable so
+// existing subscriptions continue to work after the module upgrade.
+$tokenData = base64url_decode(GETPOST('token', 'alphanohtml'));
+$tokenPayload = false;
+if (is_string($tokenData) && strlen($tokenData) > 33 && substr($tokenData, -33, 1) === '.') {
+	$payload = substr($tokenData, 0, -33);
+	$signature = substr($tokenData, -32);
+	if (hash_equals(hash_hmac('sha256', $payload, CDAV_URI_KEY, true), $signature)) {
+		$tokenPayload = $payload;
+	}
 }
+if ($tokenPayload === false && is_string($tokenData)) {
+	$tokenPayload = @openssl_decrypt($tokenData, 'aes-256-cbc', CDAV_URI_KEY, true);
+	if ($tokenPayload === false) {
+		$tokenPayload = @openssl_decrypt($tokenData, 'bf-ecb', CDAV_URI_KEY, true);
+	}
+}
+$arrTmp = is_string($tokenPayload) ? explode('+ø+', $tokenPayload, 2) : array();
 
-if (! isset($arrTmp[1]) || ! in_array(trim($arrTmp[1]), array('nolabel', 'full')))
+if (count($arrTmp) !== 2 || !ctype_digit(trim($arrTmp[0])) || (int) trim($arrTmp[0]) <= 0 || !in_array(trim($arrTmp[1]), array('nolabel', 'full'), true))
 {
+	http_response_code(403);
 	echo 'Unauthorized Access !';
 	exit;
 }
 
-$id 	= trim($arrTmp[0]);
+$id 	= (int) trim($arrTmp[0]);
 $type 	= trim($arrTmp[1]);
+
+// Refuse deleted, inactive, external or cross-entity users even if an old
+// token is still known.
+$sql = 'SELECT u.rowid FROM '.MAIN_DB_PREFIX.'user AS u'
+	.' WHERE u.rowid = '.$id
+	.' AND u.statut = 1 AND u.fk_soc IS NULL'
+	.' AND u.entity IN ('.getEntity('user').')';
+$result = $db->query($sql);
+if (!$result || !$db->fetch_object($result)) {
+	http_response_code(403);
+	echo 'Unauthorized Access !';
+	exit;
+}
 
 header('Content-type: text/calendar; charset=utf-8');
 header('Content-Disposition: attachment; filename=Calendar-'.$id.'-'.$type.'.ics');
 
-//fake user having right on this calendar
-$user = new stdClass();
+// Use a real Dolibarr User object. Replacing the bootstrap's global $user with
+// stdClass used to break core logging and permission helpers (hasRight()).
+require_once DOL_DOCUMENT_ROOT.'/user/class/user.class.php';
+$calendarUser = new User($db);
+if ($calendarUser->fetch($id) <= 0) {
+	http_response_code(403);
+	echo 'Unauthorized Access !';
+	exit;
+}
+$calendarUser->rights = new stdClass();
+$calendarUser->rights->agenda = new stdClass();
+$calendarUser->rights->agenda->myactions = new stdClass();
+$calendarUser->rights->agenda->allactions = new stdClass();
+$calendarUser->rights->societe = new stdClass();
+$calendarUser->rights->societe->client = new stdClass();
+$calendarUser->rights->agenda->myactions->read = true;
+$calendarUser->rights->agenda->allactions->read = true;
+$calendarUser->rights->societe->client->voir = false;
 
-$user->rights = new stdClass();
-$user->rights->agenda = new stdClass();
-$user->rights->agenda->myactions = new stdClass();
-$user->rights->agenda->allactions = new stdClass();
-$user->rights->societe = new stdClass();
-$user->rights->societe->client = new stdClass();
+$cdavLib = new CdavLib($calendarUser, $db, $langs);
 
-$user->id = $id;
-$user->rights->agenda->myactions->read = true;
-$user->rights->agenda->allactions->read = true;
-$user->rights->societe->client->voir = false;
-
-$cdavLib = new CdavLib($user, $db, $langs);
-
-//Format them
+// Format them as one valid VCALENDAR document. getFullCalendarObjects()
+// returns one complete VCALENDAR per object; concatenating those documents
+// used to create invalid nested calendars.
 $arrEvents = $cdavLib->getFullCalendarObjects($id, true);
-
-echo "BEGIN:VCALENDAR\n";
-echo "VERSION:2.0\n";
-echo "PRODID:-//Dolibarr CDav//FR\n";
+$calendar = new \Sabre\VObject\Component\VCalendar();
+$calendar->PRODID = '-//Dolibarr CDav//FR';
+$timezones = array();
 foreach($arrEvents as $event)
 {
-	if ($type == 'nolabel')
-	{
-		//Remove SUMMARY / DESCRIPTION / LOCATION
-		$event['calendardata'] = preg_replace('#SUMMARY:.*[^\n]#', 'SUMMARY:'.$langs->trans('Busy'), $event['calendardata']);//FIXME translate busy !!
-		$event['calendardata'] = preg_replace('#DESCRIPTION:.*[^\n]#', 'DESCRIPTION:.', $event['calendardata']);
-		$event['calendardata'] = preg_replace('#LOCATION:.*[^\n]#', 'LOCATION:', $event['calendardata']);
-		echo $event['calendardata'];
+	try {
+		$sourceCalendar = \Sabre\VObject\Reader::read($event['calendardata']);
+	} catch (\Throwable $e) {
+		dol_syslog('cdav/ics.php: skipped invalid calendar object: '.$e->getMessage(), LOG_ERR);
+		continue;
 	}
-	else
-		echo $event['calendardata'];
+	foreach ($sourceCalendar->children() as $component) {
+		if ($component->name === 'VEVENT' || $component->name === 'VTODO') {
+			$component = clone $component;
+			if ($type === 'nolabel') {
+				$component->SUMMARY = $langs->transnoentitiesnoconv('Busy');
+				$component->DESCRIPTION = '.';
+				$component->LOCATION = '';
+			}
+			$calendar->add($component);
+		} elseif ($component->name === 'VTIMEZONE') {
+			$timezoneId = isset($component->TZID) ? (string) $component->TZID : md5($component->serialize());
+			if (!isset($timezones[$timezoneId])) {
+				$calendar->add(clone $component);
+				$timezones[$timezoneId] = true;
+			}
+		}
+	}
 }
-echo "END:VCALENDAR\n";
+echo $calendar->serialize();

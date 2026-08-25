@@ -30,6 +30,10 @@ Recurring events are kept as one DAV resource. Their recurrence rules, exception
 invitations and alarms are preserved in the CDav metadata table while Dolibarr
 continues to own the event's title, dates, notes, location and availability.
 
+Version 4.0.1 normalizes rich-text descriptions with Dolibarr's native cleaner
+before CalDAV/CardDAV export, produces RFC-compliant folded calendar/card data,
+localizes contact civilities, and repairs Full/Free-Busy ICS subscriptions.
+
 Automatic tasks generation in projects with services from linked Propositions and/or Orders 
 Module setup offer you to :
 

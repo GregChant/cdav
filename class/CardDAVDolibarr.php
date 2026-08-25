@@ -17,6 +17,8 @@ use Sabre\DAV\Exception\Forbidden;
  * @license http://sabre.io/license/ Modified BSD License
  */
 class Dolibarr extends AbstractBackend {
+	/** Change this value whenever the generated CardDAV representation changes. */
+	private const CARD_SERIALIZATION_VERSION = '2026-08-html-text-civility-v2';
 
 	/**
 	 * Dolibarr user object
@@ -39,6 +41,9 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected $langs;
 
+	/** @var array<string,string>|null Localized civility/title lookup. */
+	private $civilityCodeByLabel = null;
+
 	/**
 	 * Sets up the object
 	 *
@@ -47,12 +52,111 @@ class Dolibarr extends AbstractBackend {
 	 * @param langs
 	 */
 	function __construct($user, $db, $langs) {
+		global $conf;
 
 		$this->user = $user;
 		$this->db = $db;
 		$this->langs = $langs;
+		if (!empty($this->user->lang)) {
+			// The bootstrap language may already be loaded before HTTP Basic auth.
+			// A dedicated translator guarantees the authenticated user's language.
+			$this->langs = new \Translate('', $conf);
+			$this->langs->setDefaultLang($this->user->lang);
+		}
 		$this->langs->load("companies");
 		$this->langs->load("suppliers");
+		$this->langs->load("dict");
+	}
+
+	/** Return the native Dolibarr translation of a civility dictionary code. */
+	private function _getLocalizedCivility($code, $preferShort = true)
+	{
+		$code = trim((string) $code);
+		if ($code === '') {
+			return '';
+		}
+		if ($preferShort) {
+			$key = 'Civility'.$code.'Short';
+			// Check the loaded dictionary explicitly: Translate's generic fallback
+			// may turn a missing CivilityDRShort key into the bogus "DRShort".
+			if (isset($this->langs->tab_translate[$key])) {
+				return $this->langs->transnoentitiesnoconv($key);
+			}
+		}
+		$label = $this->langs->getLabelFromKey($this->db, 'Civility'.$code, 'c_civility', 'code', 'label', $code);
+		return is_string($label) && $label !== 'Civility'.$code ? $label : '';
+	}
+
+	/** Map a translated vCard honorific back to its Dolibarr dictionary code. */
+	private function _getCivilityCode($value)
+	{
+		$value = trim((string) $value);
+		if ($value === '') {
+			return '';
+		}
+		if ($this->civilityCodeByLabel === null) {
+			$this->civilityCodeByLabel = array();
+			$result = $this->db->query('SELECT code, label FROM '.MAIN_DB_PREFIX.'c_civility WHERE active = 1');
+			while ($result && ($row = $this->db->fetch_object($result))) {
+				$code = (string) $row->code;
+				$labels = array($code, (string) $row->label, $this->_getLocalizedCivility($code, false), $this->_getLocalizedCivility($code, true));
+				foreach ($labels as $label) {
+					$label = trim($label);
+					if ($label !== '') {
+						$this->civilityCodeByLabel[mb_strtolower($label, 'UTF-8')] = $code;
+					}
+				}
+			}
+		}
+		$key = mb_strtolower($value, 'UTF-8');
+		return $this->civilityCodeByLabel[$key] ?? $value;
+	}
+
+	private function _getVCardLanguageParameter()
+	{
+		$language = str_replace('_', '-', (string) $this->langs->getDefaultLang());
+		return preg_match('/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/', $language) ? ';LANGUAGE='.$language : '';
+	}
+
+	/** Convert Dolibarr rich text to readable plain text. */
+	private function _cleanDolibarrText($value)
+	{
+		$value = (string) $value;
+		if ($value === '') {
+			return '';
+		}
+		$value = preg_replace('/<\s*li\b[^>]*>/i', '- ', $value);
+		$value = preg_replace('/<\s*\/\s*(?:p|div|li|ul|ol|h[1-6]|blockquote|tr)\s*>/i', "\n", $value);
+		$value = \dol_string_nohtmltag($value, 0, 'UTF-8');
+		$value = str_replace("\xC2\xA0", ' ', $value);
+		$value = str_replace(array("\r\n", "\r"), "\n", $value);
+		$value = preg_replace('/[ \t]+\n/', "\n", $value);
+		$value = preg_replace('/\n{3,}/', "\n\n", $value);
+		return trim($value);
+	}
+
+	/** RFC 6350 text escaping for NOTE values. */
+	private function _escapeVCardText($value)
+	{
+		return strtr((string) $value, array(
+			'\\' => '\\\\',
+			';' => '\\;',
+			',' => '\\,',
+			"\r\n" => '\\n',
+			"\r" => '\\n',
+			"\n" => '\\n',
+		));
+	}
+
+	/** Normalize escaping, CRLF and RFC line folding with Sabre/VObject. */
+	private function _normalizeVCardData($cardData)
+	{
+		try {
+			return VObject\Reader::read($cardData)->serialize();
+		} catch (\Throwable $e) {
+			\dol_syslog(__METHOD__.': invalid generated vCard: '.$e->getMessage(), LOG_ERR);
+			return $cardData;
+		}
 	}
 
 	/**
@@ -128,7 +232,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 		sort($tokens, SORT_STRING);
-		return sha1(CDAV_URI_KEY.'|'.$type.'|'.implode('|', $tokens));
+		return sha1(CDAV_URI_KEY.'|'.self::CARD_SERIALIZATION_VERSION.'|'.$type.'|'.implode('|', $tokens));
 	}
 
 	private function _getCardObjectUri($obj, $type)
@@ -467,6 +571,9 @@ class Dolibarr extends AbstractBackend {
 	{
 		global $conf;
 		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
+		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
+		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
+		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
 		$nick = [];
 		$categ = [];
 		if($obj->soc_client)
@@ -515,13 +622,13 @@ class Dolibarr extends AbstractBackend {
 		$carddata.="UID:".$this->_getCardSourceUid($obj, 'ct')."\n";
 		if(!empty($obj->soc_nom) && getDolGlobalInt('CDAV_CONCAT_SOCNAME_FOR_PHONE'))
 		{
-			$carddata.="N;CHARSET=UTF-8:".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',"(".$obj->soc_nom.")").";\n";
-			$carddata.="FN;CHARSET=UTF-8:".str_replace(';','\;',"(".$obj->soc_nom.") ".$obj->lastname." ".$obj->firstname)."\n";
+			$carddata.="N".$nameParameters.":".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$civility).";\n";
+			$carddata.="FN".$nameParameters.":".str_replace(';','\;',"(".$obj->soc_nom.") ".$obj->lastname." ".$obj->firstname)."\n";
 		}
 		else
 		{
-			$carddata.="N;CHARSET=UTF-8:".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$obj->civility).";\n";
-			$carddata.="FN;CHARSET=UTF-8:".str_replace(';','\;',$obj->lastname." ".$obj->firstname)."\n";
+			$carddata.="N".$nameParameters.":".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$civility).";\n";
+			$carddata.="FN".$nameParameters.":".str_replace(';','\;',$obj->lastname." ".$obj->firstname)."\n";
 		}
 
 		if(!empty($obj->soc_nom) && !empty($obj->soc_name_alias))
@@ -563,8 +670,8 @@ class Dolibarr extends AbstractBackend {
 			$carddata.="X-SKYPE:".str_replace(';','\;',$socialNetworks['skype'])."\n";
 		if(!empty($obj->birthday))
 			$carddata.="BDAY:".str_replace(';','\;',$obj->birthday)."\n";
-		if(!empty($obj->note_public))
-			$carddata.="NOTE;CHARSET=UTF-8:".str_replace(';','\;',strtr(trim($obj->note_public),array("\n"=>"\\n", "\r"=>"")))."\n";
+		if($notePublic !== '')
+			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
 		if(!empty($obj->photo))
 		{
 			$photofile = $conf->societe->dir_output."/contact/".$obj->rowid."/photos/".$obj->photo;
@@ -615,7 +722,7 @@ class Dolibarr extends AbstractBackend {
 		}
    		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
-		return $carddata;
+		return $this->_normalizeVCardData($carddata);
 	}
 
 	/**
@@ -627,6 +734,9 @@ class Dolibarr extends AbstractBackend {
 	protected function _memberToVCard($obj)
 	{
 		global $conf;
+		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
+		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
+		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
 		$nick = [];
 		$categ = [];
 		if($obj->soc_client)
@@ -669,8 +779,8 @@ class Dolibarr extends AbstractBackend {
 		$carddata.="VERSION:3.0\n";
 		$carddata.="PRODID:-//Dolibarr CDav//FR\n";
 		$carddata.="UID:".$this->_getCardSourceUid($obj, 'mb')."\n";
-		$carddata.="N;CHARSET=UTF-8:".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$obj->civility).";\n";
-		$carddata.="FN;CHARSET=UTF-8:".str_replace(';','\;',$obj->lastname." ".$obj->firstname)."\n";
+		$carddata.="N".$nameParameters.":".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$civility).";\n";
+		$carddata.="FN".$nameParameters.":".str_replace(';','\;',$obj->lastname." ".$obj->firstname)."\n";
 		if(!empty($obj->soc_nom) && !empty($obj->soc_name_alias))
 			$carddata.="ORG;CHARSET=UTF-8:".str_replace(';','\;',$obj->soc_nom." (".$obj->soc_name_alias.")").";\n";
 		elseif(!empty($obj->soc_nom))
@@ -704,8 +814,8 @@ class Dolibarr extends AbstractBackend {
 		}
 		if(!empty($obj->birth))
 			$carddata.="BDAY;VALUE=DATE:".str_replace(';','\;',date('Ymd',strtotime($obj->birth)))."\n";
-		if(!empty($obj->note_public))
-			$carddata.="NOTE;CHARSET=UTF-8:".str_replace(';','\;',strtr(trim($obj->note_public),array("\n"=>"\\n", "\r"=>"")))."\n";
+		if($notePublic !== '')
+			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
 		if(!empty($obj->photo))
 		{
 			$photofile = $conf->adherent->dir_output."/member/".$obj->rowid."/photos/".$obj->photo;
@@ -750,7 +860,7 @@ class Dolibarr extends AbstractBackend {
 		}
 		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
-		return $carddata;
+		return $this->_normalizeVCardData($carddata);
 	}
 
 
@@ -764,6 +874,7 @@ class Dolibarr extends AbstractBackend {
 	{
 		global $conf;
 		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
+		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
 		$doliinfo = [];
 		$categ = [];
 		if($obj->client)
@@ -833,16 +944,14 @@ class Dolibarr extends AbstractBackend {
 				$carddata.='X-'.strtoupper($network).':'.str_replace(';','\;', $socialNetworks[$network])."\n";
 			}
 		}
-		$carddata.="NOTE;CHARSET=UTF-8:";
-		foreach($doliinfo as $info)
-			$carddata.=strtr(trim($info),array("\n"=>"\\n", "\r"=>""))."\\n";
-		if(!empty($obj->note_public))
-			$carddata.=strtr(trim($obj->note_public),array("\n"=>"\\n", "\r"=>""))."\\n";
-		$carddata.="\n";
+		$noteParts = $doliinfo;
+		if($notePublic !== '')
+			$noteParts[] = $notePublic;
+		$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText(implode("\n", $noteParts))."\n";
 		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
 
-		return $carddata;
+		return $this->_normalizeVCardData($carddata);
 	}
 
 	/*
@@ -885,7 +994,7 @@ class Dolibarr extends AbstractBackend {
 			$rdata['firstname'] = (string)$names[1];
 
 		if(isset($names[3]))
-			$rdata['civility'] = (string)$names[3];
+			$rdata['civility'] = $this->_getCivilityCode((string)$names[3]);
 
 		if(isset($vCard->TITLE))
 			$rdata['poste'] = (string)$vCard->TITLE;
@@ -1046,7 +1155,7 @@ class Dolibarr extends AbstractBackend {
 			$rdata['firstname'] = (string)$names[1];
 
 		if(isset($names[3]))
-			$rdata['civility'] = (string)$names[3];
+			$rdata['civility'] = $this->_getCivilityCode((string)$names[3]);
 
 		/*if(isset($vCard->TITLE))
 			$rdata['poste'] = (string)$vCard->TITLE;*/

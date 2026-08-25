@@ -68,6 +68,9 @@ class Dolibarr extends AbstractBackend {
 	/** @var bool|null Whether the optional metadata table is installed. */
 	private $hasSchedulingTable = null;
 
+	/** @var array<int,bool> Valid internal calendar users, cached per request. */
+	private $calendarUserCache = array();
+
 	/**
 	 * List of CalDAV properties, and how they map to database fieldnames
 	 * Add your own properties by simply adding on to this array.
@@ -164,6 +167,7 @@ class Dolibarr extends AbstractBackend {
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname, u.color
 				FROM '.MAIN_DB_PREFIX.'user u
 				WHERE u.statut > 0
+				AND u.fk_soc IS NULL
 				AND u.entity IN ('.getEntity('user').')';
 		if($onlyme)
 			$sql .= ' AND u.rowid='.$this->user->id;
@@ -284,6 +288,9 @@ class Dolibarr extends AbstractBackend {
 
 		debug_log("getCalendarObjects( $calendarId )");
 
+		if (!$this->_calendarUserExists($calendarId)) {
+			return array();
+		}
 		return $this->cdavLib->getFullCalendarObjects($calendarId, false);
 	}
 
@@ -323,6 +330,8 @@ class Dolibarr extends AbstractBackend {
 			return $calevent;
 
 		if($calid!=$this->user->id && (!isset($this->user->rights->agenda->allactions->read) || !$this->user->rights->agenda->allactions->read))
+			return $calevent;
+		if (!$this->_calendarUserExists($calid))
 			return $calevent;
 
 		if($elem_source=='ev') // Calendar Events
@@ -871,8 +880,28 @@ class Dolibarr extends AbstractBackend {
 		return !empty($this->user->rights->agenda->{$scope}->{$action});
 	}
 
+	private function _calendarUserExists($calendarId)
+	{
+		$calendarId = (int) $calendarId;
+		if ($calendarId <= 0) {
+			return false;
+		}
+		if (array_key_exists($calendarId, $this->calendarUserCache)) {
+			return $this->calendarUserCache[$calendarId];
+		}
+		$sql = 'SELECT u.rowid FROM '.MAIN_DB_PREFIX.'user u
+			WHERE u.rowid = '.$calendarId.' AND u.statut > 0 AND u.fk_soc IS NULL
+			AND u.entity IN ('.getEntity('user').')';
+		$result = $this->db->query($sql);
+		$this->calendarUserCache[$calendarId] = (bool) ($result && $this->db->fetch_object($result));
+		return $this->calendarUserCache[$calendarId];
+	}
+
 	private function _canWriteCalendar($calendarId)
 	{
+		if (!$this->_calendarUserExists($calendarId)) {
+			return false;
+		}
 		if ((int) $calendarId === (int) $this->user->id) {
 			return $this->_hasAgendaRight('myactions', 'create');
 		}
@@ -881,6 +910,9 @@ class Dolibarr extends AbstractBackend {
 
 	private function _canDeleteFromCalendar($calendarId)
 	{
+		if (!$this->_calendarUserExists($calendarId)) {
+			return false;
+		}
 		if ((int) $calendarId === (int) $this->user->id) {
 			return $this->_hasAgendaRight('myactions', 'delete');
 		}
@@ -1056,7 +1088,8 @@ class Dolibarr extends AbstractBackend {
 
 		$sql = 'SELECT
 					u.rowid
-				FROM '.MAIN_DB_PREFIX.'user u WHERE u.statut>0';
+				FROM '.MAIN_DB_PREFIX.'user u WHERE u.statut>0
+				AND u.fk_soc IS NULL AND u.entity IN ('.getEntity('user').')';
 		if($onlyme)
 			$sql .= ' AND u.rowid='.$this->user->id;
 
@@ -1198,7 +1231,9 @@ class Dolibarr extends AbstractBackend {
 						if ((int) $calendarId === (int) $this->user->id) {
 							$targetEmail = (string) $this->user->email;
 						} else {
-							$result = $this->db->query('SELECT email FROM '.MAIN_DB_PREFIX.'user WHERE rowid = '.((int) $calendarId));
+							$result = $this->db->query('SELECT email FROM '.MAIN_DB_PREFIX.'user
+								WHERE rowid = '.((int) $calendarId).' AND statut > 0 AND fk_soc IS NULL
+								AND entity IN ('.getEntity('user').')');
 							if ($result && ($row = $this->db->fetch_object($result))) {
 								$targetEmail = (string) $row->email;
 							}
