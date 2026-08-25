@@ -66,7 +66,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
 
 // Load traductions files requiredby by page
-$langs->load("cdav");
+$langs->load("cdav@cdav");
 
 
 //Get all event
@@ -200,7 +200,17 @@ $calendarUser->rights->agenda->myactions->read = true;
 $calendarUser->rights->agenda->allactions->read = true;
 $calendarUser->rights->societe->client->voir = false;
 
-$cdavLib = new CdavLib($calendarUser, $db, $langs);
+// The subscription is generated without an interactive session. Use the
+// calendar owner's Dolibarr language instead of the bootstrap/default one.
+$calendarLangs = $langs;
+if (!empty($calendarUser->lang)) {
+	$calendarLangs = new Translate('', $conf);
+	$calendarLangs->setDefaultLang($calendarUser->lang);
+	$calendarLangs->load("main");
+	$calendarLangs->load("cdav@cdav");
+}
+
+$cdavLib = new CdavLib($calendarUser, $db, $calendarLangs);
 
 // Format them as one valid VCALENDAR document. getFullCalendarObjects()
 // returns one complete VCALENDAR per object; concatenating those documents
@@ -221,7 +231,7 @@ foreach($arrEvents as $event)
 		if ($component->name === 'VEVENT' || $component->name === 'VTODO') {
 			$component = clone $component;
 			if ($type === 'nolabel') {
-				$component->SUMMARY = $langs->transnoentitiesnoconv('Busy');
+				$component->SUMMARY = $calendarLangs->transnoentitiesnoconv('Busy');
 				$component->DESCRIPTION = '.';
 				$component->LOCATION = '';
 			}

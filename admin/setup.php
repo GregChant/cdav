@@ -93,21 +93,21 @@ if ($result!==false)
 }
 
 $tasksync_method=array(
-	'0' => $langs->trans("Not synchonized"),
-	'1' => $langs->trans("Sync as calendar events only"),
-	'2' => $langs->trans("Sync as todo tasks only"),
-	'3' => $langs->trans("Sync as calendar events and todo tasks"),
+	'0' => $langs->trans("CDavNotSynchronized"),
+	'1' => $langs->trans("CDavSyncAsCalendarEventsOnly"),
+	'2' => $langs->trans("CDavSyncAsTodoTasksOnly"),
+	'3' => $langs->trans("CDavSyncAsCalendarEventsAndTodoTasks"),
 );
 
 $intervsync_method=array(
-	'0' => $langs->trans("Not synchonized"),
-	'1' => $langs->trans("Sync as calendar events"),
+	'0' => $langs->trans("CDavNotSynchronized"),
+	'1' => $langs->trans("CDavSyncAsCalendarEvents"),
 );
 
 $thirdsync_method=array(
-	'0' => $langs->trans("Not synchonized"),
-	'1' => $langs->trans("Only thirdparties without contact"),
-	'2' => $langs->trans("All thirdparties"),
+	'0' => $langs->trans("CDavNotSynchronized"),
+	'1' => $langs->trans("CDavOnlyThirdPartiesWithoutContact"),
+	'2' => $langs->trans("CDavAllThirdParties"),
 );
 
 $form = new Form($db);
@@ -223,7 +223,7 @@ if ($action == 'setvalue') {
  * View
  */
 
-$page_name = $langs->trans("CDav Setup") . " - " . $langs->trans("CDav General Setting");
+$page_name = $langs->trans("CDavSetup") . " - " . $langs->trans("CDavGeneralSettings");
 llxHeader('', $page_name);
 
 $linkback='<a href="'.DOL_URL_ROOT.'/admin/modules.php">'.$langs->trans("BackToModuleList").'</a>';
@@ -256,31 +256,31 @@ $CDAV_QRCODE_DAVX5_ENABLED=getDolGlobalInt('CDAV_QRCODE_DAVX5_ENABLED');
 
 dol_fiche_head('', 'setup', $langs->trans("CDav"), 0, "cdav@cdav");
 
-print_titre($langs->trans("CDav Setting Value"));
+print_titre($langs->trans("CDavSettingValues"));
 print '<br>';
 print '<form method="post" action="setup.php">';
 print '<input type="hidden" name="token" value="'.newToken().'">';
 print '<input type="hidden" name="action" value="setvalue">';
 print '<table class="noborder" >';
 print '<tr class="liste_titre">';
-print '<td width="50%" align=left>'.$langs->trans("desc").'</td>';
-print '<td align=left>'.$langs->trans("value").'</td>';
+print '<td width="50%" align=left>'.$langs->trans("Description").'</td>';
+print '<td align=left>'.$langs->trans("Value").'</td>';
 print '</tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Sync token").'</strong><br/>'.$langs->trans("Change it to force client to resync").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavSyncToken").'</strong><br/>'.$langs->trans("CDavSyncTokenHelp").'</td>';
 print '<td  align=left>';
 print '<input size="8" type="text" class="flat" name="CDAV_URI_KEY" value="'.htmlentities($CDAV_URI_KEY).'">';
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Contacts filter").'</strong><br/>'.$langs->trans("Contact tag to restrict contacts to sync, leave blank to sync all").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavContactsFilter").'</strong><br/>'.$langs->trans("CDavContactsFilterHelp").'</td>';
 print '<td  align=left>';
 print $form->select_all_categories("contact", $CDAV_CONTACT_TAG, 'CDAV_CONTACT_TAG', 0);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Enable thirdparties sync").'</strong><br/>'.$langs->trans("How to synchronize thirparties").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavEnableThirdPartiesSync").'</strong><br/>'.$langs->trans("CDavThirdPartiesSyncHelp").'</td>';
 print '<td  align=left>';
 print $form->selectarray('CDAV_THIRD_SYNC', $thirdsync_method, $CDAV_THIRD_SYNC);
 print '</td></tr>'."\n";
@@ -293,43 +293,43 @@ print '</td></tr>'."\n";
 
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Enable intervention cards sync").'</strong><br/>'.$langs->trans("How to synchronize intervention cards").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavEnableInterventionsSync").'</strong><br/>'.$langs->trans("CDavInterventionsSyncHelp").'</td>';
 print '<td  align=left>';
 print $form->selectarray('CDAV_INTERV_SYNC', $intervsync_method, $CDAV_INTERV_SYNC);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Intervention user role").'</strong><br/>'.$langs->trans("User role when attaching a user to an intervention from a caldav client").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavInterventionUserRole").'</strong><br/>'.$langs->trans("CDavInterventionUserRoleHelp").'</td>';
 print '<td  align=left>';
 print $form->selectarray('CDAV_INTERV_USER_ROLE', $intervcontact_types, $CDAV_INTERV_USER_ROLE);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Period to sync").'</strong><br/>'.$langs->trans("Number of days to sync before and after today").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavSyncPeriod").'</strong><br/>'.$langs->trans("CDavSyncPeriodHelp").'</td>';
 print '<td  align=left>';
-print $langs->trans("In past:").' <input size="4" type="text" class="flat" name="CDAV_SYNC_PAST" value="'.htmlentities($CDAV_SYNC_PAST).'"> '.$langs->trans("days");
+print $langs->trans("CDavPast").' : <input size="4" type="text" class="flat" name="CDAV_SYNC_PAST" value="'.htmlentities($CDAV_SYNC_PAST).'"> '.$langs->trans("Days");
 print '<br />';
-print $langs->trans("In future:").' <input size="4" type="text" class="flat" name="CDAV_SYNC_FUTURE" value="'.htmlentities($CDAV_SYNC_FUTURE).'"> '.$langs->trans("days");
+print $langs->trans("CDavFuture").' : <input size="4" type="text" class="flat" name="CDAV_SYNC_FUTURE" value="'.htmlentities($CDAV_SYNC_FUTURE).'"> '.$langs->trans("Days");
 print '</td></tr>'."\n";
 
 print '<tr class="liste_titre">';
-print '<td align="center" colspan="2">'.$langs->trans("Project tasks synchronization").'</td>';
+print '<td align="center" colspan="2">'.$langs->trans("CDavProjectTaskSynchronization").'</td>';
 print '</tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Enable project tasks sync").'</strong><br/>'.$langs->trans("How to synchronize project tasks").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavEnableProjectTaskSync").'</strong><br/>'.$langs->trans("CDavProjectTaskSyncHelp").'</td>';
 print '<td  align=left>';
 print $form->selectarray('CDAV_TASK_SYNC', $tasksync_method, $CDAV_TASK_SYNC);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Generate tasks from documents").'</strong><br/>'.$langs->trans("Generate project tasks for each service lines from attached documents (proposals or orders) on project validation. Only the lastest documents are used in case of inheritance").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavGenerateTasksFromDocuments").'</strong><br/>'.$langs->trans("CDavGenerateTasksFromDocumentsHelp").'</td>';
 print '<td  align=left>';
 print $form->selectyesno('CDAV_GENTASK', $CDAV_GENTASK, 1);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Generate initial tasks from services").'</strong><br/>'.$langs->trans("Generate project initial tasks for each seleted services on project validation.").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavGenerateInitialTasks").'</strong><br/>'.$langs->trans("CDavGenerateInitialTasksHelp").'</td>';
 print '<td  align=left>';
 print $form->select_produits($CDAV_GENTASK_INI1, 'CDAV_GENTASK_INI1', 1);
 print '<br />';
@@ -339,7 +339,7 @@ print $form->select_produits($CDAV_GENTASK_INI3, 'CDAV_GENTASK_INI3', 1);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Generate final tasks from services").'</strong><br/>'.$langs->trans("Generate project final tasks for each seleted services on project validation.").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavGenerateFinalTasks").'</strong><br/>'.$langs->trans("CDavGenerateFinalTasksHelp").'</td>';
 print '<td  align=left>';
 print $form->select_produits($CDAV_GENTASK_END1, 'CDAV_GENTASK_END1', 1);
 print '<br />';
@@ -349,33 +349,33 @@ print $form->select_produits($CDAV_GENTASK_END3, 'CDAV_GENTASK_END3', 1);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Project user role").'</strong><br/>'.$langs->trans("User role in project to select user to attribute on generated tasks from documents").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavProjectUserRole").'</strong><br/>'.$langs->trans("CDavProjectUserRoleHelp").'</td>';
 print '<td  align=left>';
 print $form->selectarray('CDAV_PROJ_USER_ROLE', $projcontact_types, $CDAV_PROJ_USER_ROLE);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Project task user role").'</strong><br/>'.$langs->trans("User role on new project task creation").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavProjectTaskUserRole").'</strong><br/>'.$langs->trans("CDavProjectTaskUserRoleHelp").'</td>';
 print '<td  align=left>';
 print $form->selectarray('CDAV_TASK_USER_ROLE', $taskcontact_types, $CDAV_TASK_USER_ROLE);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Project task working hours").'</strong><br/>'.$langs->trans("Start and end time of a working day").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavProjectTaskWorkingHours").'</strong><br/>'.$langs->trans("CDavProjectTaskWorkingHoursHelp").'</td>';
 print '<td  align=left>';
-print $langs->trans("Begining at:").' <input size="4" type="text" class="flat" name="CDAV_TASK_HOUR_INI" value="'.htmlentities($CDAV_TASK_HOUR_INI).'"> '.$langs->trans("hour");
+print $langs->trans("CDavStartsAt").' : <input size="4" type="text" class="flat" name="CDAV_TASK_HOUR_INI" value="'.htmlentities($CDAV_TASK_HOUR_INI).'"> '.$langs->trans("Hours");
 print '<br />';
-print $langs->trans("Ending at:").' <input size="4" type="text" class="flat" name="CDAV_TASK_HOUR_END" value="'.htmlentities($CDAV_TASK_HOUR_END).'"> '.$langs->trans("hour");
+print $langs->trans("CDavEndsAt").' : <input size="4" type="text" class="flat" name="CDAV_TASK_HOUR_END" value="'.htmlentities($CDAV_TASK_HOUR_END).'"> '.$langs->trans("Hours");
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Services filter TAG").'</strong><br/>'.$langs->trans("Service tag to restrict services to be converted as task, leave blank to sync all").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavServicesFilter").'</strong><br/>'.$langs->trans("CDavServicesFilterHelp").'</td>';
 print '<td  align=left>';
 print $form->select_all_categories("product", $CDAV_GENTASK_SERVICE_TAG, 'CDAV_GENTASK_SERVICE_TAG', 0);
 print '</td></tr>'."\n";
 
 print '<tr >';
-print '<td  align=left><strong>'.$langs->trans("Service duration from documents").'</strong><br/>'.$langs->trans("Generate project tasks for each service lines from attached documents with cdav duration, even if TAG is missing").'</td>';
+print '<td  align=left><strong>'.$langs->trans("CDavServiceDurationFromDocuments").'</strong><br/>'.$langs->trans("CDavServiceDurationFromDocumentsHelp").'</td>';
 print '<td  align=left>';
 print $form->selectyesno('CDAV_EXTRAFIELD_DURATION', $CDAV_EXTRAFIELD_DURATION, 1);
 print '</td></tr>'."\n";

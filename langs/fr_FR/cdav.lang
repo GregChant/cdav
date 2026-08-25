@@ -1,19 +1,80 @@
-# Dolibarr language file - Source file is en_US - cdav
+# Fichier de langue Dolibarr - Module CDav
+
+# Module
+Module562387Name=Synchronisation CDav
+Module562387Desc=Synchronise les agendas, les tâches et les carnets d’adresses de Dolibarr avec CalDAV, CardDAV et ICS.
+ModuleCDavName=Synchronisation CDav
+ModuleCDavDesc=Synchronise les agendas, les tâches et les carnets d’adresses de Dolibarr avec CalDAV, CardDAV et ICS.
+CDav=CDav
+
+# URL DAV et ICS
 CardDAVurl=URL CardDAV
 CalDAVurl=URL CalDAV
 ICSurl=URL ICS
-URLforICS=Cette URL peut être utilisée avec un client de synchronisation (lecture seule) :
-Full=Complet
-NoLabel=Sans label
+URLforICS=Cette URL en lecture seule peut être utilisée par un client d’abonnement à un agenda :
+Full=Tous les détails
+NoLabel=Disponibilités uniquement
 Busy=Occupé
-URLGeneric=Ces URL peuvent être utilisées avec un client de synchronisation CalDAV/CardDAV :
-URLforCardDAV=Si votre client ne détecte pas votre carnet d'adresse cette URL complète peut être précisée :
-URLforCalDAV=Si votre client ne détecte pas vos agendas ces URLs complètes peuvent être précisées :
-DurationEx=Durée (ex: 4H, 3J)
-ActivateDavX5autoURL=Activer la génération de qrcode d'auto configuration pour davx5 ?
-ActivateDavX5autoURLTooltip=Si vous activez cette option un qrcode d'auto-configuration vous sera proposé pour ne pas avoir à saisir toutes les données à la main sur votre smartphone
-URLForDavX5=Configuration automatique pour DavX5
-URLForDavX5Tooltip=Utilisez le logiciel libre <a href="https://github.com/markusfisch/BinaryEye">BinaryEye</a> (dispo sur F-Droid) pour flasher le qrcode et autoconfigurer DavX5 !
+URLGeneric=Ces URL peuvent être utilisées par un client de synchronisation CalDAV/CardDAV :
+URLforCardDAV=Si votre client ne détecte pas votre carnet d’adresses, indiquez cette URL complète :
+URLforCalDAV=Si votre client ne détecte pas vos agendas, indiquez ces URL complètes :
+CDavContactsAddressBookName=%s - Contacts
+CDavContactsAddressBookDescription=Contacts de %s (%s)
+CDavThirdPartiesAddressBookName=%s - Tiers
+CDavThirdPartiesAddressBookDescription=Tiers de %s (%s)
+CDavMembersAddressBookName=%s - Adhérents
+CDavMembersAddressBookDescription=Adhérents de %s (%s)
 
-EnableMembersSync=Enable members sync
-GenerateAddressbookForMembership=Generate an address book for membership
+# Page de configuration
+CDavSetup=Configuration de CDav
+CDavGeneralSettings=Paramètres généraux
+CDavSettingValues=Paramètres de CDav
+CDavNotSynchronized=Non synchronisé
+CDavSyncAsCalendarEventsOnly=Synchroniser uniquement comme événements d’agenda
+CDavSyncAsTodoTasksOnly=Synchroniser uniquement comme tâches à faire
+CDavSyncAsCalendarEventsAndTodoTasks=Synchroniser comme événements d’agenda et tâches à faire
+CDavSyncAsCalendarEvents=Synchroniser comme événements d’agenda
+CDavOnlyThirdPartiesWithoutContact=Uniquement les tiers sans contact
+CDavAllThirdParties=Tous les tiers
+CDavSyncToken=Jeton de synchronisation
+CDavSyncTokenHelp=Modifiez ce jeton pour forcer une resynchronisation complète des clients.
+CDavContactsFilter=Filtre des contacts
+CDavContactsFilterHelp=Sélectionnez une catégorie de contacts pour ne synchroniser que les contacts correspondants. Laissez vide pour synchroniser tous les contacts.
+CDavEnableThirdPartiesSync=Synchroniser les tiers
+CDavThirdPartiesSyncHelp=Choisissez les tiers à publier dans le carnet d’adresses CardDAV.
+EnableMembersSync=Synchroniser les adhérents
+GenerateAddressbookForMembership=Générer un carnet d’adresses CardDAV pour les adhérents.
+CDavEnableInterventionsSync=Synchroniser les interventions
+CDavInterventionsSyncHelp=Choisissez si les lignes d’intervention doivent être synchronisées comme événements d’agenda.
+CDavInterventionUserRole=Rôle utilisateur des interventions
+CDavInterventionUserRoleHelp=Rôle de contact interne utilisé lorsqu’un client CalDAV affecte un utilisateur à une intervention.
+CDavSyncPeriod=Période de synchronisation
+CDavSyncPeriodHelp=Nombre de jours synchronisés avant et après la date du jour.
+CDavPast=Passé
+CDavFuture=Futur
+CDavProjectTaskSynchronization=Synchronisation des tâches de projet
+CDavEnableProjectTaskSync=Synchroniser les tâches de projet
+CDavProjectTaskSyncHelp=Choisissez si les tâches de projet sont publiées comme événements d’agenda, tâches à faire, ou les deux.
+CDavGenerateTasksFromDocuments=Générer les tâches depuis les documents
+CDavGenerateTasksFromDocumentsHelp=À la validation d’un projet, générer une tâche pour chaque ligne de service des propositions commerciales ou commandes liées. En cas d’héritage entre documents, seuls les documents les plus récents sont utilisés.
+CDavGenerateInitialTasks=Générer les tâches initiales depuis les services
+CDavGenerateInitialTasksHelp=Générer les tâches initiales correspondant aux services sélectionnés lors de la validation du projet.
+CDavGenerateFinalTasks=Générer les tâches finales depuis les services
+CDavGenerateFinalTasksHelp=Générer les tâches finales correspondant aux services sélectionnés lors de la validation du projet.
+CDavProjectUserRole=Rôle utilisateur du projet
+CDavProjectUserRoleHelp=Rôle de contact du projet utilisé pour sélectionner l’utilisateur affecté aux tâches générées depuis les documents.
+CDavProjectTaskUserRole=Rôle utilisateur des tâches de projet
+CDavProjectTaskUserRoleHelp=Rôle de contact interne utilisé pour affecter un utilisateur à une nouvelle tâche de projet.
+CDavProjectTaskWorkingHours=Horaires de travail des tâches de projet
+CDavProjectTaskWorkingHoursHelp=Heures de début et de fin d’une journée de travail utilisées pour les tâches générées.
+CDavStartsAt=Début
+CDavEndsAt=Fin
+CDavServicesFilter=Filtre par catégorie de services
+CDavServicesFilterHelp=Sélectionnez une catégorie de services pour ne convertir que les services correspondants en tâches. Laissez vide pour inclure tous les services.
+CDavServiceDurationFromDocuments=Durée des services issue des documents
+CDavServiceDurationFromDocumentsHelp=Générer les tâches des lignes de service qui définissent une durée CDav, même si elles n’appartiennent pas à la catégorie sélectionnée.
+DurationEx=Durée (par exemple : 4 h, 3 j)
+ActivateDavX5autoURL=Générer un code QR de configuration automatique DAVx⁵
+ActivateDavX5autoURLTooltip=Afficher un code QR pour configurer le compte DAVx⁵ sur un téléphone sans saisir manuellement chaque paramètre.
+URLForDavX5=Configuration automatique de DAVx⁵
+URLForDavX5Tooltip=Scannez le code QR avec une application compatible, comme l’application libre Binary Eye disponible sur F-Droid, afin de configurer DAVx⁵ automatiquement.

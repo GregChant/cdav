@@ -67,7 +67,7 @@ function cdav_create_ics_token($userId, $type) {
 }
 
 // Load traductions files requiredby by page
-$langs->load("cdav");
+$langs->load("cdav@cdav");
 
 
 // define CDAV_URI_KEY if not

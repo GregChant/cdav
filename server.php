@@ -203,6 +203,14 @@ if(isset($_SERVER['PHP_AUTH_USER']) && $_SERVER['PHP_AUTH_USER']!='')
 	$user->loadRights();
 }
 
+// main.inc.php runs before HTTP Basic authentication, so its translator may
+// not use the DAV account's language. Recreate it for the authenticated user.
+if (!empty($user->lang)) {
+	$langs = new Translate('', $conf);
+	$langs->setDefaultLang($user->lang);
+}
+$langs->load("cdav@cdav");
+
 $cdavLib = new CdavLib($user, $db, $langs);
 
 // Authentication

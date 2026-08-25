@@ -1,16 +1,80 @@
 # Dolibarr language file - Source file is en_US - cdav
+
+# Module
+Module562387Name=CDav synchronization
+Module562387Desc=Synchronize Dolibarr calendars, tasks and address books using CalDAV, CardDAV and ICS.
+ModuleCDavName=CDav synchronization
+ModuleCDavDesc=Synchronize Dolibarr calendars, tasks and address books using CalDAV, CardDAV and ICS.
+CDav=CDav
+
+# DAV and ICS URLs
 CardDAVurl=CardDAV URL
 CalDAVurl=CalDAV URL
-ICSurl=URL ICS
-URLforICS=This URL can be used by a synchronisation client tool (read only) :
-Full=Full
-NoLabel=Without label
+ICSurl=ICS URL
+URLforICS=This read-only URL can be used by a calendar subscription client:
+Full=Full details
+NoLabel=Free/busy only
 Busy=Busy
-URLGeneric=These URL can be used by a CalDAV/CardDAV synchronisation client tool :
-URLforCardDAV=If your client does not detect your address book this full URL can be specified :
-URLforCalDAV=If your client does not detect your agendas these full URLs can be specified :
-DurationEx=Duration (ex: 4H, 3D)
-ActivateDavX5autoURL=Enable generation of a qrcode for DavX5 auto configuration?
-ActivateDavX5autoURLTooltip=If you enable this option, a qrcode will be display to help config of Si vous activez cette option un qrcode d'auto-configuration for your smartphone
-URLForDavX5=Automatic setup for DavX5
-URLForDavX5Tooltip=Use Free Software <a href="https://github.com/markusfisch/BinaryEye">BinaryEye</a> (available on F-Droid) to flash the qrcode and autoconfig DavX5!
+URLGeneric=These URLs can be used by a CalDAV/CardDAV synchronization client:
+URLforCardDAV=If your client does not detect your address book, specify this full URL:
+URLforCalDAV=If your client does not detect your calendars, specify these full URLs:
+CDavContactsAddressBookName=%s - Contacts
+CDavContactsAddressBookDescription=Contacts for %s (%s)
+CDavThirdPartiesAddressBookName=%s - Third parties
+CDavThirdPartiesAddressBookDescription=Third parties for %s (%s)
+CDavMembersAddressBookName=%s - Members
+CDavMembersAddressBookDescription=Members for %s (%s)
+
+# Setup page
+CDavSetup=CDav setup
+CDavGeneralSettings=General settings
+CDavSettingValues=CDav settings
+CDavNotSynchronized=Not synchronized
+CDavSyncAsCalendarEventsOnly=Synchronize as calendar events only
+CDavSyncAsTodoTasksOnly=Synchronize as to-do tasks only
+CDavSyncAsCalendarEventsAndTodoTasks=Synchronize as calendar events and to-do tasks
+CDavSyncAsCalendarEvents=Synchronize as calendar events
+CDavOnlyThirdPartiesWithoutContact=Only third parties without contacts
+CDavAllThirdParties=All third parties
+CDavSyncToken=Synchronization token
+CDavSyncTokenHelp=Change this token to force clients to perform a full resynchronization.
+CDavContactsFilter=Contact filter
+CDavContactsFilterHelp=Select a contact category to synchronize only matching contacts. Leave empty to synchronize all contacts.
+CDavEnableThirdPartiesSync=Synchronize third parties
+CDavThirdPartiesSyncHelp=Choose which third parties are exposed in the CardDAV address book.
+EnableMembersSync=Synchronize members
+GenerateAddressbookForMembership=Generate a CardDAV address book for members.
+CDavEnableInterventionsSync=Synchronize interventions
+CDavInterventionsSyncHelp=Choose whether intervention lines are synchronized as calendar events.
+CDavInterventionUserRole=Intervention user role
+CDavInterventionUserRoleHelp=Internal contact role used when a CalDAV client assigns a user to an intervention.
+CDavSyncPeriod=Synchronization period
+CDavSyncPeriodHelp=Number of days synchronized before and after today.
+CDavPast=Past
+CDavFuture=Future
+CDavProjectTaskSynchronization=Project task synchronization
+CDavEnableProjectTaskSync=Synchronize project tasks
+CDavProjectTaskSyncHelp=Choose whether project tasks are exposed as calendar events, to-do tasks, or both.
+CDavGenerateTasksFromDocuments=Generate tasks from documents
+CDavGenerateTasksFromDocumentsHelp=When validating a project, generate a task for each service line in linked proposals or orders. When documents inherit from one another, only the most recent documents are used.
+CDavGenerateInitialTasks=Generate initial tasks from services
+CDavGenerateInitialTasksHelp=Generate the selected initial service tasks when the project is validated.
+CDavGenerateFinalTasks=Generate final tasks from services
+CDavGenerateFinalTasksHelp=Generate the selected final service tasks when the project is validated.
+CDavProjectUserRole=Project user role
+CDavProjectUserRoleHelp=Project contact role used to select the user assigned to tasks generated from documents.
+CDavProjectTaskUserRole=Project task user role
+CDavProjectTaskUserRoleHelp=Internal contact role used when assigning a user to a new project task.
+CDavProjectTaskWorkingHours=Project task working hours
+CDavProjectTaskWorkingHoursHelp=Start and end times of a working day used for generated tasks.
+CDavStartsAt=Starts at
+CDavEndsAt=Ends at
+CDavServicesFilter=Service category filter
+CDavServicesFilterHelp=Select a service category to convert only matching services into tasks. Leave empty to include all services.
+CDavServiceDurationFromDocuments=Service duration from documents
+CDavServiceDurationFromDocumentsHelp=Generate tasks for service lines that define a CDav duration, even when they do not belong to the selected category.
+DurationEx=Duration (for example: 4h, 3d)
+ActivateDavX5autoURL=Generate a DAVx⁵ automatic-configuration QR code
+ActivateDavX5autoURLTooltip=Display a QR code so the DAVx⁵ account can be configured on a smartphone without entering every setting manually.
+URLForDavX5=DAVx⁵ automatic configuration
+URLForDavX5Tooltip=Scan the QR code with a compatible application, such as the free Binary Eye application available on F-Droid, to configure DAVx⁵ automatically.

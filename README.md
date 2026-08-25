@@ -35,6 +35,10 @@ before CalDAV/CardDAV export, produces RFC-compliant folded calendar/card data,
 localizes contact civilities, repairs Full/Free-Busy ICS subscriptions, and uses
 Dolibarr's native permission/loading/logging APIs to prevent PHP warning storms.
 
+Version 4.0.3 completes the French interface, replaces invalid sentence-based
+translation keys, and localizes CardDAV address-book names and private ICS
+Free/Busy labels using the Dolibarr user's language.
+
 Automatic tasks generation in projects with services from linked Propositions and/or Orders 
 Module setup offer you to :
 
@@ -73,7 +77,7 @@ If you find the module is useful and want to finance improvements, consider to p
 
 ## How to install
 
-PHP 8.0+ and Dolibarr 23.0+ are required. Version 4.0.2 is tested on Dolibarr
+PHP 8.0+ and Dolibarr 23.0+ are required. Version 4.0.3 is tested on Dolibarr
 23.0.3 with PHP 8.5.
 
 Dolibarr native calendar module must be activated *before* installing CDav module.

@@ -66,6 +66,7 @@ class Dolibarr extends AbstractBackend {
 		$this->langs->load("companies");
 		$this->langs->load("suppliers");
 		$this->langs->load("dict");
+		$this->langs->load("cdav@cdav");
 	}
 
 	/** Check a permission through Dolibarr's native User API. */
@@ -195,8 +196,8 @@ class Dolibarr extends AbstractBackend {
 			'id'														  => $this->user->id,
 			'uri'														  => 'default',
 			'principaluri'												  => $principalUri,
-			'{DAV:}displayname'											  => $companyName.' - contacts',
-			'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => 'Contacts '.$companyName.' '.$this->user->login,
+			'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookName', $companyName),
+			'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookDescription', $companyName, $this->user->login),
 			'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('contact'),
 		];
 		if (!$this->_hasRight('societe', 'contact', 'read')) {
@@ -209,8 +210,8 @@ class Dolibarr extends AbstractBackend {
 				'id'														  => $this->user->id + CDAV_ADDRESSBOOK_ID_SHIFT,
 				'uri'														  => 'thirdparties',
 				'principaluri'												  => $principalUri,
-				'{DAV:}displayname'											  => $companyName.' - thirdparties',
-				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => 'Thirdparties '.$companyName.' '.$this->user->login,
+				'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavThirdPartiesAddressBookName', $companyName),
+				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavThirdPartiesAddressBookDescription', $companyName, $this->user->login),
 				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('thirdparty'),
 			];
 		}
@@ -221,8 +222,8 @@ class Dolibarr extends AbstractBackend {
 				'id'														  => $this->user->id + 2*CDAV_ADDRESSBOOK_ID_SHIFT,
 				'uri'														  => 'members',
 				'principaluri'												  => $principalUri,
-				'{DAV:}displayname'											  => $companyName.' - members',
-				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => 'Members '.$companyName.' '.$this->user->login,
+				'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavMembersAddressBookName', $companyName),
+				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavMembersAddressBookDescription', $companyName, $this->user->login),
 				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('member'),
 			];
 		}
