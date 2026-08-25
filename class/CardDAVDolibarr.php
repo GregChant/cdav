@@ -68,6 +68,26 @@ class Dolibarr extends AbstractBackend {
 		$this->langs->load("dict");
 	}
 
+	/** Check a permission through Dolibarr's native User API. */
+	private function _hasRight($module, $level1, $level2 = '')
+	{
+		if (!is_object($this->user) || !method_exists($this->user, 'hasRight')) {
+			return false;
+		}
+		return (bool) $this->user->hasRight($module, $level1, $level2);
+	}
+
+	/** Normalize nullable SQL fields before passing them to PHP string APIs. */
+	private function _normalizeDatabaseRow($row)
+	{
+		foreach (get_object_vars($row) as $key => $value) {
+			if ($value === null) {
+				$row->{$key} = '';
+			}
+		}
+		return $row;
+	}
+
 	/** Return the native Dolibarr translation of a civility dictionary code. */
 	private function _getLocalizedCivility($code, $preferShort = true)
 	{
@@ -179,11 +199,11 @@ class Dolibarr extends AbstractBackend {
 			'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => 'Contacts '.$companyName.' '.$this->user->login,
 			'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('contact'),
 		];
-		if (empty($this->user->rights->societe->contact->lire)) {
+		if (!$this->_hasRight('societe', 'contact', 'read')) {
 			array_pop($addressBooks);
 		}
 
-		if(CDAV_THIRD_SYNC>0 && !empty($this->user->rights->societe->lire))
+		if (CDAV_THIRD_SYNC > 0 && $this->_hasRight('societe', 'read'))
 		{
 			$addressBooks[] = [
 				'id'														  => $this->user->id + CDAV_ADDRESSBOOK_ID_SHIFT,
@@ -195,7 +215,7 @@ class Dolibarr extends AbstractBackend {
 			];
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && $this->user->hasRight('adherent', 'lire'))
+		if (CDAV_MEMBER_SYNC > 0 && $this->_hasRight('adherent', 'read'))
 		{
 			$addressBooks[] = [
 				'id'														  => $this->user->id + 2*CDAV_ADDRESSBOOK_ID_SHIFT,
@@ -339,7 +359,7 @@ class Dolibarr extends AbstractBackend {
 
 	private function _syncCategories($type, $objectId, array $labels)
 	{
-		if (!isModEnabled('categorie') || empty($this->user->rights->categorie->lire)) {
+		if (!isModEnabled('categorie') || !$this->_hasRight('categorie', 'read')) {
 			return;
 		}
 
@@ -550,9 +570,9 @@ class Dolibarr extends AbstractBackend {
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie as cat ON cat.rowid = cs.fk_categorie
 				WHERE s.entity IN ('.getEntity('societe').')
 				AND s.status=1';
-		if(empty($this->user->rights->societe->client->voir))
+		if (!$this->_hasRight('societe', 'client', 'voir'))
 			$sql.= ' AND s.rowid = sc.fk_soc AND sc.fk_user = '.((int) $this->user->id);
-		if (empty($this->user->rights->fournisseur->lire))
+		if (!$this->_hasRight('fournisseur', 'read'))
 			$sql .= ' AND (s.fournisseur <> 1 OR s.client <> 0)'; // client=0, fournisseur=0 must be visible
 		if (CDAV_THIRD_SYNC==1) // without contact
 			$sql .= ' AND (SELECT count(sp.rowid) FROM '.MAIN_DB_PREFIX.'socpeople sp WHERE sp.fk_soc=s.rowid)=0';
@@ -570,6 +590,7 @@ class Dolibarr extends AbstractBackend {
 	protected function _contactToVCard($obj)
 	{
 		global $conf;
+		$obj = $this->_normalizeDatabaseRow($obj);
 		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
 		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
 		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
@@ -590,7 +611,7 @@ class Dolibarr extends AbstractBackend {
 			$categ[] = $this->langs->transnoentitiesnoconv('ContactPrivate');
 		else
 			$categ[] = $this->langs->transnoentitiesnoconv('ContactPublic');
-		if (isModEnabled('categorie') && ! empty($this->user->rights->categorie->lire))
+		if (isModEnabled('categorie') && $this->_hasRight('categorie', 'read'))
 			if(trim($obj->category_label)!='')
 				$categ[] = trim($obj->category_label);
 
@@ -734,6 +755,7 @@ class Dolibarr extends AbstractBackend {
 	protected function _memberToVCard($obj)
 	{
 		global $conf;
+		$obj = $this->_normalizeDatabaseRow($obj);
 		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
 		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
 		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
@@ -749,7 +771,7 @@ class Dolibarr extends AbstractBackend {
 			$nick[] = $obj->soc_code_fournisseur;
 			$categ[] = $this->langs->transnoentitiesnoconv('Supplier');
 		}
-		if (isModEnabled('categorie') && ! empty($this->user->rights->categorie->lire))
+		if (isModEnabled('categorie') && $this->_hasRight('categorie', 'read'))
 			if(trim($obj->category_label)!='')
 				$categ[] = trim($obj->category_label);
 
@@ -873,6 +895,7 @@ class Dolibarr extends AbstractBackend {
 	protected function _thirdpartyToVCard($obj)
 	{
 		global $conf;
+		$obj = $this->_normalizeDatabaseRow($obj);
 		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
 		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
 		$doliinfo = [];
@@ -887,7 +910,7 @@ class Dolibarr extends AbstractBackend {
 			$doliinfo[] = "💼🏭".$obj->code_fournisseur;
 			$categ[] = $this->langs->transnoentitiesnoconv('Supplier');
 		}
-		if (isModEnabled('categorie') && ! empty($this->user->rights->categorie->lire))
+		if (isModEnabled('categorie') && $this->_hasRight('categorie', 'read'))
 			if(trim($obj->category_label)!='')
 				$categ[] = trim($obj->category_label);
 
@@ -1312,20 +1335,10 @@ class Dolibarr extends AbstractBackend {
 					$teltype[strtoupper($type)]=true;
 				}
 
-				if (version_compare(DOL_VERSION, '20.0', '>=')) // field societe.phone_mobile exists
-				{
-					if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
-						$rdata['phone'] = (string)$tel;
-					if(isset($teltype['CELL']))
-						$rdata['phone_mobile'] = (string)$tel;
-				}
-				else // < v 20
-				{
-					if(isset($teltype['VOICE']) && empty($rdata['phone']))
-						$rdata['phone'] = (string)$tel;
-					if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
-						$rdata['phone'] = (string)$tel;
-				}
+				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
+					$rdata['phone'] = (string)$tel;
+				if(isset($teltype['CELL']))
+					$rdata['phone_mobile'] = (string)$tel;
 
 				if(isset($teltype['FAX']))
 					$rdata['fax'] = (string)$tel;
@@ -1496,7 +1509,7 @@ class Dolibarr extends AbstractBackend {
 
 		$cards = [] ;
 
-		if(intval($addressbookId)<CDAV_ADDRESSBOOK_ID_SHIFT && $this->user->rights->societe->contact->lire)
+		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'read'))
 		{
 			$sql = $this->_getSqlContacts();
 			$result = $this->db->query($sql);
@@ -1517,7 +1530,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 
-		if(CDAV_THIRD_SYNC>0 && intval($addressbookId)>=CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId)<(2*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->rights->societe->lire)
+		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'read'))
 		{
 			$sql = $this->_getSqlThirdparties();
 			$result = $this->db->query($sql);
@@ -1538,7 +1551,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRight('adherent', 'lire'))
+		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'read'))
 		{
 			$sql = $this->_getSqlMembers();
 			$result = $this->db->query($sql);
@@ -1577,7 +1590,7 @@ class Dolibarr extends AbstractBackend {
 
 		debug_log("getCard( $addressbookId , $cardUri )");
 
-		if(intval($addressbookId)<CDAV_ADDRESSBOOK_ID_SHIFT && $this->user->rights->societe->contact->lire)
+		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'read'))
 		{
 			$sqlWhere = $this->_getCardSqlWhere('p', 'ct', $cardUri);
 
@@ -1601,7 +1614,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 
-		if(CDAV_THIRD_SYNC>0 && intval($addressbookId)>=CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId)<(2*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->rights->societe->lire)
+		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'read'))
 		{
 			$sqlWhere = $this->_getCardSqlWhere('s', 'th', $cardUri);
 
@@ -1625,7 +1638,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRight('adherent', 'lire'))
+		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'read'))
 		{
 			$sqlWhere = $this->_getCardSqlWhere('p', 'mb', $cardUri);
 
@@ -1712,7 +1725,7 @@ class Dolibarr extends AbstractBackend {
 		}
 		try {
 
-		if(intval($addressbookId)<CDAV_ADDRESSBOOK_ID_SHIFT && $this->user->rights->societe->contact->creer)
+		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
 		{
 			$rdata = $this->_parseDataContact($cardData, 'C');
 			$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
@@ -1780,7 +1793,7 @@ class Dolibarr extends AbstractBackend {
 			return null;
 		}
 
-		if(CDAV_THIRD_SYNC>0 && intval($addressbookId)>=CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId)<(2*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->rights->societe->creer)
+		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))
 		{
 			$rdata = $this->_parseDataThirdparty($cardData, 'C');
 			$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
@@ -1827,7 +1840,7 @@ class Dolibarr extends AbstractBackend {
 			return null;
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRight('adherent','creer'))
+		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
 		{
 			$rdata = $this->_parseDataMember($cardData, 'C');
 			$memberType = $this->_getDefaultMemberType();
@@ -1911,7 +1924,7 @@ class Dolibarr extends AbstractBackend {
 		}
 		try {
 
-		if(intval($addressbookId)<CDAV_ADDRESSBOOK_ID_SHIFT && $this->user->rights->societe->contact->creer)
+		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
 		{
 			$rdata = $this->_parseDataContact($cardData, 'U');
 			$existing = $this->getCard($addressbookId, $cardUri);
@@ -1956,7 +1969,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 
-		if(CDAV_THIRD_SYNC>0 && intval($addressbookId)>=CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId)<(2*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->rights->societe->creer)
+		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))
 		{
 			$rdata = $this->_parseDataThirdparty($cardData, 'U');
 			$existing = $this->getCard($addressbookId, $cardUri);
@@ -1981,7 +1994,7 @@ class Dolibarr extends AbstractBackend {
 			$this->_syncCategories('thirdparty', $socid, $rdata['_category_labels'] ?? array());
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRight('adherent','creer'))
+		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
 		{
 			$rdata = $this->_parseDataMember($cardData, 'U');
 			$existing = $this->getCard($addressbookId, $cardUri);
@@ -2030,7 +2043,7 @@ class Dolibarr extends AbstractBackend {
 
 		debug_log("deleteContactObject( $addressbookId , $cardUri )");
 
-		if(intval($addressbookId)<CDAV_ADDRESSBOOK_ID_SHIFT && $this->user->rights->societe->contact->supprimer)
+		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'delete'))
 		{
 			$existing = $this->getCard($addressbookId, $cardUri);
 			if ($existing === false) {
@@ -2048,7 +2061,7 @@ class Dolibarr extends AbstractBackend {
 			return true;
 		}
 
-		if(CDAV_THIRD_SYNC>0 && intval($addressbookId)>=CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId)<(2*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->rights->societe->supprimer)
+		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'delete'))
 		{
 
 			$existing = $this->getCard($addressbookId, $cardUri);
@@ -2067,7 +2080,7 @@ class Dolibarr extends AbstractBackend {
 			return true;
 		}
 
-		if(CDAV_MEMBER_SYNC>0 && intval($addressbookId)>=(2*CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId)<(3*CDAV_ADDRESSBOOK_ID_SHIFT) && $this->user->hasRight('adherent','supprimer'))
+		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'delete'))
 		{
 
 			$existing = $this->getCard($addressbookId, $cardUri);

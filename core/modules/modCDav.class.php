@@ -58,11 +58,9 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '4.0.1';
+		$this->version = '4.0.2';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
-		// Where to store the module in setup page (0=common,1=interface,2=others,3=very specific)
-		$this->special = 1;
 		// Name of image file used for this module.
 		// If file is in theme/yourtheme/img directory under name object_pictovalue.png, use this->picto='pictovalue'
 		// If file is in module/img directory under name object_pictovalue.png, use this->picto='pictovalue@module'
@@ -215,7 +213,7 @@ class modCDav extends DolibarrModules
 									'langs'=>'cdav@cdav',	        // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
 									'position'=>190,
 									'enabled'=>'isModEnabled("cdav")',
-									'perms'=>'$user->rights->societe->contact->lire', // Use 'perms'=>'$user->rights->mymodule->level1->level2' if you want your menu with a permission rules
+									'perms'=>'$user->hasRight("societe", "contact", "read")',
 									'target'=>'',
 									'user'=>0);
 
@@ -227,7 +225,7 @@ class modCDav extends DolibarrModules
 									'langs'=>'cdav@cdav',	        // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
 									'position'=>190,
 									'enabled'=>'isModEnabled("cdav")',
-									'perms'=>'$user->rights->agenda->myactions->read', // Use 'perms'=>'$user->rights->mymodule->level1->level2' if you want your menu with a permission rules
+									'perms'=>'$user->hasRight("agenda", "myactions", "read")',
 									'target'=>'',
 									'user'=>0);
 		
@@ -239,7 +237,7 @@ class modCDav extends DolibarrModules
 									'langs'=>'cdav@cdav',	        // Lang file to use (without .lang) by module. File must be in langs/code_CODE/ directory.
 									'position'=>190,
 									'enabled'=>'isModEnabled("cdav")',
-									'perms'=>'$user->rights->agenda->myactions->read', // Use 'perms'=>'$user->rights->mymodule->level1->level2' if you want your menu with a permission rules
+									'perms'=>'$user->hasRight("agenda", "myactions", "read")',
 									'target'=>'',
 									'user'=>0);
 		// Add here entries to declare new menus

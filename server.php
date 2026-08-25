@@ -18,54 +18,49 @@ error_reporting(E_ALL & ~E_NOTICE);
 ini_set("display_errors", 0);
 ini_set("log_errors", 1);
 
-function exception_error_handler($errno, $errstr, $errfile, $errline) {
+function cdav_exception_error_handler($errno, $errstr, $errfile, $errline) {
 	if(function_exists("debug_log"))
 	{
 		debug_log("Error $errno : $errstr - $errfile @ $errline");
 		foreach(debug_backtrace(false) as $trace)
-			debug_log(" - ".$trace['file'].'@'.$trace['line'].' '.$trace['function'].'(...)');
+			debug_log(" - ".($trace['file'] ?? '').'@'.($trace['line'] ?? '').' '.($trace['function'] ?? '').'(...)');
 	}
 	throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
 }
 
-// debug
-//$debug_file = fopen( sys_get_temp_dir() . '/cdav_'.date('Ymd').'.log','a');
-$debug_file = false;
-
 function debug_log($txt)
 {
-	global $debug_file;
-	if ($debug_file)
-	{
-		fputs($debug_file, '========' . date('H:i:s').': '.$txt."\n");
-		fflush($debug_file);
+	// Keep DAV diagnostics inside Dolibarr's configured logger. Verbose CDav
+	// traces are opt-in to avoid separate, unrotated files containing PII.
+	if (function_exists('getDolGlobalInt') && getDolGlobalInt('CDAV_DEBUG') && function_exists('dol_syslog')) {
+		dol_syslog('[CDav] '.(string) $txt, LOG_DEBUG);
 	}
+}
+
+/** Import an HTTP Basic header when PHP-FPM did not populate PHP_AUTH_*. */
+function cdav_import_basic_auth($header)
+{
+	if (isset($_SERVER['PHP_AUTH_USER']) && isset($_SERVER['PHP_AUTH_PW'])) {
+		return;
+	}
+	if (!preg_match('/^Basic\s+([A-Za-z0-9+\/=]+)$/i', trim((string) $header), $matches)) {
+		return;
+	}
+	$decoded = base64_decode($matches[1], true);
+	if ($decoded === false || strpos($decoded, ':') === false) {
+		return;
+	}
+	list($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']) = explode(':', $decoded, 2);
 }
 
 // HTTP auth workaround for php in fastcgi mode HTTP_AUTHORIZATION set by rewrite engine in .htaccess
-if( isset($_SERVER['HTTP_AUTHORIZATION']) && 
-	(!isset($_SERVER['PHP_AUTH_USER']) || !isset($_SERVER['PHP_AUTH_PW'])) )
-{
-	$rAuth = explode(':', base64_decode(substr($_SERVER['HTTP_AUTHORIZATION'], 6)));
-
-	if(count($rAuth)>1)
-	{
-		$_SERVER['PHP_AUTH_USER'] = $rAuth[0];
-		$_SERVER['PHP_AUTH_PW'] = $rAuth[1];
-	}
+if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+	cdav_import_basic_auth($_SERVER['HTTP_AUTHORIZATION']);
 }
 
 // HTTP auth workaround for php in fastcgi mode REDIRECT_HTTP_AUTHORIZATION set by rewrite engine in .htaccess
-if( isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) && 
-	(!isset($_SERVER['PHP_AUTH_USER']) || !isset($_SERVER['PHP_AUTH_PW'])) )
-{
-	$rAuth = explode(':', base64_decode(substr($_SERVER['REDIRECT_HTTP_AUTHORIZATION'], 6)));
-
-	if(count($rAuth)>1)
-	{
-		$_SERVER['PHP_AUTH_USER'] = $rAuth[0];
-		$_SERVER['PHP_AUTH_PW'] = $rAuth[1];
-	}
+if (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+	cdav_import_basic_auth($_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
 }
 
 define('NOTOKENRENEWAL',1); 								// Disables token renewal
@@ -118,7 +113,7 @@ require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 if(!isModEnabled('cdav'))
 	die('module CDav not enabled !');
 
-//set_error_handler("exception_error_handler", E_ERROR | E_USER_ERROR |
+//set_error_handler("cdav_exception_error_handler", E_ERROR | E_USER_ERROR |
 //				E_CORE_ERROR | E_COMPILE_ERROR | E_RECOVERABLE_ERROR );
 
 
@@ -205,7 +200,7 @@ $user = new User($db);
 if(isset($_SERVER['PHP_AUTH_USER']) && $_SERVER['PHP_AUTH_USER']!='')
 {
 	$user->fetch('',$_SERVER['PHP_AUTH_USER']);
-	$user->getrights();
+	$user->loadRights();
 }
 
 $cdavLib = new CdavLib($user, $db, $langs);
@@ -238,14 +233,13 @@ $authBackend = new DAV\Auth\Backend\BasicCallBack(function ($username, $password
 	
 	// Authentication mode
 	// disable googlerecaptcha
-	$dolibarr_main_authentication = str_replace('googlerecaptcha','dolibarr', $dolibarr_main_authentication);
+	$dolibarr_main_authentication = str_replace('googlerecaptcha', 'dolibarr', (string) $dolibarr_main_authentication);
 	if (empty($dolibarr_main_authentication))
 		$dolibarr_main_authentication='http,dolibarr';
 	$authmode = explode(',',$dolibarr_main_authentication);
-	$entity = (GETPOST('entity','int') ? GETPOST('entity','int') : (!empty($conf->entity) ? $conf->entity : 1));
-	if( (version_compare(DOL_VERSION, '11.0', '<')) && checkLoginPassEntity($username,$password,$entity,$authmode)!=$username
-		||
-		(version_compare(DOL_VERSION, '11.0', '>=')) && checkLoginPassEntity($username,$password,$entity,$authmode,'dav')!=$username )
+	$requestedEntity = GETPOSTINT('entity');
+	$entity = $requestedEntity > 0 ? $requestedEntity : (!empty($conf->entity) ? $conf->entity : 1);
+	if (checkLoginPassEntity($username, $password, $entity, $authmode, 'dav') != $username)
 	{
 		debug_log("Authentication failed 4 for user $username with pass ".str_pad('', strlen($password), '*'));
 		return false;
@@ -279,7 +273,7 @@ $nodes = array(
 	new DAV\FS\Directory($dolibarr_main_data_root. '/cdav/public')
 );
 // admin can access all dolibarr documents
-if($user->admin)
+if ($user->isAdmin())
 	$nodes[] = new DAV\FS\Directory($dolibarr_main_data_root);
 
 // The server object is responsible for making sense out of the WebDAV protocol

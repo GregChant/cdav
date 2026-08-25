@@ -30,9 +30,10 @@ Recurring events are kept as one DAV resource. Their recurrence rules, exception
 invitations and alarms are preserved in the CDav metadata table while Dolibarr
 continues to own the event's title, dates, notes, location and availability.
 
-Version 4.0.1 normalizes rich-text descriptions with Dolibarr's native cleaner
+Version 4.0.2 normalizes rich-text descriptions with Dolibarr's native cleaner
 before CalDAV/CardDAV export, produces RFC-compliant folded calendar/card data,
-localizes contact civilities, and repairs Full/Free-Busy ICS subscriptions.
+localizes contact civilities, repairs Full/Free-Busy ICS subscriptions, and uses
+Dolibarr's native permission/loading/logging APIs to prevent PHP warning storms.
 
 Automatic tasks generation in projects with services from linked Propositions and/or Orders 
 Module setup offer you to :
@@ -72,7 +73,8 @@ If you find the module is useful and want to finance improvements, consider to p
 
 ## How to install
 
-PHP 8.0+ and Dolibarr 23.0+ are required.
+PHP 8.0+ and Dolibarr 23.0+ are required. Version 4.0.2 is tested on Dolibarr
+23.0.3 with PHP 8.5.
 
 Dolibarr native calendar module must be activated *before* installing CDav module.
 

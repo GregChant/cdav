@@ -140,7 +140,7 @@ elseif($type=='CalDAV')
 
 	echo '<h3>'.$langs->trans('URLforCalDAV').'</h3>';
 
-	if(isset($user->rights->agenda->allactions->read) && $user->rights->agenda->allactions->read)
+	if ($user->hasRight('agenda', 'allactions', 'read'))
 	{
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname
 			FROM '.MAIN_DB_PREFIX.'user u WHERE u.fk_soc IS NULL
@@ -170,7 +170,7 @@ elseif($type=='ICS')
 
 	echo '<h3>'.$langs->trans('URLforICS').'</h3>';
 
-	if(isset($user->rights->agenda->allactions->read) && $user->rights->agenda->allactions->read)
+	if ($user->hasRight('agenda', 'allactions', 'read'))
 	{
 		$sql = 'SELECT u.rowid, u.login, u.firstname, u.lastname
 			FROM '.MAIN_DB_PREFIX.'user u WHERE u.fk_soc IS NULL

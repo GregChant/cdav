@@ -154,10 +154,10 @@ class Dolibarr extends AbstractBackend {
 
 		$calendars = [];
 
-		if(! $this->user->rights->agenda->myactions->read)
+		if (!$this->_hasAgendaRight('myactions', 'read'))
 			return $calendars;
 
-		if(!isset($this->user->rights->agenda->allactions->read) || !$this->user->rights->agenda->allactions->read)
+		if (!$this->_hasAgendaRight('allactions', 'read'))
 			$onlyme = true;
 		else
 			$onlyme = false;
@@ -326,10 +326,10 @@ class Dolibarr extends AbstractBackend {
 
 		$calevent = null ;
 
-		if(! $this->user->rights->agenda->myactions->read)
+		if (!$this->_hasAgendaRight('myactions', 'read'))
 			return $calevent;
 
-		if($calid!=$this->user->id && (!isset($this->user->rights->agenda->allactions->read) || !$this->user->rights->agenda->allactions->read))
+		if ($calid != $this->user->id && !$this->_hasAgendaRight('allactions', 'read'))
 			return $calevent;
 		if (!$this->_calendarUserExists($calid))
 			return $calevent;
@@ -501,20 +501,9 @@ class Dolibarr extends AbstractBackend {
 
 			if(!$oid)	// new event
 			{
-				if (version_compare(DOL_VERSION, '14.0', '>='))
-				{
-					$reffield='ref,';
-					$refvalue='NOW(),';
-				}
-				else
-				{
-					$reffield='';
-					$refvalue='';
-				}
-
 				debug_log("    creating event");
-				$sql = "INSERT INTO ".MAIN_DB_PREFIX."actioncomm (".$reffield."entity,datep, datep2, fk_action, code, label, datec, tms, fk_user_author, fk_parent, fk_user_action, priority, transparency, fulldayevent, percent, location, durationp, note)
-							VALUES (".$refvalue."
+				$sql = "INSERT INTO ".MAIN_DB_PREFIX."actioncomm (ref, entity,datep, datep2, fk_action, code, label, datec, tms, fk_user_author, fk_parent, fk_user_action, priority, transparency, fulldayevent, percent, location, durationp, note)
+							VALUES ('(PROV)',
 								".(int)$conf->entity.",
 								'".($calendarData['fullday'] == 1 ? date('Y-m-d 00:00:00', $occurence->start) : date('Y-m-d H:i:s', $occurence->start))."',
 								'".($calendarData['fullday'] == 1 ? date('Y-m-d 23:59:59', $occurence->end-1) : date('Y-m-d H:i:s', $occurence->end))."',
@@ -549,10 +538,9 @@ class Dolibarr extends AbstractBackend {
 					throw new \Sabre\DAV\Exception('Unable to retrieve the new Dolibarr event');
 				}
 				debug_log("    event $oid created");
-				if (version_compare(DOL_VERSION, '14.0', '>='))
-				{
-					$sql = "UPDATE ".MAIN_DB_PREFIX."actioncomm SET ref=id WHERE id=".$oid;
-					$this->db->query($sql);
+				$sql = "UPDATE ".MAIN_DB_PREFIX."actioncomm SET ref=id WHERE id=".$oid;
+				if (!$this->db->query($sql)) {
+					throw new \Sabre\DAV\Exception('Unable to finalize the Dolibarr event reference');
 				}
 				//Insérer l'UUID externe
 				$storedObjectUri = $iOccur === 0 ? $objectUri : $oid.'-ev-'.CDAV_URI_KEY;
@@ -653,7 +641,6 @@ class Dolibarr extends AbstractBackend {
 		if (!$this->_canWriteCalendar($calendarId))
 		{
             debug_log('User '.$this->user->id.' not authorized to update calendar '.$calendarId);
-            debug_log(print_r($this->user->rights, true));
 			throw new Forbidden('Not allowed to update objects in this calendar');
 		}
 
@@ -874,10 +861,10 @@ class Dolibarr extends AbstractBackend {
 	 */
 	private function _hasAgendaRight($scope, $action)
 	{
-		if (method_exists($this->user, 'hasRight')) {
-			return (bool) $this->user->hasRight('agenda', $scope, $action);
+		if (!is_object($this->user) || !method_exists($this->user, 'hasRight')) {
+			return false;
 		}
-		return !empty($this->user->rights->agenda->{$scope}->{$action});
+		return (bool) $this->user->hasRight('agenda', $scope, $action);
 	}
 
 	private function _calendarUserExists($calendarId)
@@ -903,9 +890,9 @@ class Dolibarr extends AbstractBackend {
 			return false;
 		}
 		if ((int) $calendarId === (int) $this->user->id) {
-			return $this->_hasAgendaRight('myactions', 'create');
+			return $this->_hasAgendaRight('myactions', 'write');
 		}
-		return $this->_hasAgendaRight('allactions', 'create');
+		return $this->_hasAgendaRight('allactions', 'write');
 	}
 
 	private function _canDeleteFromCalendar($calendarId)
@@ -922,10 +909,10 @@ class Dolibarr extends AbstractBackend {
 	private function _canModifySource($source)
 	{
 		if ($source === 'pe' || $source === 'pt') {
-			return isModEnabled('project') && (bool) $this->user->hasRight('projet', 'creer');
+			return isModEnabled('project') && (bool) $this->user->hasRight('projet', 'write');
 		}
 		if ($source === 'fi') {
-			return isModEnabled('ficheinter') && (bool) $this->user->hasRight('ficheinter', 'creer');
+			return isModEnabled('ficheinter') && (bool) $this->user->hasRight('ficheinter', 'write');
 		}
 		return $source === 'ev';
 	}
@@ -939,7 +926,7 @@ class Dolibarr extends AbstractBackend {
 		if (!$this->_canModifySource($source)) {
 			return false;
 		}
-		if ($this->_hasAgendaRight('allactions', 'create')) {
+		if ($this->_hasAgendaRight('allactions', 'write')) {
 			return true;
 		}
 		if ((int) $calendarId !== (int) $this->user->id) {
@@ -1078,10 +1065,10 @@ class Dolibarr extends AbstractBackend {
 
 		$calendars = [];
 
-		if(! $this->user->rights->agenda->myactions->read)
+		if (!$this->_hasAgendaRight('myactions', 'read'))
 			return $calendars;
 
-		if(!isset($this->user->rights->agenda->allactions->read) || !$this->user->rights->agenda->allactions->read)
+		if (!$this->_hasAgendaRight('allactions', 'read'))
 			$onlyme = true;
 		else
 			$onlyme = false;

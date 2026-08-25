@@ -72,7 +72,7 @@ class Dolibarr extends AbstractBackend {
 		$this->db = $db;
 		
 		$this->allprincipals = array(
-			array('id'=>$user->id*10,  'uri'=>'principals/'.$user->login,'email'=>$user->email,'displayname'=>trim($user->firstname.' '.$user->lastname)),
+			array('id'=>$user->id*10,  'uri'=>'principals/'.$user->login,'email'=>$user->email,'displayname'=>trim((string) $user->firstname.' '.(string) $user->lastname)),
 			array('id'=>$user->id*10+1,'uri'=>'principals/'.$user->login.'/calendar-proxy-read','email'=>null,'displayname'=>null),
 			array('id'=>$user->id*10+2,'uri'=>'principals/'.$user->login.'/calendar-proxy-write','email'=>null,'displayname'=>null),
 		);

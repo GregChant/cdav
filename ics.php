@@ -192,12 +192,10 @@ if ($calendarUser->fetch($id) <= 0) {
 	echo 'Unauthorized Access !';
 	exit;
 }
-$calendarUser->rights = new stdClass();
-$calendarUser->rights->agenda = new stdClass();
-$calendarUser->rights->agenda->myactions = new stdClass();
-$calendarUser->rights->agenda->allactions = new stdClass();
-$calendarUser->rights->societe = new stdClass();
-$calendarUser->rights->societe->client = new stdClass();
+$calendarUser->loadRights();
+// The signed subscription grants read access to this specific calendar. Keep
+// the real User object and its complete Dolibarr rights tree, then constrain
+// company visibility to the historical private-feed behavior.
 $calendarUser->rights->agenda->myactions->read = true;
 $calendarUser->rights->agenda->allactions->read = true;
 $calendarUser->rights->societe->client->voir = false;

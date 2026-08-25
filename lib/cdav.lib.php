@@ -28,6 +28,31 @@ class CdavLib
 	}
 
 	/**
+	 * Check a permission through Dolibarr's native User API.
+	 *
+	 * Directly walking the rights stdClass used to emit several warnings per
+	 * event when a DAV/ICS caller supplied an incomplete user object.
+	 */
+	private function hasRight($module, $level1, $level2 = '')
+	{
+		if (!is_object($this->user) || !method_exists($this->user, 'hasRight')) {
+			return false;
+		}
+		return (bool) $this->user->hasRight($module, $level1, $level2);
+	}
+
+	/** Normalize nullable SQL fields before passing them to PHP string APIs. */
+	private function normalizeDatabaseRow($row)
+	{
+		foreach (get_object_vars($row) as $key => $value) {
+			if ($value === null) {
+				$row->{$key} = '';
+			}
+		}
+		return $row;
+	}
+
+	/**
 	 * Convert Dolibarr rich text to readable plain text while preserving lines.
 	 * dol_string_nohtmltag() is the canonical Dolibarr HTML/entity cleaner.
 	 */
@@ -235,7 +260,7 @@ class CdavLib
 						LEFT OUTER JOIN '.MAIN_DB_PREFIX.'user AS u ON (u.rowid=fk_element)
 						WHERE ar.element_type=\'user\' AND fk_actioncomm=a.id) AS other_users
 				FROM '.MAIN_DB_PREFIX.'actioncomm AS a';
-		if (! $this->user->rights->societe->client->voir )//FIXME si 'voir' on voit plus de chose ?
+		if (!$this->hasRight('societe', 'client', 'voir'))
 		{
 			$sql.=' LEFT OUTER JOIN '.MAIN_DB_PREFIX.'societe_commerciaux AS sc ON (a.fk_soc = sc.fk_soc AND sc.fk_user='.$this->user->id.')
 					LEFT JOIN '.MAIN_DB_PREFIX.'societe AS s ON (s.rowid = sc.fk_soc)
@@ -327,7 +352,7 @@ class CdavLib
 	 * @param string elem_source 'pt'=Project TODO  'pe'=Project EVENT
 	 * @return string
 	 */
-	public function getSqlProjectTasks($calid, $oid=false, $elem_source)
+	public function getSqlProjectTasks($calid, $oid = false, $elem_source = 'pt')
 	{
 		global $conf;
 
@@ -461,6 +486,7 @@ class CdavLib
 	 */
 	public function toVCalendar($calid, $obj, $bHeader)
 	{
+	   $obj = $this->normalizeDatabaseRow($obj);
 	   if($obj->elem_source=='ev')		// Calendar Event
 	   {
 			$categ = [];
@@ -805,10 +831,10 @@ class CdavLib
 		$calevents = [] ;
 		$rSql = [] ;
 
-		if(! $this->user->rights->agenda->myactions->read)
+		if (!$this->hasRight('agenda', 'myactions', 'read'))
 			return $calevents;
 
-		if($calid!=$this->user->id && (!isset($this->user->rights->agenda->allactions->read) || !$this->user->rights->agenda->allactions->read))
+		if ($calid != $this->user->id && !$this->hasRight('agenda', 'allactions', 'read'))
 			return $calevents;
 
 		$rSql['ev'] = $this->getSqlCalEvents($calid);

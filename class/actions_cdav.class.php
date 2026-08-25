@@ -72,7 +72,7 @@ class ActionsCDav
 		}
 		// echo "Result ";
 		// print_r($result);
-		if ($db->num_rows($result) == 0 && $user->hasRight('projet', 'creer')) {
+		if ($db->num_rows($result) == 0 && $user->hasRight('projet', 'write')) {
 			$db->free($result);
 			//echo "NOTASK";
 
@@ -285,26 +285,27 @@ class ActionsCDav
 					}
 					if (is_numeric($defaultref) && $defaultref <= 0) $defaultref = '';
 
-					$label = trim($label);
+					$label = trim((string) $label);
 					// Use Dolibarr's native rich-text cleaner so entities and line
 					// breaks from the WYSIWYG editor are preserved correctly.
-					$desc = dol_string_nohtmltag($rTasksDesc[$taskid], 0, 'UTF-8');
+					$desc = dol_string_nohtmltag((string) ($rTasksDesc[$taskid] ?? ''), 0, 'UTF-8');
+					$duration = (string) ($rTasksDuree[$taskid] ?? '');
 
 					if (empty($label)) {
 						$descLines = explode("\n", $desc);
 						$label = trim($descLines[0]);
 					}
 
-					if (preg_match_all($rechI, $rTasksDuree[$taskid], $out0))
+					if (preg_match_all($rechI, $duration, $out0))
 						$task_duration = intval($out0[1][0]) * 60;
-					elseif (preg_match_all($rechH, $rTasksDuree[$taskid], $out1)) {
+					elseif (preg_match_all($rechH, $duration, $out1)) {
 						//if( $hIni + intval($out1[1][0]) <= 24 )
 						$task_duration = intval($out1[1][0]) * 3600;
 						//else // too many hour for a single day, convert hours in working days after rounding
 						//	$task_duration = (intval($hEnd)-intval($hIni))*3600 + ( (round(intval($out[1][0])/($hEnd-$hIni))-1)*3600*24 );
-					} elseif (preg_match_all($rechJ, $rTasksDuree[$taskid], $out2))
+					} elseif (preg_match_all($rechJ, $duration, $out2))
 						$task_duration = (intval($hEnd) - intval($hIni)) * 3600 + ((intval($out2[1][0]) - 1) * 3600 * 24);
-					elseif (preg_match_all($rechS, $rTasksDuree[$taskid], $out3))
+					elseif (preg_match_all($rechS, $duration, $out3))
 						$task_duration = (intval($hEnd) - intval($hIni)) * 3600 + (((intval($out3[1][0])) * 3600 * 24 * 7) - 24 * 3600);
 					else $task_duration = 3600;
 
