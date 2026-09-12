@@ -256,6 +256,7 @@ class ActionsCDav
 				//exit;
 
 				// creating tasks
+				require_once DOL_DOCUMENT_ROOT.'/projet/class/task.class.php';
 
 				$rechI = '/[ ]*([0123456789]*)[ ]*[i|min]/i';
 				$rechH = '/[ ]*([0123456789]*)[ ]*h/i';
@@ -327,29 +328,12 @@ class ActionsCDav
 					// print_r($task);
 
 					if ($task_id > 0 && $CDAV_TASK_USER_ROLE > 0) {
-						$sql = "INSERT INTO " . MAIN_DB_PREFIX . "element_contact (`datecreate`, `statut`, `element_id`, `fk_c_type_contact`, `fk_socpeople` )
-							VALUES (
-								NOW(),
-								4,
-								" . (int) $task_id . ",
-								" . (int) $CDAV_TASK_USER_ROLE . ",
-								" . (int) $task_user . "
-							)";
-						if (!$db->query($sql)) {
+						if ($task->add_contact((int) $task_user, (int) $CDAV_TASK_USER_ROLE, 'internal') < 0) {
 							$error++;
 						}
 					} elseif ($task_id <= 0) {
 						$error++;
 					}
-
-					/*$ref = "TK".date("ym")."-".$tasknum;
-					$sql = "INSERT INTO ".MAIN_DB_PREFIX."projet_task (`ref`, `entity`, `fk_projet`, `datec`, `label`, `description`, ``, ``, ``, ``, ``)
-							VALUES (
-								,
-								,
-							)";*/
-
-					//$db->query($sql);
 				}
 			}
 		} else {

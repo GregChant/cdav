@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '4.0.3';
+		$this->version = '5.0.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -91,7 +91,7 @@ class modCDav extends DolibarrModules
 
 		// Data directories to create when module is enabled.
 		// Example: this->dirs = array("/mymodule/temp");
-		$this->dirs = array('/cdav','/cdav/public');
+		$this->dirs = array('/cdav');
 
 		// Config pages. Put here list of php page, stored into mymodule/admin directory, to use to setup module.
 		$this->config_page_url = array('setup.php@cdav');
@@ -134,6 +134,18 @@ class modCDav extends DolibarrModules
 			20 => array('CDAV_MEMBER_SYNC', 'chaine', '0', 'Sync members',0,'current',0),
 			21 => array('CDAV_INTERV_SYNC', 'chaine', '0', 'How to sync interventions',0,'current',0),
 			22 => array('CDAV_INTERV_USER_ROLE', 'chaine', '', 'Intervention user role when attaching a user to an intervention',0,'current',0),
+			23 => array('CDAV_ALLOW_INSECURE_HTTP', 'chaine', '0', 'Allow DAV Basic authentication without HTTPS (unsafe)',0,'current',0),
+			24 => array('CDAV_MAX_REQUEST_MB', 'chaine', '16', 'Maximum DAV request body size in MiB',0,'current',0),
+			25 => array('CDAV_TRUSTED_PROXY_IPS', 'chaine', '', 'Exact reverse-proxy IP addresses allowed to assert forwarded HTTPS',0,'current',0),
+			26 => array('CDAV_SYNC_RETENTION_DAYS', 'chaine', '180', 'RFC 6578 sync journal retention',0,'current',0),
+			27 => array('CDAV_NATIVE_REMINDERS', 'chaine', '0', 'Project compatible VALARMs to native browser reminders',0,'current',0),
+			28 => array('CDAV_DELEGATION', 'chaine', '0', 'Expose calendar-proxy ACLs derived from native Agenda rights',0,'current',0),
+			29 => array('CDAV_SCHEDULING', 'chaine', '0', 'Enable local RFC 6638 inbox/outbox scheduling',0,'current',0),
+			30 => array('CDAV_SCHEDULING_RETENTION_DAYS', 'chaine', '30', 'Scheduling inbox and audit retention',0,'current',0),
+			31 => array('CDAV_MANAGED_ATTACHMENTS', 'chaine', '0', 'Enable RFC 8607 managed Agenda attachments',0,'current',0),
+			32 => array('CDAV_MANAGED_ATTACHMENT_MAX_MB', 'chaine', '8', 'Maximum managed attachment size',0,'current',0),
+			33 => array('CDAV_MANAGED_ATTACHMENT_MAX_COUNT', 'chaine', '10', 'Maximum managed attachments per event',0,'current',0),
+			34 => array('CDAV_MANAGED_ATTACHMENT_QUOTA_MB', 'chaine', '256', 'Managed attachment quota per user',0,'current',0),
 		);
 
 		// Array to add new pages in new tabs

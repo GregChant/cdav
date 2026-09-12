@@ -213,7 +213,38 @@ if ($action == 'setvalue') {
 	dolibarr_set_const(
 									$db, "CDAV_QRCODE_DAVX5_ENABLED",
 									GETPOST('CDAV_QRCODE_DAVX5_ENABLED', 'alphanohtml'), 'chaine', 0, '', $conf->entity
-);
+	);
+	dolibarr_set_const(
+									$db, "CDAV_ALLOW_INSECURE_HTTP",
+									GETPOSTINT('CDAV_ALLOW_INSECURE_HTTP'), 'chaine', 0, '', $conf->entity
+	);
+	dolibarr_set_const(
+									$db, "CDAV_MAX_REQUEST_MB",
+									max(1, min(64, GETPOSTINT('CDAV_MAX_REQUEST_MB'))), 'chaine', 0, '', $conf->entity
+	);
+	$trustedProxyIps = array();
+	foreach (preg_split('/[\s,;]+/', GETPOST('CDAV_TRUSTED_PROXY_IPS', 'alphanohtml'), -1, PREG_SPLIT_NO_EMPTY) as $proxyIp) {
+		if (filter_var($proxyIp, FILTER_VALIDATE_IP)) {
+			$trustedProxyIps[$proxyIp] = true;
+		}
+	}
+	dolibarr_set_const(
+									$db, "CDAV_TRUSTED_PROXY_IPS",
+									implode(',', array_keys($trustedProxyIps)), 'chaine', 0, '', $conf->entity
+	);
+	foreach (array('CDAV_NATIVE_REMINDERS', 'CDAV_DELEGATION', 'CDAV_SCHEDULING', 'CDAV_MANAGED_ATTACHMENTS') as $booleanSetting) {
+		dolibarr_set_const($db, $booleanSetting, GETPOSTINT($booleanSetting) ? 1 : 0, 'chaine', 0, '', $conf->entity);
+	}
+	$boundedSettings = array(
+		'CDAV_SYNC_RETENTION_DAYS' => array(7, 730),
+		'CDAV_SCHEDULING_RETENTION_DAYS' => array(1, 90),
+		'CDAV_MANAGED_ATTACHMENT_MAX_MB' => array(1, 64),
+		'CDAV_MANAGED_ATTACHMENT_MAX_COUNT' => array(1, 50),
+		'CDAV_MANAGED_ATTACHMENT_QUOTA_MB' => array(1, 4096),
+	);
+	foreach ($boundedSettings as $setting => $bounds) {
+		dolibarr_set_const($db, $setting, max($bounds[0], min($bounds[1], GETPOSTINT($setting))), 'chaine', 0, '', $conf->entity);
+	}
 
 
 	$mesg = "<font class='ok'>".$langs->trans("SetupSaved")."</font>";
@@ -252,6 +283,18 @@ $CDAV_EXTRAFIELD_DURATION=getDolGlobalString('CDAV_EXTRAFIELD_DURATION');
 $CDAV_TASK_HOUR_INI=getDolGlobalInt('CDAV_TASK_HOUR_INI', 8);
 $CDAV_TASK_HOUR_END=getDolGlobalInt('CDAV_TASK_HOUR_END', 17);
 $CDAV_QRCODE_DAVX5_ENABLED=getDolGlobalInt('CDAV_QRCODE_DAVX5_ENABLED');
+$CDAV_ALLOW_INSECURE_HTTP=getDolGlobalInt('CDAV_ALLOW_INSECURE_HTTP');
+$CDAV_MAX_REQUEST_MB=getDolGlobalInt('CDAV_MAX_REQUEST_MB', 16);
+$CDAV_TRUSTED_PROXY_IPS=getDolGlobalString('CDAV_TRUSTED_PROXY_IPS');
+$CDAV_SYNC_RETENTION_DAYS=getDolGlobalInt('CDAV_SYNC_RETENTION_DAYS', 180);
+$CDAV_NATIVE_REMINDERS=getDolGlobalInt('CDAV_NATIVE_REMINDERS');
+$CDAV_DELEGATION=getDolGlobalInt('CDAV_DELEGATION');
+$CDAV_SCHEDULING=getDolGlobalInt('CDAV_SCHEDULING');
+$CDAV_SCHEDULING_RETENTION_DAYS=getDolGlobalInt('CDAV_SCHEDULING_RETENTION_DAYS', 30);
+$CDAV_MANAGED_ATTACHMENTS=getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS');
+$CDAV_MANAGED_ATTACHMENT_MAX_MB=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_MAX_MB', 8);
+$CDAV_MANAGED_ATTACHMENT_MAX_COUNT=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_MAX_COUNT', 10);
+$CDAV_MANAGED_ATTACHMENT_QUOTA_MB=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_QUOTA_MB', 256);
 
 
 dol_fiche_head('', 'setup', $langs->trans("CDav"), 0, "cdav@cdav");
@@ -268,10 +311,48 @@ print '<td align=left>'.$langs->trans("Value").'</td>';
 print '</tr>'."\n";
 
 print '<tr >';
+print '<td align=left><strong>'.$langs->trans("CDavTrustedProxyIps").'</strong><br/>'.$langs->trans("CDavTrustedProxyIpsHelp").'</td>';
+print '<td align=left><input size="48" type="text" class="flat" name="CDAV_TRUSTED_PROXY_IPS" value="'.dol_escape_htmltag($CDAV_TRUSTED_PROXY_IPS).'" placeholder="192.0.2.10,2001:db8::10"></td>';
+print '</tr>'."\n";
+
+print '<tr >';
 print '<td  align=left><strong>'.$langs->trans("CDavSyncToken").'</strong><br/>'.$langs->trans("CDavSyncTokenHelp").'</td>';
 print '<td  align=left>';
 print '<input size="8" type="text" class="flat" name="CDAV_URI_KEY" value="'.htmlentities($CDAV_URI_KEY).'">';
 print '</td></tr>'."\n";
+
+print '<tr >';
+print '<td align=left><strong>'.$langs->trans("CDavRequireHttps").'</strong><br/>'.$langs->trans("CDavRequireHttpsHelp").'</td>';
+print '<td align=left>'.$form->selectyesno('CDAV_ALLOW_INSECURE_HTTP', $CDAV_ALLOW_INSECURE_HTTP, 1).'</td>';
+print '</tr>'."\n";
+
+print '<tr >';
+print '<td align=left><strong>'.$langs->trans("CDavMaxRequestSize").'</strong><br/>'.$langs->trans("CDavMaxRequestSizeHelp").'</td>';
+print '<td align=left><input size="6" type="number" min="1" max="64" class="flat" name="CDAV_MAX_REQUEST_MB" value="'.((int) $CDAV_MAX_REQUEST_MB).'"> MiB</td>';
+print '</tr>'."\n";
+
+print '<tr class="liste_titre"><td align="center" colspan="2">'.$langs->trans('CDavAdvancedDavFeatures').'</td></tr>';
+$yesNoSettings = array(
+	'CDAV_NATIVE_REMINDERS' => array('CDavNativeReminders', 'CDavNativeRemindersHelp', $CDAV_NATIVE_REMINDERS),
+	'CDAV_DELEGATION' => array('CDavDelegation', 'CDavDelegationHelp', $CDAV_DELEGATION),
+	'CDAV_SCHEDULING' => array('CDavScheduling', 'CDavSchedulingHelp', $CDAV_SCHEDULING),
+	'CDAV_MANAGED_ATTACHMENTS' => array('CDavManagedAttachments', 'CDavManagedAttachmentsHelp', $CDAV_MANAGED_ATTACHMENTS),
+);
+foreach ($yesNoSettings as $name => $setting) {
+	print '<tr><td><strong>'.$langs->trans($setting[0]).'</strong><br>'.$langs->trans($setting[1]).'</td>';
+	print '<td>'.$form->selectyesno($name, $setting[2], 1).'</td></tr>';
+}
+$numberSettings = array(
+	'CDAV_SYNC_RETENTION_DAYS' => array('CDavSyncRetention', 'CDavSyncRetentionHelp', $CDAV_SYNC_RETENTION_DAYS, 7, 730, $langs->trans('Days')),
+	'CDAV_SCHEDULING_RETENTION_DAYS' => array('CDavSchedulingRetention', 'CDavSchedulingRetentionHelp', $CDAV_SCHEDULING_RETENTION_DAYS, 1, 90, $langs->trans('Days')),
+	'CDAV_MANAGED_ATTACHMENT_MAX_MB' => array('CDavManagedAttachmentMaxSize', 'CDavManagedAttachmentMaxSizeHelp', $CDAV_MANAGED_ATTACHMENT_MAX_MB, 1, 64, 'MiB'),
+	'CDAV_MANAGED_ATTACHMENT_MAX_COUNT' => array('CDavManagedAttachmentMaxCount', 'CDavManagedAttachmentMaxCountHelp', $CDAV_MANAGED_ATTACHMENT_MAX_COUNT, 1, 50, ''),
+	'CDAV_MANAGED_ATTACHMENT_QUOTA_MB' => array('CDavManagedAttachmentQuota', 'CDavManagedAttachmentQuotaHelp', $CDAV_MANAGED_ATTACHMENT_QUOTA_MB, 1, 4096, 'MiB'),
+);
+foreach ($numberSettings as $name => $setting) {
+	print '<tr><td><strong>'.$langs->trans($setting[0]).'</strong><br>'.$langs->trans($setting[1]).'</td>';
+	print '<td><input type="number" class="flat" name="'.$name.'" min="'.$setting[3].'" max="'.$setting[4].'" value="'.((int) $setting[2]).'"> '.$setting[5].'</td></tr>';
+}
 
 print '<tr >';
 print '<td  align=left><strong>'.$langs->trans("CDavContactsFilter").'</strong><br/>'.$langs->trans("CDavContactsFilterHelp").'</td>';

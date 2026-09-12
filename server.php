@@ -113,6 +113,50 @@ require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 if(!isModEnabled('cdav'))
 	die('module CDav not enabled !');
 
+/** Plain HTTP is acceptable only on the machine-local test transport. */
+function cdav_is_loopback_address($address)
+{
+	$address = strtolower(trim((string) $address));
+	if ($address === '::1' || $address === '0:0:0:0:0:0:0:1') {
+		return true;
+	}
+	if (str_starts_with($address, '::ffff:')) {
+		$address = substr($address, 7);
+	}
+	return filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
+		&& str_starts_with($address, '127.');
+}
+
+/** Accept forwarded HTTPS only from an explicitly configured proxy address. */
+function cdav_is_secure_transport()
+{
+	if (isset($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) === 'on') {
+		return true;
+	}
+	$trusted = preg_split('/[\s,;]+/', getDolGlobalString('CDAV_TRUSTED_PROXY_IPS'), -1, PREG_SPLIT_NO_EMPTY);
+	$remoteAddress = function_exists('getUserRemoteIP') ? getUserRemoteIP(1) : ($_SERVER['REMOTE_ADDR'] ?? '');
+	if (!$trusted || !in_array($remoteAddress, $trusted, true)) {
+		return false;
+	}
+	$forwardedProto = strtolower(trim(explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''))[0]));
+	$forwardedSsl = strtolower(trim((string) ($_SERVER['HTTP_X_FORWARDED_SSL'] ?? '')));
+	return $forwardedProto === 'https' || $forwardedSsl === 'on';
+}
+
+// RFC 4918 forbids offering Basic authentication over an insecure transport.
+// Keep loopback available for the destructive, isolated local integration suite.
+if (!cdav_is_secure_transport()
+	&& !cdav_is_loopback_address($_SERVER['REMOTE_ADDR'] ?? '')
+	&& !getDolGlobalInt('CDAV_ALLOW_INSECURE_HTTP')) {
+	http_response_code(403);
+	header('Content-Type: text/plain; charset=utf-8');
+	header('Cache-Control: no-store');
+	header('X-Content-Type-Options: nosniff');
+	echo "HTTPS is required for DAV authentication.\n";
+	if (is_object($db)) $db->close();
+	exit;
+}
+
 //set_error_handler("cdav_exception_error_handler", E_ERROR | E_USER_ERROR |
 //				E_CORE_ERROR | E_COMPILE_ERROR | E_RECOVERABLE_ERROR );
 
@@ -191,9 +235,17 @@ use Sabre\DAVACL;
 
 // The autoloader
 require DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
+require __DIR__.'/class/CDavSyncStore.php';
+require __DIR__.'/class/CDavVCardStore.php';
+require __DIR__.'/class/CDavManagedAttachmentStore.php';
 require __DIR__.'/class/PrincipalsDolibarr.php';
 require __DIR__.'/class/CardDAVDolibarr.php';
 require __DIR__.'/class/CalDAVDolibarr.php';
+require __DIR__.'/class/CDavRequestGuardPlugin.php';
+require __DIR__.'/class/CDavCardDAVPlugin.php';
+require __DIR__.'/class/CDavCalDAVPlugin.php';
+require __DIR__.'/class/CDavSchedulingPlugin.php';
+require __DIR__.'/class/CDavManagedAttachmentPlugin.php';
 
 $user = new User($db);
 
@@ -245,8 +297,9 @@ $authBackend = new DAV\Auth\Backend\BasicCallBack(function ($username, $password
 	if (empty($dolibarr_main_authentication))
 		$dolibarr_main_authentication='http,dolibarr';
 	$authmode = explode(',',$dolibarr_main_authentication);
-	$requestedEntity = GETPOSTINT('entity');
-	$entity = $requestedEntity > 0 ? $requestedEntity : (!empty($conf->entity) ? $conf->entity : 1);
+	// The virtual host/context selects the entity. Never let a DAV caller
+	// switch authentication scope with a query parameter.
+	$entity = !empty($conf->entity) ? (int) $conf->entity : 1;
 	if (checkLoginPassEntity($username, $password, $entity, $authmode, 'dav') != $username)
 	{
 		debug_log("Authentication failed 4 for user $username with pass ".str_pad('', strlen($password), '*'));
@@ -267,25 +320,43 @@ $principalBackend = new DAVACL\PrincipalBackend\Dolibarr($user,$db);
 
 // CardDav & CalDav Backend
 $carddavBackend   = new Sabre\CardDAV\Backend\Dolibarr($user,$db,$langs);
-$caldavBackend	= new Sabre\CalDAV\Backend\Dolibarr($user,$db,$langs, $cdavLib);
+$schedulingEnabled = (bool) getDolGlobalInt('CDAV_SCHEDULING');
+$caldavBackend = $schedulingEnabled
+	? new Sabre\CalDAV\Backend\DolibarrScheduling($user, $db, $langs, $cdavLib)
+	: new Sabre\CalDAV\Backend\Dolibarr($user, $db, $langs, $cdavLib);
+$managedAttachmentStore = new \Dolibarr\CDav\ManagedAttachmentStore($db, $user);
 
 // Setting up the directory tree //
 $nodes = array(
 	// /principals
-	new DAVACL\PrincipalCollection($principalBackend),
+	new \Sabre\CalDAV\Principal\Collection($principalBackend),
 	// /addressbook
 	new \Sabre\CardDAV\AddressBookRoot($principalBackend, $carddavBackend),
 	// /calendars
 	new \Sabre\CalDAV\CalendarRoot($principalBackend, $caldavBackend),
-	// / Public docs
-	new DAV\FS\Directory($dolibarr_main_data_root. '/cdav/public')
 );
-// admin can access all dolibarr documents
-if ($user->isAdmin())
-	$nodes[] = new DAV\FS\Directory($dolibarr_main_data_root);
+if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS') && $managedAttachmentStore->isAvailable()) {
+	$nodes[] = new \Dolibarr\CDav\ManagedAttachmentCollection($managedAttachmentStore, $user);
+}
+
+// Files are deliberately not exposed from this calendar/contact endpoint.
+// A raw DAV\FS\Directory on DOL_DATA_ROOT bypasses Dolibarr's document
+// permissions and can reveal unrelated backups, temporary files or private
+// business documents. Install and configure Dolibarr's native DAV module for
+// WebDAV access; it scopes the exposed public/private/ECM directories itself.
 
 // The server object is responsible for making sense out of the WebDAV protocol
 $server = new DAV\Server($nodes);
+DAV\Server::$exposeVersion = false;
+$server->on('exception', static function ($exception) {
+	$message = str_replace(array("\r", "\n"), ' ', (string) $exception->getMessage());
+	$httpCode = method_exists($exception, 'getHTTPCode') ? (int) $exception->getHTTPCode() : 500;
+	dol_syslog('[CDav] DAV exception '.get_class($exception).': '.$message
+		.' in '.$exception->getFile().':'.$exception->getLine(), $httpCode >= 500 ? LOG_ERR : LOG_DEBUG);
+	if (getDolGlobalInt('CDAV_DEBUG')) {
+		dol_syslog('[CDav] DAV exception trace '.str_replace(array("\r", "\n"), ' ', $exception->getTraceAsString()), LOG_DEBUG);
+	}
+}, 1);
 
 // If your server is not on your webroot, make sure the following line has the
 // correct information
@@ -293,13 +364,35 @@ $server->setBaseUri(dol_buildpath('cdav/server.php', 1).'/');
 
 
 $server->addPlugin(new \Sabre\DAV\Auth\Plugin($authBackend));
+$maxRequestMb = getDolGlobalInt('CDAV_MAX_REQUEST_MB', 16);
+if ($maxRequestMb <= 0) $maxRequestMb = 16;
+$maxRequestBytes = min($maxRequestMb, 64) * 1024 * 1024;
+$server->addPlugin(new \Dolibarr\CDav\RequestGuardPlugin(
+	$maxRequestBytes,
+	$carddavBackend,
+	$caldavBackend,
+	$user
+));
 $server->addPlugin(new \Sabre\DAV\Locks\Plugin($lockBackend));
+$server->addPlugin(new \Sabre\DAV\Sync\Plugin());
 $server->addPlugin(new \Sabre\DAV\Browser\Plugin());
-$server->addPlugin(new \Sabre\CardDAV\Plugin());
-$server->addPlugin(new \Sabre\CalDAV\Plugin());
+$server->addPlugin(new \Dolibarr\CDav\CardDAVPlugin($maxRequestBytes));
+// llx_cdav_scheduling.calendardata is MEDIUMTEXT (2^24 - 1 bytes).
+$server->addPlugin(new \Dolibarr\CDav\CalDAVPlugin(
+	min($maxRequestBytes, 16777215),
+	(bool) getDolGlobalInt('CDAV_DELEGATION')
+));
 $DAVACL_plugin = new \Sabre\DAVACL\Plugin();
 $DAVACL_plugin->allowUnauthenticatedAccess = false;
 $server->addPlugin($DAVACL_plugin);
+if ($schedulingEnabled) {
+	// Sabre local delivery is enabled; no iMIP plugin is installed, so the
+	// module never emits invitation email behind Dolibarr's back.
+	$server->addPlugin(new \Dolibarr\CDav\SchedulingPlugin($caldavBackend));
+}
+if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS') && $managedAttachmentStore->isAvailable()) {
+	$server->addPlugin(new \Dolibarr\CDav\ManagedAttachmentPlugin($caldavBackend, $managedAttachmentStore, $user));
+}
 
 debug_log("Ready : ".$user->login);
 

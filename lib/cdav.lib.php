@@ -5,11 +5,13 @@
  * And format it in vCalendar
  * */
 
+require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
+
 
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-08-html-text-v1';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-09-native-sync-v3';
 
 	private $db;
 
@@ -19,6 +21,9 @@ class CdavLib
 
 	/** @var bool|null Whether the optional iCalendar metadata table exists. */
 	private $hasSchedulingTable = null;
+
+	/** @var bool|null Whether CalDAV recurrence projection metadata exists. */
+	private $hasRecurrenceTable = null;
 
 	function __construct($user, $db, $langs)
 	{
@@ -123,12 +128,126 @@ class CdavLib
 		if ($this->hasSchedulingTable !== null) {
 			return $this->hasSchedulingTable;
 		}
-		$tableName = MAIN_DB_PREFIX.'cdav_scheduling';
-		$result = $this->db->query("SELECT COUNT(*) AS nb FROM information_schema.tables
-			WHERE table_schema = DATABASE() AND table_name = '".$this->db->escape($tableName)."'");
-		$row = $result ? $this->db->fetch_object($result) : null;
-		$this->hasSchedulingTable = $row && (int) $row->nb > 0;
+		$this->hasSchedulingTable = (bool) $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_scheduling');
 		return $this->hasSchedulingTable;
+	}
+
+	private function recurrenceTableAvailable()
+	{
+		if ($this->hasRecurrenceTable === null) {
+			$this->hasRecurrenceTable = (bool) $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_recurrence');
+		}
+		return $this->hasRecurrenceTable;
+	}
+
+	/** Make native ActionComm recurrence edits visible to DAV clients. */
+	private function applyNativeRecurrence($eventId, $calendarData)
+	{
+		$result = $this->db->query('SELECT recurid, recurrule, recurdateend FROM '.MAIN_DB_PREFIX.'actioncomm'
+			.' WHERE id = '.((int) $eventId).' AND entity IN ('.getEntity('agenda').')');
+		$row = $result ? $this->db->fetch_object($result) : null;
+		$projectionOwned = false;
+		if ($this->recurrenceTableAvailable()) {
+			$tracking = $this->db->query('SELECT fk_actioncomm FROM '.MAIN_DB_PREFIX.'cdav_recurrence'
+				.' WHERE fk_actioncomm = '.((int) $eventId));
+			$projectionOwned = $tracking && (bool) $this->db->fetch_object($tracking);
+		}
+		if (!$row || (!$projectionOwned && empty($row->recurrule))) {
+			return $calendarData;
+		}
+		try {
+			$calendar = \Sabre\VObject\Reader::read($calendarData);
+			$component = null;
+			foreach ($calendar->getComponents() as $candidate) {
+				if (in_array($candidate->name, array('VEVENT', 'VTODO'), true)) {
+					$component = $candidate;
+					break;
+				}
+			}
+			if ($component === null) return $calendarData;
+			if ($projectionOwned) {
+				$component->remove('RRULE');
+			}
+			$rule = (string) ($row->recurrule ?? '');
+			$until = empty($row->recurdateend) ? 0 : strtotime((string) $row->recurdateend);
+			if ($rule === '' || $until <= 0) return $calendar->serialize();
+			$rfcRule = '';
+			if ($rule === 'FREQ=DAILY') {
+				$rfcRule = 'FREQ=DAILY';
+			} elseif (preg_match('/^FREQ=WEEKLY_BYDAY([0-6])$/', $rule, $matches)) {
+				$days = array('SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA');
+				$rfcRule = 'FREQ=WEEKLY;BYDAY='.$days[(int) $matches[1]];
+			} elseif (preg_match('/^FREQ=MONTHLY_BYMONTHDAY(\d{1,2})$/', $rule, $matches)) {
+				$rfcRule = 'FREQ=MONTHLY;BYMONTHDAY='.((int) $matches[1]);
+			} elseif (preg_match('/^FREQ=YEARLY_BYYEARMONTHDAY(\d{3,4})$/', $rule, $matches)) {
+				$value = str_pad($matches[1], 4, '0', STR_PAD_LEFT);
+				$rfcRule = 'FREQ=YEARLY;BYMONTH='.((int) substr($value, 0, 2)).';BYMONTHDAY='.((int) substr($value, 2, 2));
+			}
+			if ($rfcRule !== '') {
+				if (!$projectionOwned) $component->remove('RRULE');
+				$component->add('RRULE', $rfcRule.';UNTIL='.gmdate('Ymd\THis\Z', $until));
+			}
+			return $calendar->serialize();
+		} catch (\Throwable $e) {
+			dol_syslog(__METHOD__.': unable to export native recurrence: '.$e->getMessage(), LOG_ERR);
+			return $calendarData;
+		}
+	}
+
+	/** Make native browser reminders authoritative for the representable subset. */
+	private function addNativeReminders($eventId, $calendarId, $calendarData)
+	{
+		if (!getDolGlobalInt('CDAV_NATIVE_REMINDERS') || !getDolGlobalString('AGENDA_REMINDER_BROWSER')) {
+			return $calendarData;
+		}
+		$sql = 'SELECT offsetvalue, offsetunit FROM '.MAIN_DB_PREFIX.'actioncomm_reminder'
+			.' WHERE fk_actioncomm = '.((int) $eventId).' AND fk_user = '.((int) $calendarId)
+			." AND typeremind = 'browser' AND status = 0 ORDER BY dateremind, rowid";
+		$result = $this->db->query($sql);
+		if (!$result) return $calendarData;
+		$reminders = array();
+		while ($row = $this->db->fetch_object($result)) {
+			$unit = (string) $row->offsetunit;
+			$value = (int) $row->offsetvalue;
+			if ($value > 0 && isset(array('w' => 1, 'd' => 1, 'h' => 1, 'i' => 1)[$unit])) {
+				$reminders[$value.$unit] = array($value, $unit);
+			}
+			if (count($reminders) >= 10) break;
+		}
+		try {
+			$calendar = \Sabre\VObject\Reader::read($calendarData);
+			$component = null;
+			foreach ($calendar->getComponents() as $candidate) {
+				if (in_array($candidate->name, array('VEVENT', 'VTODO'), true)) {
+					$component = $candidate;
+					break;
+				}
+			}
+			if ($component === null) return $calendarData;
+			foreach ($component->getComponents() as $alarm) {
+				if ($alarm->name === 'VALARM' && isset($alarm->TRIGGER)
+					&& strtoupper((string) ($alarm->ACTION ?? '')) === 'DISPLAY'
+					&& strtoupper((string) ($alarm->TRIGGER['RELATED'] ?? 'START')) === 'START'
+					&& strtoupper((string) ($alarm->TRIGGER['VALUE'] ?? 'DURATION')) !== 'DATE-TIME'
+					&& substr((string) $alarm->TRIGGER, 0, 1) === '-' && !isset($alarm->REPEAT) && !isset($alarm->DURATION)) {
+					$component->remove($alarm);
+				}
+			}
+			foreach ($reminders as [$value, $unit]) {
+				$duration = $unit === 'w' ? '-P'.$value.'W'
+					: ($unit === 'd' ? '-P'.$value.'D' : '-PT'.$value.($unit === 'h' ? 'H' : 'M'));
+				$alarm = $calendar->createComponent('VALARM', array(
+					'ACTION' => 'DISPLAY',
+					'DESCRIPTION' => isset($component->SUMMARY) ? (string) $component->SUMMARY : 'Dolibarr reminder',
+					'TRIGGER' => $duration,
+				));
+				$component->add($alarm);
+			}
+			return $calendar->serialize();
+		} catch (\Throwable $e) {
+			dol_syslog(__METHOD__.': unable to export native reminders: '.$e->getMessage(), LOG_ERR);
+			return $calendarData;
+		}
 	}
 
 	/**
@@ -169,7 +288,7 @@ class CdavLib
 
 			$propertyNames = array(
 				'ORGANIZER', 'ATTENDEE', 'RRULE', 'RDATE', 'EXDATE',
-				'RECURRENCE-ID', 'SEQUENCE',
+				'RECURRENCE-ID', 'SEQUENCE', 'ATTACH',
 			);
 			foreach ($propertyNames as $propertyName) {
 				$target->remove($propertyName);
@@ -217,6 +336,143 @@ class CdavLib
 	}
 
 	/**
+	 * Add native Dolibarr appointment documents to the iCalendar master item.
+	 *
+	 * External links use the Link API. Physical files are exposed through
+	 * Dolibarr document.php so its native access checks still run; no storage
+	 * path is ever disclosed. Existing ATTACH values are kept and deduplicated.
+	 */
+	private function addActionCommAttachments($eventId, $calendarData)
+	{
+		global $conf;
+
+		try {
+			$calendar = \Sabre\VObject\Reader::read($calendarData);
+			$component = null;
+			foreach ($calendar->getComponents() as $candidate) {
+				if (in_array($candidate->name, array('VEVENT', 'VTODO'), true)) {
+					$component = $candidate;
+					break;
+				}
+			}
+			if ($component === null) {
+				return $calendarData;
+			}
+
+			$seen = array();
+			foreach ($component->select('ATTACH') as $attachment) {
+				$seen[trim((string) $attachment)] = true;
+			}
+
+			require_once DOL_DOCUMENT_ROOT.'/core/class/link.class.php';
+			$links = array();
+			$linkReader = new \Link($this->db);
+			if ($linkReader->fetchAll($links, 'action', (int) $eventId) < 0) {
+				throw new \RuntimeException('Unable to read native appointment links');
+			}
+			foreach ($links as $link) {
+				$url = trim((string) $link->url);
+				$parts = parse_url($url);
+				if ($url === '' || isset($seen[$url]) || !is_array($parts)
+					|| strtolower((string) ($parts['scheme'] ?? '')) !== 'https'
+					|| empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])) {
+					continue;
+				}
+				$params = array('VALUE' => 'URI');
+				$label = trim((string) $link->label);
+				if ($label !== '') {
+					$params['FILENAME'] = $label;
+				}
+				$path = (string) ($parts['path'] ?? '');
+				if ($path !== '') {
+					$params['FMTTYPE'] = dol_mimetype($path);
+				}
+				$component->add('ATTACH', $url, $params);
+				$seen[$url] = true;
+			}
+
+			$agendaOutput = !empty($conf->agenda->multidir_output[(int) $conf->entity])
+				? $conf->agenda->multidir_output[(int) $conf->entity]
+				: ($conf->agenda->dir_output ?? '');
+			$documentBase = dol_buildpath('document.php', 3);
+			if ($agendaOutput !== '' && str_starts_with(strtolower($documentBase), 'https://')) {
+				$directory = $agendaOutput.'/'.dol_sanitizeFileName((string) $eventId);
+				$managedFiles = array();
+				if ($this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_managed_attachment')) {
+					$managedResult = $this->db->query('SELECT filename FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
+						.' WHERE entity = '.((int) $conf->entity).' AND fk_actioncomm = '.((int) $eventId));
+					if ($managedResult) while ($managed = $this->db->fetch_object($managedResult)) $managedFiles[(string) $managed->filename] = true;
+				}
+				foreach (dol_dir_list($directory, 'files', 0, '', '(\.meta|_preview.*\.png)$') as $file) {
+					$filename = basename((string) $file['name']);
+					if (isset($managedFiles[$filename])) continue;
+					$url = $documentBase.'?modulepart=actions&attachment=1&file='
+						.urlencode($eventId.'/'.$filename).'&entity='.((int) $conf->entity);
+					if (isset($seen[$url])) {
+						continue;
+					}
+					$component->add('ATTACH', $url, array(
+						'VALUE' => 'URI',
+						'FILENAME' => $filename,
+						'FMTTYPE' => dol_mimetype($filename),
+					));
+					$seen[$url] = true;
+				}
+			}
+
+			return $calendar->serialize();
+		} catch (\Throwable $e) {
+			dol_syslog(__METHOD__.': unable to export appointment attachments: '.$e->getMessage(), LOG_ERR);
+			return $calendarData;
+		}
+	}
+
+	/** Return a stable digest of native links/files for collection change tags. */
+	private function getActionCommAttachmentTag($eventId)
+	{
+		global $conf;
+
+		$tokens = array();
+		require_once DOL_DOCUMENT_ROOT.'/core/class/link.class.php';
+		$links = array();
+		$linkReader = new \Link($this->db);
+		if ($linkReader->fetchAll($links, 'action', (int) $eventId) >= 0) {
+			foreach ($links as $link) {
+				$tokens[] = 'link:'.((int) $link->id).':'.((string) $link->url).':'.((string) $link->label);
+			}
+		}
+		$agendaOutput = !empty($conf->agenda->multidir_output[(int) $conf->entity])
+			? $conf->agenda->multidir_output[(int) $conf->entity]
+			: ($conf->agenda->dir_output ?? '');
+		if ($agendaOutput !== '') {
+			$directory = $agendaOutput.'/'.dol_sanitizeFileName((string) $eventId);
+			foreach (dol_dir_list($directory, 'files', 0, '', '(\.meta|_preview.*\.png)$') as $file) {
+				$tokens[] = 'file:'.basename((string) $file['name']).':'.((int) ($file['size'] ?? 0)).':'.((int) ($file['date'] ?? 0));
+			}
+		}
+		if ($this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_reminder')) {
+			$result = $this->db->query('SELECT r.rowid, r.dateremind, r.typeremind, r.offsetvalue, r.offsetunit, r.status'
+				.' FROM '.MAIN_DB_PREFIX.'cdav_reminder cr'
+				.' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_reminder r ON r.rowid = cr.fk_reminder'
+				.' WHERE cr.fk_actioncomm = '.((int) $eventId));
+			if ($result) {
+				while ($reminder = $this->db->fetch_object($result)) {
+					$tokens[] = 'reminder:'.implode(':', array(
+						(int) $reminder->rowid,
+						(string) $reminder->dateremind,
+						(string) $reminder->typeremind,
+						(int) $reminder->offsetvalue,
+						(string) $reminder->offsetunit,
+						(int) $reminder->status,
+					));
+				}
+			}
+		}
+		sort($tokens, SORT_STRING);
+		return sha1(implode('|', $tokens));
+	}
+
+	/**
 	 * Base sql request for calendar events
 	 *
 	 * @param int calendar user id
@@ -226,9 +482,11 @@ class CdavLib
 	public function getSqlCalEvents($calid, $oid=false, $ouri=false)
 	{
 		// TODO : replace GROUP_CONCAT by
+		$hasSchedulingMetadata = $this->schedulingTableAvailable();
+		$lastUpdatedSql = $hasSchedulingMetadata ? 'GREATEST(a.tms, COALESCE(cds.tms, a.tms))' : 'a.tms';
 		$sql = 'SELECT
 					"ev" elem_source,
-					a.tms AS lastupd,
+					'.$lastUpdatedSql.' AS lastupd,
 					a.*,
 					sp.firstname,
 					sp.lastname,
@@ -273,6 +531,9 @@ class CdavLib
 					LEFT JOIN '.MAIN_DB_PREFIX.'socpeople AS sp ON (sp.rowid = a.fk_contact)
 					LEFT JOIN '.MAIN_DB_PREFIX.'actioncomm_cdav AS ac ON (a.id = ac.fk_object)';
 		}
+		if ($hasSchedulingMetadata) {
+			$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'cdav_scheduling AS cds ON cds.fk_actioncomm = a.id';
+		}
 
 		$sql.=' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources AS arcal
 					ON (arcal.fk_actioncomm = a.id AND arcal.element_type = \'user\' AND arcal.fk_element = '.intval($calid).')
@@ -295,7 +556,7 @@ class CdavLib
 		{
 			$range = '(COALESCE(a.datep2,a.datep)>="'.date('Y-m-d 00:00:00',time()-86400*CDAV_SYNC_PAST).'"
 					AND a.datep<="'.date('Y-m-d 23:59:59',time()+86400*CDAV_SYNC_FUTURE).'")';
-			if ($this->schedulingTableAvailable()) {
+			if ($hasSchedulingMetadata) {
 				$range = '('.$range.' OR EXISTS (
 					SELECT 1 FROM '.MAIN_DB_PREFIX.'cdav_scheduling cds
 					WHERE cds.fk_actioncomm = a.id
@@ -310,10 +571,9 @@ class CdavLib
 	}
 
 	/**
-	 * Build a collection tag that changes on additions, updates, removals and
-	 * assignment changes.  We deliberately do not advertise DAV sync tokens:
-	 * Dolibarr has no tombstone log from which deleted object names can be
-	 * reconstructed reliably.
+	 * Build a collection tag that changes on additions, updates, removals,
+	 * assignment changes, native files/links and DAV-owned reminders.  The sync
+	 * store reconciles this native state into its own bounded tombstone journal.
 	 *
 	 * @param int $calendarId Calendar owner user id
 	 * @return string
@@ -337,7 +597,8 @@ class CdavLib
 				continue;
 			}
 			while ($obj = $this->db->fetch_object($result)) {
-				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd);
+				$attachmentTag = $source === 'ev' ? ':'.$this->getActionCommAttachmentTag((int) $obj->id) : '';
+				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd).$attachmentTag;
 			}
 		}
 
@@ -586,9 +847,15 @@ class CdavLib
 			if($type=='VEVENT')
 				$caldata.="STATUS:CONFIRMED\n";
 			elseif($obj->percent==0)
+			{
 				$caldata.="STATUS:NEEDS-ACTION\n";
+				$caldata.="PERCENT-COMPLETE:0\n";
+			}
 			elseif($obj->percent==100)
+			{
 				$caldata.="STATUS:COMPLETED\n";
+				$caldata.="PERCENT-COMPLETE:100\n";
+			}
 			else
 			{
 				$caldata.="STATUS:IN-PROCESS\n";
@@ -621,7 +888,10 @@ class CdavLib
 			$caldata.="END:".$type."\n";
 			if($bHeader) {
 				$caldata.="END:VCALENDAR\n";
-				$caldata = $this->mergeCalendarMetadata((int) $obj->id, $caldata);
+					$caldata = $this->mergeCalendarMetadata((int) $obj->id, $caldata);
+					$caldata = $this->applyNativeRecurrence((int) $obj->id, $caldata);
+					$caldata = $this->addNativeReminders((int) $obj->id, (int) $calid, $caldata);
+					$caldata = $this->addActionCommAttachments((int) $obj->id, $caldata);
 			}
 		}
 	   elseif(substr($obj->elem_source,0,1)=='p')		// Project Task  pe/pt
@@ -679,9 +949,15 @@ class CdavLib
 			if($type=='VEVENT')
 				$caldata.="STATUS:CONFIRMED\n";
 			elseif($obj->progress==0)
+			{
 				$caldata.="STATUS:NEEDS-ACTION\n";
+				$caldata.="PERCENT-COMPLETE:0\n";
+			}
 			elseif($obj->progress==100)
+			{
 				$caldata.="STATUS:COMPLETED\n";
+				$caldata.="PERCENT-COMPLETE:100\n";
+			}
 			else
 			{
 				$caldata.="STATUS:IN-PROCESS\n";

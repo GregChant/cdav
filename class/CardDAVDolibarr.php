@@ -16,9 +16,14 @@ use Sabre\DAV\Exception\Forbidden;
  * @author Evert Pot (http://evertpot.com/)
  * @license http://sabre.io/license/ Modified BSD License
  */
-class Dolibarr extends AbstractBackend {
+class Dolibarr extends AbstractBackend implements SyncSupport {
 	/** Change this value whenever the generated CardDAV representation changes. */
-	private const CARD_SERIALIZATION_VERSION = '2026-08-html-text-civility-v2';
+	private const CARD_SERIALIZATION_VERSION = '2026-09-native-sync-v3';
+	private const MAX_CARD_URI_LENGTH = 1024;
+	private const MAX_CARD_UID_LENGTH = 1024;
+	private const MAX_VCARD_PHOTO_BYTES = 8 * 1024 * 1024;
+	private const MAX_VCARD_PHOTO_DIMENSION = 8192;
+	private const MAX_VCARD_PHOTO_PIXELS = 32000000;
 
 	/**
 	 * Dolibarr user object
@@ -44,6 +49,24 @@ class Dolibarr extends AbstractBackend {
 	/** @var array<string,string>|null Localized civility/title lookup. */
 	private $civilityCodeByLabel = null;
 
+	/** @var bool|null Whether the lossless CardDAV identity table is installed. */
+	private $hasCardMappingTable = null;
+
+	/** @var \Dolibarr\CDav\SyncStore */
+	private $syncStore;
+
+	/** @var \Dolibarr\CDav\VCardStore */
+	private $vcardStore;
+
+	/** @var int Active Dolibarr entity selected by main.inc.php. */
+	private $entity;
+
+	/** @var bool Protocol rows orphaned by native deletion were checked. */
+	private $metadataPruned = false;
+
+	/** @var array<string,string> Conditional ETags consumed inside the native lock. */
+	private $expectedCardEtags = array();
+
 	/**
 	 * Sets up the object
 	 *
@@ -57,6 +80,9 @@ class Dolibarr extends AbstractBackend {
 		$this->user = $user;
 		$this->db = $db;
 		$this->langs = $langs;
+		$this->entity = max(1, (int) ($conf->entity ?? 1));
+		$this->syncStore = new \Dolibarr\CDav\SyncStore($db, $this->entity);
+		$this->vcardStore = new \Dolibarr\CDav\VCardStore($db, $this->entity);
 		if (!empty($this->user->lang)) {
 			// The bootstrap language may already be loaded before HTTP Basic auth.
 			// A dedicated translator guarantees the authenticated user's language.
@@ -180,6 +206,158 @@ class Dolibarr extends AbstractBackend {
 		}
 	}
 
+	/** Parse and normalize one vCard, returning a client error for malformed PUTs. */
+	private function _readVCard($cardData)
+	{
+		$maxBytes = (function_exists('getDolGlobalInt')
+			? min(max(1, \getDolGlobalInt('CDAV_MAX_REQUEST_MB', 16)), 64)
+			: 16) * 1024 * 1024;
+		if (strlen((string) $cardData) > $maxBytes) {
+			throw new \Sabre\DAV\Exception\BadRequest('The vCard is too large');
+		}
+		try {
+			$vCard = VObject\Reader::read((string) $cardData);
+			if ($vCard->name !== 'VCARD') {
+				throw new \InvalidArgumentException('The payload is not a vCard');
+			}
+			$vCard->validate(VObject\Node::REPAIR | VObject\Node::PROFILE_CARDDAV);
+			// convert() returns a new document; it does not mutate the vCard in place.
+			// Normalizing to 3.0 also decodes RFC 6350 data: PHOTO values safely.
+			$vCard = $vCard->convert(VObject\Document::VCARD30);
+			return $vCard;
+		} catch (\Sabre\DAV\Exception\BadRequest $e) {
+			throw $e;
+		} catch (\Throwable $e) {
+			throw new \Sabre\DAV\Exception\BadRequest('Invalid vCard data: '.$e->getMessage());
+		}
+	}
+
+	/** Decode a bounded raster photo without allowing a compressed image bomb. */
+	private function _decodeVCardPhoto($binary)
+	{
+		if ($binary === false || $binary === '') {
+			return false;
+		}
+		if (!is_string($binary) || strlen($binary) > self::MAX_VCARD_PHOTO_BYTES) {
+			throw new \Sabre\DAV\Exception\BadRequest('The vCard photo is too large');
+		}
+		$info = function_exists('getimagesizefromstring') ? @getimagesizefromstring($binary) : false;
+		$width = is_array($info) ? (int) ($info[0] ?? 0) : 0;
+		$height = is_array($info) ? (int) ($info[1] ?? 0) : 0;
+		if (
+			$width <= 0 || $height <= 0
+			|| $width > self::MAX_VCARD_PHOTO_DIMENSION
+			|| $height > self::MAX_VCARD_PHOTO_DIMENSION
+			|| $width > intdiv(self::MAX_VCARD_PHOTO_PIXELS, $height)
+		) {
+			throw new \Sabre\DAV\Exception\BadRequest('The vCard photo dimensions are invalid or unsafe');
+		}
+		if (!function_exists('imagecreatefromstring')) {
+			throw new \Sabre\DAV\Exception\BadRequest('Photo import is unavailable on this server');
+		}
+		$image = @imagecreatefromstring($binary);
+		if ($image === false) {
+			throw new \Sabre\DAV\Exception\BadRequest('The vCard photo is invalid or unsupported');
+		}
+		return $image;
+	}
+
+	/** Save an imported photo with Dolibarr's document directory and thumbnails. */
+	private function _saveVCardPhoto($image, $directory, $filename, $object)
+	{
+		if ($image === false) {
+			return;
+		}
+		try {
+			if (\dol_mkdir($directory) < 0 || !@imagejpeg($image, $directory.'/'.$filename)) {
+				throw new \Sabre\DAV\Exception('Unable to save the Dolibarr photo');
+			}
+			$object->addThumbs($directory.'/'.$filename);
+		} finally {
+			if (is_resource($image) || $image instanceof \GdImage) {
+				imagedestroy($image);
+			}
+		}
+	}
+
+	/** Export a bounded, verified raster file as a folded vCard PHOTO property. */
+	private function _photoToVCard($path)
+	{
+		if (!is_file($path)) {
+			return '';
+		}
+		$size = @filesize($path);
+		if ($size === false || $size <= 0 || $size > self::MAX_VCARD_PHOTO_BYTES) {
+			return '';
+		}
+		$info = @getimagesize($path);
+		$types = array(
+			'image/jpeg' => 'JPEG',
+			'image/png' => 'PNG',
+			'image/gif' => 'GIF',
+			'image/bmp' => 'BMP',
+			'image/x-ms-bmp' => 'BMP',
+			'image/tiff' => 'TIFF',
+		);
+		$type = is_array($info) ? ($types[strtolower((string) ($info['mime'] ?? ''))] ?? '') : '';
+		if ($type === '') {
+			return '';
+		}
+		$binary = @file_get_contents($path);
+		if (!is_string($binary) || strlen($binary) !== $size) {
+			return '';
+		}
+		$property = wordwrap('PHOTO;ENCODING=b;TYPE='.$type.':'.base64_encode($binary), 72, "\n", true);
+		return trim(str_replace("\n", "\n ", $property))."\n";
+	}
+
+	/** Return the entity-aware native Dolibarr output directory. */
+	private function _outputDirectory($module)
+	{
+		global $conf;
+		$config = $conf->{$module} ?? null;
+		if (!is_object($config)) {
+			return '';
+		}
+		if (!empty($config->multidir_output[$this->entity])) {
+			return rtrim((string) $config->multidir_output[$this->entity], '/');
+		}
+		return rtrim((string) ($config->dir_output ?? ''), '/');
+	}
+
+	/** Build a contact/member photo directory in Dolibarr's native document tree. */
+	private function _photoDirectory($objectType, $objectId)
+	{
+		$module = $objectType === 'member' ? 'adherent' : 'societe';
+		$segment = $objectType === 'member' ? 'member' : 'contact';
+		$root = $this->_outputDirectory($module);
+		return $root === '' ? '' : $root.'/'.$segment.'/'.((int) $objectId).'/photos';
+	}
+
+	/** Build a sanitized native photo path. */
+	private function _photoFilePath($objectType, $objectId, $filename)
+	{
+		$directory = $this->_photoDirectory($objectType, $objectId);
+		$filename = \dol_sanitizeFileName(basename((string) $filename));
+		return $directory === '' || $filename === '' ? '' : $directory.'/'.$filename;
+	}
+
+	/** Remove a replaced native photo and its Dolibarr-generated thumbnails. */
+	private function _removeVCardPhoto($path, $object)
+	{
+		if ($path === '') {
+			return;
+		}
+		try {
+			$object->delThumbs($path);
+			if (is_file($path) && !\dol_delete_file($path)) {
+				throw new \RuntimeException('Dolibarr rejected photo deletion');
+			}
+		} catch (\Throwable $e) {
+			\dol_syslog(__METHOD__.': unable to remove obsolete photo: '.$e->getMessage(), LOG_ERR);
+		}
+	}
+
 	/**
 	 * Returns the list of addressbooks for a specific user.
 	 *
@@ -188,20 +366,23 @@ class Dolibarr extends AbstractBackend {
 	 */
 	function getAddressBooksForUser($principalUri) {
 		debug_log("getAddressBooksForUser( $principalUri )");
+		if (!hash_equals('principals/'.(string) $this->user->login, trim((string) $principalUri, '/'))) {
+			return array();
+		}
 		$companyName = getDolGlobalString('MAIN_INFO_SOCIETE_NOM', 'Dolibarr');
 
 		$addressBooks = [];
 
-		$addressBooks[] = [
-			'id'														  => $this->user->id,
-			'uri'														  => 'default',
-			'principaluri'												  => $principalUri,
-			'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookName', $companyName),
-			'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookDescription', $companyName, $this->user->login),
-			'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('contact'),
-		];
-		if (!$this->_hasRight('societe', 'contact', 'read')) {
-			array_pop($addressBooks);
+		if ($this->_hasRight('societe', 'contact', 'read')) {
+			$addressBooks[] = [
+				'id'														  => $this->user->id,
+				'uri'														  => 'default',
+				'principaluri'												  => $principalUri,
+				'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookName', $companyName),
+				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookDescription', $companyName, $this->user->login),
+				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('contact'),
+			];
+			$this->_addAddressBookSyncToken($addressBooks[count($addressBooks) - 1]);
 		}
 
 		if (CDAV_THIRD_SYNC > 0 && $this->_hasRight('societe', 'read'))
@@ -214,6 +395,7 @@ class Dolibarr extends AbstractBackend {
 				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavThirdPartiesAddressBookDescription', $companyName, $this->user->login),
 				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('thirdparty'),
 			];
+			$this->_addAddressBookSyncToken($addressBooks[count($addressBooks) - 1]);
 		}
 
 		if (CDAV_MEMBER_SYNC > 0 && $this->_hasRight('adherent', 'read'))
@@ -226,10 +408,24 @@ class Dolibarr extends AbstractBackend {
 				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavMembersAddressBookDescription', $companyName, $this->user->login),
 				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('member'),
 			];
+			$this->_addAddressBookSyncToken($addressBooks[count($addressBooks) - 1]);
 		}
 
 		return $addressBooks;
 
+	}
+
+	/** Add a sync token only when all RFC 6578 technical tables are present. */
+	private function _addAddressBookSyncToken(array &$addressBook)
+	{
+		$objects = array();
+		foreach ($this->getCards((int) $addressBook['id']) as $card) {
+			$objects[(string) $card['uri']] = (string) ($card['etag'] ?? '');
+		}
+		$token = $this->syncStore->synchronize('card', (int) $addressBook['id'], $objects);
+		if ($token !== null) {
+			$addressBook['{DAV:}sync-token'] = $token;
+		}
 	}
 
 	/**
@@ -249,7 +445,8 @@ class Dolibarr extends AbstractBackend {
 		$tokens = array();
 		if ($result) {
 			while ($row = $this->db->fetch_object($result)) {
-				$tokens[] = ((int) $row->rowid).':'.((string) $row->lastupd).':'.((string) $row->category_ids).':'.((string) $row->ref_ext);
+				$tokens[] = ((int) $row->rowid).':'.((string) $row->lastupd).':'.((string) $row->category_ids)
+					.':'.((string) $row->ref_ext).':'.((string) $row->cdav_uuidext).':'.((string) $row->cdav_sourceuid);
 			}
 		}
 		sort($tokens, SORT_STRING);
@@ -258,6 +455,9 @@ class Dolibarr extends AbstractBackend {
 
 	private function _getCardObjectUri($obj, $type)
 	{
+		if (!empty($obj->cdav_uuidext)) {
+			return (string) $obj->cdav_uuidext;
+		}
 		$external = $this->_decodeCardExternalRef((string) ($obj->ref_ext ?? ''));
 		if ($external !== null) {
 			return $external['uri'];
@@ -267,6 +467,9 @@ class Dolibarr extends AbstractBackend {
 
 	private function _getCardSourceUid($obj, $type)
 	{
+		if (!empty($obj->cdav_sourceuid)) {
+			return (string) $obj->cdav_sourceuid;
+		}
 		$external = $this->_decodeCardExternalRef((string) ($obj->ref_ext ?? ''));
 		if ($external !== null && $external['uid'] !== '') {
 			return $external['uid'];
@@ -310,8 +513,181 @@ class Dolibarr extends AbstractBackend {
 			return ' AND '.$alias.'.rowid = '.((int) $matches[1]);
 		}
 		$encodedUri = rtrim(strtr(base64_encode((string) $cardUri), '+/', '-_'), '=');
-		return ' AND ('.$alias.'.ref_ext = \'cdav:'.$this->db->escape((string) $cardUri).'\'
-			OR '.$alias.'.ref_ext LIKE \'cdav2:'.$this->db->escape($encodedUri).'.%\')';
+		$conditions = array(
+			$alias.'.ref_ext = \'cdav:'.$this->db->escape((string) $cardUri).'\'',
+			$alias.'.ref_ext LIKE \'cdav2:'.$this->db->escape($encodedUri).'.%\'',
+		);
+		if ($this->_cardMappingTableAvailable()) {
+			array_unshift($conditions, 'cm.entity = '.$this->entity.' AND cm.uuidhash = \''.hash('sha256', (string) $cardUri).'\'');
+		}
+		return ' AND ('.implode(' OR ', $conditions).')';
+	}
+
+	private function _cardMappingTableAvailable()
+	{
+		if ($this->hasCardMappingTable !== null) {
+			return $this->hasCardMappingTable;
+		}
+		// Use the database-agnostic Dolibarr schema helper.
+		$this->hasCardMappingTable = (bool) $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_cardmap');
+		return $this->hasCardMappingTable;
+	}
+
+	private function _validateCardUri($cardUri)
+	{
+		$length = strlen((string) $cardUri);
+		if ($length === 0 || $length > self::MAX_CARD_URI_LENGTH) {
+			throw new \Sabre\DAV\Exception\BadRequest('The CardDAV resource name is missing or too long');
+		}
+	}
+
+	private function _validateCardUid($uid)
+	{
+		$length = strlen((string) $uid);
+		if ($length === 0 || $length > self::MAX_CARD_UID_LENGTH) {
+			throw new \Sabre\DAV\Exception\BadRequest('The vCard UID is missing or too long');
+		}
+	}
+
+	/** Validate the virtual address-book ID and serialize its DAV mutations. */
+	private function _lockAddressBookOwner($addressbookId)
+	{
+		$addressbookId = (int) $addressbookId;
+		$validIds = array(
+			(int) $this->user->id,
+			(int) $this->user->id + CDAV_ADDRESSBOOK_ID_SHIFT,
+			(int) $this->user->id + 2 * CDAV_ADDRESSBOOK_ID_SHIFT,
+		);
+		if (!in_array($addressbookId, $validIds, true)) {
+			throw new Forbidden('The address book does not belong to the authenticated Dolibarr user');
+		}
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'user WHERE rowid = '.((int) $this->user->id)
+			.' AND statut > 0 AND fk_soc IS NULL AND entity IN ('.getEntity('user').') FOR UPDATE');
+		if (!$result || !$this->db->fetch_object($result)) {
+			throw new Forbidden('Address-book owner is not an active internal Dolibarr user');
+		}
+	}
+
+	public function expectCardVersion($addressbookId, $cardUri, $etag)
+	{
+		$this->expectedCardEtags[((int) $addressbookId).'\n'.(string) $cardUri] = (string) $etag;
+	}
+
+	private function _assertCardVersion($addressbookId, $cardUri)
+	{
+		$key = ((int) $addressbookId).'\n'.(string) $cardUri;
+		if (!array_key_exists($key, $this->expectedCardEtags)) {
+			return;
+		}
+		$expected = $this->expectedCardEtags[$key];
+		unset($this->expectedCardEtags[$key]);
+		$current = $this->getCard((int) $addressbookId, (string) $cardUri);
+		if ($current === false || !hash_equals((string) $expected, (string) $current['etag'])) {
+			throw new \Sabre\DAV\Exception\PreconditionFailed(
+				'The vCard changed while the conditional request was waiting for its Dolibarr lock',
+				'If-Match'
+			);
+		}
+	}
+
+	/** Store full CardDAV href/UID values outside size-limited native ref_ext. */
+	private function _storeCardMapping($type, $objectId, $cardUri, $sourceUid)
+	{
+		if (!$this->_cardMappingTableAvailable()) {
+			return;
+		}
+		$type = (string) $type;
+		$objectId = (int) $objectId;
+		$cardUri = (string) $cardUri;
+		$sourceUid = (string) $sourceUid;
+		$uriHash = hash('sha256', $cardUri);
+		$uidHash = hash('sha256', $sourceUid);
+		$where = 'entity = '.$this->entity.' AND object_type = \''.$this->db->escape($type)
+			.'\' AND fk_object = '.$objectId;
+		$values = "uuidext = '".$this->db->escape($cardUri)."', uuidhash = '".$uriHash
+			."', sourceuid = '".$this->db->escape($sourceUid)."', sourceuid_hash = '".$uidHash."'";
+		if (!$this->db->query('UPDATE '.MAIN_DB_PREFIX.'cdav_cardmap SET '.$values.' WHERE '.$where)) {
+			$this->_throwCardMappingError($type, $objectId, $uriHash, $uidHash);
+		}
+		$result = $this->db->query('SELECT fk_object FROM '.MAIN_DB_PREFIX.'cdav_cardmap WHERE '.$where);
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to verify the CardDAV object mapping');
+		}
+		if ($this->db->fetch_object($result)) return;
+
+		$sql = 'INSERT INTO '.MAIN_DB_PREFIX.'cdav_cardmap
+			(entity, object_type, fk_object, uuidext, uuidhash, sourceuid, sourceuid_hash) VALUES ('
+			.$this->entity.', \''.$this->db->escape($type).'\', '.$objectId.', \''.$this->db->escape($cardUri)
+			.'\', \''.$uriHash.'\', \''.$this->db->escape($sourceUid).'\', \''.$uidHash.'\')';
+		if (!$this->db->query($sql)) {
+			$this->_throwCardMappingError($type, $objectId, $uriHash, $uidHash);
+		}
+	}
+
+	/** Turn concurrent URI/UID uniqueness violations into an explicit HTTP 409. */
+	private function _throwCardMappingError($type, $objectId, $uriHash, $uidHash)
+	{
+		if ($this->db->lasterrno() === 'DB_ERROR_RECORD_ALREADY_EXISTS') {
+			throw new \Sabre\DAV\Exception\Conflict('A different CardDAV resource already uses this URI or UID');
+		}
+		$sql = 'SELECT fk_object FROM '.MAIN_DB_PREFIX.'cdav_cardmap WHERE entity = '.$this->entity
+			.' AND object_type = \''.$this->db->escape((string) $type).'\' AND fk_object <> '.((int) $objectId)
+			." AND (uuidhash = '".$this->db->escape((string) $uriHash)."' OR sourceuid_hash = '"
+			.$this->db->escape((string) $uidHash)."') LIMIT 1";
+		$result = $this->db->query($sql);
+		if ($result && $this->db->fetch_object($result)) {
+			throw new \Sabre\DAV\Exception\Conflict('A different CardDAV resource already uses this URI or UID');
+		}
+		throw new \Sabre\DAV\Exception('Unable to save the CardDAV object mapping');
+	}
+
+	/** Refuse two DAV resources that claim the same vCard UID. */
+	private function _assertCardUidAvailable($type, $sourceUid, $objectId = 0)
+	{
+		$this->_pruneOrphanCardMetadata();
+		if (!$this->_cardMappingTableAvailable()) {
+			return;
+		}
+		$sql = 'SELECT fk_object FROM '.MAIN_DB_PREFIX.'cdav_cardmap'
+			.' WHERE entity = '.$this->entity
+			.' AND object_type = \''.$this->db->escape((string) $type).'\''
+			.' AND sourceuid_hash = \''.hash('sha256', (string) $sourceUid).'\''
+			.' AND sourceuid = \''.$this->db->escape((string) $sourceUid).'\'';
+		if ($objectId > 0) {
+			$sql .= ' AND fk_object <> '.((int) $objectId);
+		}
+		$result = $this->db->query($sql);
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to verify vCard UID uniqueness');
+		}
+		if ($this->db->fetch_object($result)) {
+			throw new \Sabre\DAV\Exception\Conflict('A different CardDAV resource already uses this vCard UID');
+		}
+	}
+
+	/** Remove only protocol metadata whose native Dolibarr object was deleted. */
+	private function _pruneOrphanCardMetadata()
+	{
+		if ($this->metadataPruned) return;
+		$this->metadataPruned = true;
+		foreach (array('cdav_cardmap', 'cdav_vcard') as $table) {
+			if (!$this->db->DDLInfoTable(MAIN_DB_PREFIX.$table)) continue;
+			$sql = 'DELETE meta FROM '.MAIN_DB_PREFIX.$table.' meta'
+				.' LEFT JOIN '.MAIN_DB_PREFIX.'socpeople native_contact ON meta.object_type = \'ct\''
+				.' AND native_contact.rowid = meta.fk_object AND native_contact.entity = meta.entity'
+				.' LEFT JOIN '.MAIN_DB_PREFIX.'societe native_thirdparty ON meta.object_type = \'th\''
+				.' AND native_thirdparty.rowid = meta.fk_object AND native_thirdparty.entity = meta.entity'
+				.' LEFT JOIN '.MAIN_DB_PREFIX.'adherent native_member ON meta.object_type = \'mb\''
+				.' AND native_member.rowid = meta.fk_object AND native_member.entity = meta.entity'
+				.' WHERE meta.entity = '.$this->entity.' AND ('
+				."meta.object_type NOT IN ('ct','th','mb')"
+				." OR (meta.object_type = 'ct' AND native_contact.rowid IS NULL)"
+				." OR (meta.object_type = 'th' AND native_thirdparty.rowid IS NULL)"
+				." OR (meta.object_type = 'mb' AND native_member.rowid IS NULL))";
+			if (!$this->db->query($sql)) {
+				throw new \Sabre\DAV\Exception('Unable to prune orphaned CardDAV metadata');
+			}
+		}
 	}
 
 	private function _decodeSocialNetworks($value)
@@ -339,10 +715,26 @@ class Dolibarr extends AbstractBackend {
 
 	private function _storeSocialNetworks(array &$data, array $networks)
 	{
-		$networks = array_filter($networks, static fn($value) => trim((string) $value) !== '');
-		if ($networks) {
-			$data['socialnetworks'] = json_encode($networks, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+		$data['_socialnetworks_patch'] = $networks;
+		$nonEmpty = array_filter($networks, static fn($value) => trim((string) $value) !== '');
+		if ($nonEmpty) {
+			$data['socialnetworks'] = json_encode($nonEmpty, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 		}
+	}
+
+	/** Merge a client patch without erasing networks that its platform ignores. */
+	private function _mergeSocialNetworks($current, array $patch)
+	{
+		$merged = $this->_decodeSocialNetworks($current);
+		foreach ($patch as $code => $value) {
+			$value = trim((string) $value);
+			if ($value === '') {
+				unset($merged[$code]);
+			} else {
+				$merged[$code] = $value;
+			}
+		}
+		return $merged;
 	}
 
 	private function _isPreferredProperty($property)
@@ -350,12 +742,208 @@ class Dolibarr extends AbstractBackend {
 		if (isset($property['PREF'])) {
 			return true;
 		}
-		foreach ($property['TYPE'] as $type) {
+		$propertyTypes = isset($property['TYPE']) ? $property['TYPE'] : array();
+		foreach ($propertyTypes as $type) {
 			if (strtoupper((string) $type) === 'PREF') {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	/** Return normalized TYPE parameters (vCard 3 and 4 are both accepted). */
+	private function _getPropertyTypes($property)
+	{
+		$types = array();
+		$propertyTypes = isset($property['TYPE']) ? $property['TYPE'] : array();
+		foreach ($propertyTypes as $type) {
+			foreach (explode(',', (string) $type) as $part) {
+				$part = strtoupper(trim($part));
+				if ($part !== '') {
+					$types[$part] = true;
+				}
+			}
+		}
+		return $types;
+	}
+
+	/** Return the native Dolibarr social-network dictionary, including inactive rows. */
+	private function _socialNetworkDictionary()
+	{
+		return function_exists('getArrayOfSocialNetworks') ? getArrayOfSocialNetworks() : array();
+	}
+
+	private function _socialNetworkCode($value)
+	{
+		$value = strtolower(trim((string) $value));
+		$aliases = array(
+			'x' => 'twitter', 'x.com' => 'twitter', 'twitter.com' => 'twitter',
+			'linked-in' => 'linkedin', 'skype-username' => 'skype', 'xmpp' => 'jabber',
+		);
+		$value = $aliases[$value] ?? $value;
+		$dictionary = $this->_socialNetworkDictionary();
+		if (isset($dictionary[$value])) return $value;
+		if ($value === 'twitter' && isset($dictionary['x'])) return 'x';
+		if (preg_match('/^[a-z0-9_-]{1,32}$/', $value)) return $value;
+		return '';
+	}
+
+	/** Repair the unquoted X-USER form produced by some iOS releases. */
+	private function _repairSocialProfile($property)
+	{
+		$xuser = isset($property['X-USER']) ? (string) $property['X-USER'] : '';
+		$value = trim((string) $property);
+		if ($xuser !== '' && preg_match('/^[a-z][a-z0-9+.-]*$/i', $xuser) && str_starts_with($value, '//')) {
+			$position = strpos($value, ':');
+			$xuser .= ':'.($position === false ? $value : substr($value, 0, $position));
+			$value = $position === false ? '' : substr($value, $position + 1);
+		}
+		return array(trim($xuser), trim($value));
+	}
+
+	/** Reduce a profile URL to the identifier expected by Dolibarr's dictionary. */
+	private function _normalizeSocialId($code, $value)
+	{
+		$value = trim(str_replace(array('%22', '"'), '', (string) $value));
+		$value = trim(str_replace('%20', ' ', $value));
+		$dictionary = $this->_socialNetworkDictionary();
+		$template = (string) ($dictionary[$code]['url'] ?? '');
+		$base = preg_replace('/\/?\{socialid\}.*$/', '', $template);
+		$base = preg_replace('#^https?://#i', '', (string) $base);
+		$base = preg_replace('#^www\.#i', '', (string) $base);
+		if ($base === '' || strpos($base, '{') !== false) return $value;
+		$host = preg_replace('#/.*$#', '', $base);
+		$path = substr($base, strlen($host));
+		$pattern = '#^((https?:)?//)?(www\.)?'.preg_quote($host, '#')
+			.($path !== '' ? '('.preg_quote($path, '#').')?' : '').'/*#i';
+		do {
+			$before = $value;
+			$value = preg_replace($pattern, '', $value);
+		} while ($value !== $before);
+		if (!preg_match('#^[a-z][a-z0-9+.-]*://#i', $value) && ($position = strpos($value, ':')) !== false) {
+			$value = substr($value, 0, $position);
+		}
+		return trim($value, " \t/");
+	}
+
+	/** Extract social-network values emitted by the main desktop/mobile clients. */
+	private function _extractSocialNetworks($vCard)
+	{
+		$networks = array();
+		$dictionary = $this->_socialNetworkDictionary();
+		$legacyCodes = array_unique(array_merge(array_keys($dictionary), array(
+			'jabber', 'skype', 'whatsapp', 'snapchat', 'linkedin', 'instagram',
+			'facebook', 'twitter', 'x', 'mastodon', 'github', 'youtube',
+		)));
+		foreach ($legacyCodes as $network) {
+			$propertyName = 'X-'.strtoupper((string) $network);
+			foreach ($vCard->select($propertyName) as $property) {
+				$code = $this->_socialNetworkCode($network);
+				if ($code !== '') $networks[$code] = $this->_normalizeSocialId($code, (string) $property);
+			}
+		}
+		foreach ($vCard->select('X-SKYPE-USERNAME') as $property) {
+			$code = $this->_socialNetworkCode('skype');
+			if ($code !== '') $networks[$code] = $this->_normalizeSocialId($code, (string) $property);
+		}
+		foreach ($vCard->select('IMPP') as $impp) {
+			$service = isset($impp['X-SERVICE-TYPE']) ? trim((string) $impp['X-SERVICE-TYPE']) : '';
+			$value = trim((string) $impp);
+			$scheme = (string) parse_url($value, PHP_URL_SCHEME);
+			$code = $this->_socialNetworkCode($service !== '' ? $service : $scheme);
+			if ($code === '') continue;
+			$value = preg_replace('/^[a-z][a-z0-9+.-]*:/i', '', $value);
+			$networks[$code] = $this->_normalizeSocialId($code, $value);
+		}
+		foreach ($vCard->select('X-SOCIALPROFILE') as $property) {
+			$type = isset($property['TYPE']) ? (string) $property['TYPE'] : '';
+			$code = $this->_socialNetworkCode($type);
+			if ($code === '') continue;
+			list($xuser, $url) = $this->_repairSocialProfile($property);
+			$value = $xuser !== '' ? $xuser : $url;
+			if (!preg_match('/^x-apple:/i', $value)) {
+				$networks[$code] = $this->_normalizeSocialId($code, $value);
+			}
+		}
+		return $networks;
+	}
+
+	private function _quoteVCardParameter($value)
+	{
+		$value = str_replace('"', '', (string) $value);
+		return strpbrk($value, ':;,') === false ? $value : '"'.$value.'"';
+	}
+
+	/** Export every native Dolibarr social-network value in a client-safe form. */
+	private function _socialNetworksToVCard(array $networks)
+	{
+		$dictionary = $this->_socialNetworkDictionary();
+		$instantMessaging = array('skype' => 'skype', 'whatsapp' => 'whatsapp', 'jabber' => 'xmpp');
+		$lines = '';
+		foreach ($networks as $rawCode => $rawValue) {
+			$code = strtolower((string) $rawCode);
+			$value = trim((string) $rawValue);
+			if ($value === '' || !preg_match('/^[a-z0-9_-]{1,32}$/', $code)) continue;
+			if (isset($instantMessaging[$code])) {
+				$label = ucfirst($code === 'jabber' ? 'Jabber' : $code);
+				$lines .= 'IMPP;X-SERVICE-TYPE='.$label.':'.$instantMessaging[$code].':'
+					.str_replace(';', '\\;', $value)."\n";
+				continue;
+			}
+			$template = (string) ($dictionary[$code]['url'] ?? '');
+			if (preg_match('#^https?://#i', $value)) {
+				$url = $value;
+			} elseif ($template !== '') {
+				// Dictionary templates may accept paths or federated identifiers.
+				$encoded = str_replace(array('%2F', '%40', '%3A'), array('/', '@', ':'), rawurlencode($value));
+				$url = str_replace('{socialid}', $encoded, $template);
+			} else {
+				$url = 'x-apple:'.rawurlencode($value);
+			}
+			$lines .= 'X-SOCIALPROFILE;TYPE='.$code.';X-USER='.$this->_quoteVCardParameter($value).':'
+				.$url."\n";
+		}
+		return $lines;
+	}
+
+	/** Resolve a country label with Dolibarr's native dictionary helper. */
+	private function _getCountryIdFromLabel($label)
+	{
+		$label = trim((string) $label);
+		if ($label === '') {
+			return 0;
+		}
+		if (!function_exists('getCountry')) {
+			require_once DOL_DOCUMENT_ROOT.'/core/lib/company.lib.php';
+		}
+		$id = \getCountry('', '3', $this->db, $this->langs, 0, $label);
+		return is_numeric($id) ? (int) $id : 0;
+	}
+
+	/**
+	 * Link an externally-created person to an existing Dolibarr third party only
+	 * when the vCard ORG value identifies exactly one active company.
+	 */
+	private function _resolveThirdPartyId($organization)
+	{
+		$organization = trim((string) $organization, " ;\r\n\t");
+		if ($organization === '') {
+			return 0;
+		}
+		$sql = 'SELECT s.rowid FROM '.MAIN_DB_PREFIX.'societe s
+			WHERE s.entity IN ('.getEntity('societe').') AND s.status = 1
+			AND (s.nom = \''.$this->db->escape($organization).'\'
+				OR CONCAT(s.nom, \' (\', COALESCE(s.name_alias, \'\'), \')\') = \''.$this->db->escape($organization).'\')
+			ORDER BY s.rowid LIMIT 2';
+		$result = $this->db->query($sql);
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to resolve the Dolibarr third-party link');
+		}
+		$ids = array();
+		while ($row = $this->db->fetch_object($result)) {
+			$ids[] = (int) $row->rowid;
+		}
+		return count($ids) === 1 ? $ids[0] : 0;
 	}
 
 	private function _syncCategories($type, $objectId, array $labels)
@@ -365,16 +953,10 @@ class Dolibarr extends AbstractBackend {
 		}
 
 		if ($type === 'contact') {
-			$table = 'categorie_contact';
-			$objectField = 'fk_socpeople';
 			$categoryTypes = array(4);
 		} elseif ($type === 'member') {
-			$table = 'categorie_member';
-			$objectField = 'fk_member';
 			$categoryTypes = array(3);
 		} else {
-			$table = 'categorie_societe';
-			$objectField = 'fk_soc';
 			$categoryTypes = array(1, 2);
 		}
 
@@ -384,7 +966,7 @@ class Dolibarr extends AbstractBackend {
 				$quotedLabels[] = '\''.$this->db->escape(trim((string) $label)).'\'';
 			}
 		}
-		$sql = 'SELECT rowid FROM '.MAIN_DB_PREFIX.'categorie
+		$sql = 'SELECT rowid, type FROM '.MAIN_DB_PREFIX.'categorie
 			WHERE type IN ('.implode(',', $categoryTypes).')
 			AND entity IN ('.getEntity('category').')';
 		if ($quotedLabels) {
@@ -394,59 +976,62 @@ class Dolibarr extends AbstractBackend {
 		}
 		$result = $this->db->query($sql);
 		$categoryIds = array();
+		$categoryIdsByType = array(1 => array(), 2 => array());
 		if (!$result) {
 			throw new \Sabre\DAV\Exception('Unable to resolve Dolibarr categories');
 		}
 		while ($row = $this->db->fetch_object($result)) {
 			$categoryIds[] = (int) $row->rowid;
+			if ($type === 'thirdparty' && isset($categoryIdsByType[(int) $row->type])) {
+				$categoryIdsByType[(int) $row->type][] = (int) $row->rowid;
+			}
 		}
 		if ($type === 'contact' && (int) CDAV_CONTACT_TAG > 0) {
 			$categoryIds[] = (int) CDAV_CONTACT_TAG;
 		}
 
-		if (!$this->db->query('DELETE rel FROM '.MAIN_DB_PREFIX.$table.' rel
-			INNER JOIN '.MAIN_DB_PREFIX.'categorie cat ON cat.rowid = rel.fk_categorie
-			WHERE rel.'.$objectField.' = '.((int) $objectId).'
-			AND cat.type IN ('.implode(',', $categoryTypes).')')) {
-			throw new \Sabre\DAV\Exception('Unable to update Dolibarr categories');
-		}
-		foreach (array_unique($categoryIds) as $categoryId) {
-			if (!$this->db->query('INSERT IGNORE INTO '.MAIN_DB_PREFIX.$table.' (fk_categorie, '.$objectField.')
-				VALUES ('.((int) $categoryId).', '.((int) $objectId).')')) {
-				throw new \Sabre\DAV\Exception('Unable to assign a Dolibarr category');
+		// Use Dolibarr's business APIs so category hooks and validation stay active.
+		if ($type === 'contact') {
+			require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
+			$object = new \Contact($this->db);
+			$object->id = (int) $objectId;
+			$result = $object->setCategories(array_values(array_unique($categoryIds)), true);
+		} elseif ($type === 'member') {
+			require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent.class.php';
+			$object = new \Adherent($this->db);
+			$object->id = (int) $objectId;
+			$result = $object->setCategories(array_values(array_unique($categoryIds)));
+		} else {
+			require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+			require_once DOL_DOCUMENT_ROOT.'/categories/class/categorie.class.php';
+			$object = new \Societe($this->db);
+			$object->id = (int) $objectId;
+			$result = $object->setCategories(array_values(array_unique($categoryIdsByType[1])), \Categorie::TYPE_SUPPLIER, true);
+			if ($result >= 0) {
+				$result = $object->setCategories(array_values(array_unique($categoryIdsByType[2])), \Categorie::TYPE_CUSTOMER, true);
 			}
+		}
+		if ($result < 0) {
+			throw new \Sabre\DAV\Exception('Unable to update Dolibarr categories');
 		}
 	}
 
 	private function _getDefaultMemberType()
 	{
-		$sql = 'SELECT rowid, morphy FROM '.MAIN_DB_PREFIX.'adherent_type
-			WHERE statut = 0 AND entity IN ('.getEntity('adherent').')
-			ORDER BY rowid LIMIT 1';
-		$result = $this->db->query($sql);
-		if ($result && ($row = $this->db->fetch_object($result))) {
-			$morphy = in_array((string) $row->morphy, array('phy', 'mor'), true) ? (string) $row->morphy : 'phy';
-			return array('id' => (int) $row->rowid, 'morphy' => $morphy);
+		require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent_type.class.php';
+		$memberType = new \AdherentType($this->db);
+		$activeTypes = $memberType->liste_array(0);
+		if ($activeTypes) {
+			$typeId = (int) array_key_first($activeTypes);
+			if ($memberType->fetch($typeId) > 0 && (int) $memberType->status === 0) {
+				$morphy = in_array((string) $memberType->morphy, array('phy', 'mor'), true)
+					? (string) $memberType->morphy
+					: 'phy';
+				return array('id' => $typeId, 'morphy' => $morphy);
+			}
 		}
 		throw new \Sabre\DAV\Exception('No active Dolibarr member type is available');
 	}
-
-	private function _updateCardExternalRef($table, $objectId, $cardUri, $sourceUid, $maxLength)
-	{
-		$result = $this->db->query('SELECT ref_ext FROM '.MAIN_DB_PREFIX.$table.' WHERE rowid = '.((int) $objectId));
-		if (!$result) {
-			throw new \Sabre\DAV\Exception('Unable to read the external CardDAV identifier');
-		}
-		$row = $result ? $this->db->fetch_object($result) : null;
-		if ($row && $this->_decodeCardExternalRef((string) $row->ref_ext) !== null) {
-			$refExt = $this->_encodeCardExternalRef($cardUri, $sourceUid, $maxLength);
-			if (!$this->db->query('UPDATE '.MAIN_DB_PREFIX.$table.' SET ref_ext = \''.$this->db->escape($refExt).'\'
-				WHERE rowid = '.((int) $objectId))) {
-				throw new \Sabre\DAV\Exception('Unable to preserve the external CardDAV identifier');
-			}
-		}
-	}
-
 
 	/**
 	 * Updates properties for an address book.
@@ -504,19 +1089,28 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _getSqlContacts($sqlWhere='')
 	{
-		$sql = 'SELECT p.*, co.label country_label, GREATEST(COALESCE(s.tms, p.tms), p.tms) lastupd, s.code_client soc_code_client, s.code_fournisseur soc_code_fournisseur,
+		$hasMappingTable = $this->_cardMappingTableAvailable();
+		$mappingSelect = $hasMappingTable
+			? ', cm.uuidext AS cdav_uuidext, cm.sourceuid AS cdav_sourceuid, cm.tms AS cdav_mapping_tms'
+			: ', NULL AS cdav_uuidext, NULL AS cdav_sourceuid, NULL AS cdav_mapping_tms';
+		$mappingJoin = $hasMappingTable
+			? ' LEFT JOIN '.MAIN_DB_PREFIX.'cdav_cardmap AS cm ON cm.entity = p.entity AND cm.object_type = \'ct\' AND cm.fk_object = p.rowid'
+			: '';
+		$lastUpdatedSql = $hasMappingTable ? 'GREATEST(COALESCE(s.tms, p.tms), p.tms, COALESCE(cm.tms, p.tms))' : 'GREATEST(COALESCE(s.tms, p.tms), p.tms)';
+		$sql = 'SELECT p.*, co.label country_label, '.$lastUpdatedSql.' lastupd, s.code_client soc_code_client, s.code_fournisseur soc_code_fournisseur,
 					s.nom soc_nom, s.name_alias soc_name_alias, s.address soc_address, s.zip soc_zip, s.town soc_town, cos.label soc_country_label, s.phone soc_phone, s.fax soc_fax,
 					s.email soc_email, s.url soc_url, s.client soc_client, s.fournisseur soc_fournisseur, s.note_private soc_note_private, s.note_public soc_note_public,
 					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label,
 					GROUP_CONCAT(DISTINCT cc.fk_categorie ORDER BY cc.fk_categorie ASC SEPARATOR \',\') category_ids,
-					s.logo
+					s.logo'.$mappingSelect.'
 				FROM '.MAIN_DB_PREFIX.'socpeople as p
+				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = p.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'societe as s ON s.rowid = p.fk_soc
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie_contact as cc ON cc.fk_socpeople = p.rowid
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie as cat ON cat.rowid = cc.fk_categorie
-				WHERE p.entity IN ('.getEntity('societe').')
+				WHERE p.entity IN ('.getEntity('contact').')
 				AND p.statut=1
 				AND (p.priv=0 OR (p.priv=1 AND p.fk_user_creat='.$this->user->id.'))
 				'.$sqlWhere.'
@@ -535,12 +1129,21 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _getSqlMembers($sqlWhere='')
 	{
-		$sql = 'SELECT p.*, co.label country_label, GREATEST(COALESCE(s.tms, p.tms), p.tms) lastupd, s.code_client soc_code_client, s.code_fournisseur soc_code_fournisseur,
+		$hasMappingTable = $this->_cardMappingTableAvailable();
+		$mappingSelect = $hasMappingTable
+			? ', cm.uuidext AS cdav_uuidext, cm.sourceuid AS cdav_sourceuid, cm.tms AS cdav_mapping_tms'
+			: ', NULL AS cdav_uuidext, NULL AS cdav_sourceuid, NULL AS cdav_mapping_tms';
+		$mappingJoin = $hasMappingTable
+			? ' LEFT JOIN '.MAIN_DB_PREFIX.'cdav_cardmap AS cm ON cm.entity = p.entity AND cm.object_type = \'mb\' AND cm.fk_object = p.rowid'
+			: '';
+		$lastUpdatedSql = $hasMappingTable ? 'GREATEST(COALESCE(s.tms, p.tms), p.tms, COALESCE(cm.tms, p.tms))' : 'GREATEST(COALESCE(s.tms, p.tms), p.tms)';
+		$sql = 'SELECT p.*, co.label country_label, '.$lastUpdatedSql.' lastupd, s.code_client soc_code_client, s.code_fournisseur soc_code_fournisseur,
 					COALESCE(s.nom, p.societe) soc_nom, s.name_alias soc_name_alias, s.address soc_address, s.zip soc_zip, s.town soc_town, cos.label soc_country_label, s.phone soc_phone, s.fax soc_fax,
 					s.email soc_email, s.url soc_url, s.client soc_client, s.fournisseur soc_fournisseur, s.note_private soc_note_private, s.note_public soc_note_public,
 					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label,
-					GROUP_CONCAT(DISTINCT cc.fk_categorie ORDER BY cc.fk_categorie ASC SEPARATOR \',\') category_ids
+					GROUP_CONCAT(DISTINCT cc.fk_categorie ORDER BY cc.fk_categorie ASC SEPARATOR \',\') category_ids'.$mappingSelect.'
 				FROM '.MAIN_DB_PREFIX.'adherent as p
+				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = p.country
 				LEFT JOIN '.MAIN_DB_PREFIX.'societe as s ON s.rowid = p.fk_soc
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
@@ -560,10 +1163,19 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _getSqlThirdparties($sqlWhere='')
 	{
-		$sql = 'SELECT s.*, co.label country_label, s.tms lastupd, cfj.libelle as forme_juridique,
+		$hasMappingTable = $this->_cardMappingTableAvailable();
+		$mappingSelect = $hasMappingTable
+			? ', cm.uuidext AS cdav_uuidext, cm.sourceuid AS cdav_sourceuid, cm.tms AS cdav_mapping_tms'
+			: ', NULL AS cdav_uuidext, NULL AS cdav_sourceuid, NULL AS cdav_mapping_tms';
+		$mappingJoin = $hasMappingTable
+			? ' LEFT JOIN '.MAIN_DB_PREFIX.'cdav_cardmap AS cm ON cm.entity = s.entity AND cm.object_type = \'th\' AND cm.fk_object = s.rowid'
+			: '';
+		$lastUpdatedSql = $hasMappingTable ? 'GREATEST(s.tms, COALESCE(cm.tms, s.tms))' : 's.tms';
+		$sql = 'SELECT s.*, co.label country_label, '.$lastUpdatedSql.' lastupd, cfj.libelle as forme_juridique,
 					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label,
-					GROUP_CONCAT(DISTINCT cs.fk_categorie ORDER BY cs.fk_categorie ASC SEPARATOR \',\') category_ids
+					GROUP_CONCAT(DISTINCT cs.fk_categorie ORDER BY cs.fk_categorie ASC SEPARATOR \',\') category_ids'.$mappingSelect.'
 				FROM '.MAIN_DB_PREFIX.'societe as s
+				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'societe_commerciaux as sc ON sc.fk_soc = s.rowid
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = s.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_forme_juridique as cfj ON cfj.rowid = s.fk_forme_juridique
@@ -590,7 +1202,6 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _contactToVCard($obj)
 	{
-		global $conf;
 		$obj = $this->_normalizeDatabaseRow($obj);
 		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
 		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
@@ -679,72 +1290,35 @@ class Dolibarr extends AbstractBackend {
 			$carddata.="EMAIL;TYPE=PREF,INTERNET:".str_replace(';','\;',$obj->email)."\n";
 		if(!empty($obj->soc_email) && $obj->soc_email!=$obj->email)
 			$carddata.="EMAIL:".str_replace(';','\;',$obj->soc_email)."\n";
-		if(!empty($obj->soc_url))
+		$contactUrl = !empty($obj->url) ? $obj->url : $obj->soc_url;
+		if(!empty($contactUrl))
 		{
-			if(strpos($obj->soc_url,'://')===false)
-				$carddata.="URL:http://".trim($obj->soc_url)."\n";
+			if(strpos($contactUrl,'://')===false)
+				$carddata.="URL:https://".trim($contactUrl)."\n";
 			else
-				$carddata.="URL:".trim($obj->soc_url)."\n";
+				$carddata.="URL:".trim($contactUrl)."\n";
 		}
-		if(!empty($socialNetworks['jabber']))
-			$carddata.="X-JABBER:".str_replace(';','\;',$socialNetworks['jabber'])."\n";
-		if(!empty($socialNetworks['skype']))
-			$carddata.="X-SKYPE:".str_replace(';','\;',$socialNetworks['skype'])."\n";
+		$carddata .= $this->_socialNetworksToVCard($socialNetworks);
 		if(!empty($obj->birthday))
 			$carddata.="BDAY:".str_replace(';','\;',$obj->birthday)."\n";
 		if($notePublic !== '')
 			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
 		if(!empty($obj->photo))
 		{
-			$photofile = $conf->societe->dir_output."/contact/".$obj->rowid."/photos/".$obj->photo;
+			$photofile = $this->_photoFilePath('contact', $obj->rowid, $obj->photo);
 			if(!file_exists($photofile) && !empty($obj->logo) && !empty($obj->fk_soc))
 			{
 				// fallback image search thirdparty if possible
-				$photofile = $conf->societe->dir_output . '/' . $obj->fk_soc . '/logos/' . getImageFileNameForSize($obj->logo,''); //, '_mini' getImageFileNameForSize include the thumbs
+				$societeOutput = $this->_outputDirectory('societe');
+				$photofile = $societeOutput === '' ? '' : $societeOutput.'/'.((int) $obj->fk_soc).'/logos/'
+					.getImageFileNameForSize($obj->logo, '');
 			}
 
-			if(file_exists($photofile))
-			{
-				if(function_exists('exif_imagetype'))
-				{
-					$image_type = image_type_to_mime_type(exif_imagetype($photofile));
-					$image_type = strtoupper(substr($image_type, strpos($image_type, '/')+1));
-				}
-				else
-				{
-					$image_type='';
-					switch(strtolower(substr($obj->photo,-4)))
-					{
-						case '.jpg':
-						case 'jpeg':
-							$image_type='JPEG';
-							break;
-						case '.gif':
-							$image_type='GIF';
-							break;
-						case '.png':
-							$image_type='PNG';
-							break;
-						case '.bmp':
-							$image_type='BMP';
-							break;
-						case '.tif':
-						case 'tiff':
-							$image_type='TIFF';
-							break;
-					}
-				}
-				if(!empty($image_type))
-				{
-					$photodata = wordwrap("PHOTO;ENCODING=b;TYPE=".$image_type.":".base64_encode(file_get_contents($photofile)),72,"\n",true);
-					$photodata = trim(str_replace("\n", "\n ", $photodata));
-					$carddata .= $photodata."\n";
-				}
-			}
+			$carddata .= $this->_photoToVCard($photofile);
 		}
    		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
-		return $this->_normalizeVCardData($carddata);
+		return $this->vcardStore->merge('ct', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
 	}
 
 	/**
@@ -755,8 +1329,8 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _memberToVCard($obj)
 	{
-		global $conf;
 		$obj = $this->_normalizeDatabaseRow($obj);
+		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
 		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
 		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
 		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
@@ -828,62 +1402,27 @@ class Dolibarr extends AbstractBackend {
 			$carddata.="EMAIL;TYPE=PREF,INTERNET:".str_replace(';','\;',$obj->email)."\n";
 		if(!empty($obj->soc_email) && $obj->soc_email!=$obj->email)
 			$carddata.="EMAIL:".str_replace(';','\;',$obj->soc_email)."\n";
-		if(!empty($obj->soc_url))
+		$memberUrl = !empty($obj->url) ? $obj->url : $obj->soc_url;
+		if(!empty($memberUrl))
 		{
-			if(strpos($obj->soc_url,'://')===false)
-				$carddata.="URL:https://".trim($obj->soc_url)."\n";
+			if(strpos($memberUrl,'://')===false)
+				$carddata.="URL:https://".trim($memberUrl)."\n";
 			else
-				$carddata.="URL:".trim($obj->soc_url)."\n";
+				$carddata.="URL:".trim($memberUrl)."\n";
 		}
+		$carddata .= $this->_socialNetworksToVCard($socialNetworks);
 		if(!empty($obj->birth))
 			$carddata.="BDAY;VALUE=DATE:".str_replace(';','\;',date('Ymd',strtotime($obj->birth)))."\n";
 		if($notePublic !== '')
 			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
 		if(!empty($obj->photo))
 		{
-			$photofile = $conf->adherent->dir_output."/member/".$obj->rowid."/photos/".$obj->photo;
-			if(file_exists($photofile))
-			{
-				if(function_exists('exif_imagetype'))
-				{
-					$image_type = image_type_to_mime_type(exif_imagetype($photofile));
-					$image_type = strtoupper(substr($image_type, strpos($image_type, '/')+1));
-				}
-				else
-				{
-					$image_type='';
-					switch(strtolower(substr($obj->photo,-4)))
-					{
-						case '.jpg':
-						case 'jpeg':
-							$image_type='JPEG';
-							break;
-						case '.gif':
-							$image_type='GIF';
-							break;
-						case '.png':
-							$image_type='PNG';
-							break;
-						case '.bmp':
-							$image_type='BMP';
-							break;
-						case '.tif':
-						case 'tiff':
-							$image_type='TIFF';
-							break;
-					}
-				}
-				if(!empty($image_type))
-				{
-					$photodata = wordwrap("PHOTO;ENCODING=b;TYPE=".$image_type.":".base64_encode(file_get_contents($photofile)),72,"\n",true);
-					$photodata = trim(str_replace("\n", "\n ", $photodata));
-					$carddata .= $photodata."\n";
-				}
-			}
+			$photofile = $this->_photoFilePath('member', $obj->rowid, $obj->photo);
+			$carddata .= $this->_photoToVCard($photofile);
 		}
 		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
-		return $this->_normalizeVCardData($carddata);
+		return $this->vcardStore->merge('mb', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
 	}
 
 
@@ -963,11 +1502,7 @@ class Dolibarr extends AbstractBackend {
 			else
 				$carddata.="URL:".trim($obj->url)."\n";
 		}
-		foreach (array('whatsapp', 'snapchat', 'linkedin', 'instagram', 'skype') as $network) {
-			if (!empty($socialNetworks[$network])) {
-				$carddata.='X-'.strtoupper($network).':'.str_replace(';','\;', $socialNetworks[$network])."\n";
-			}
-		}
+		$carddata .= $this->_socialNetworksToVCard($socialNetworks);
 		$noteParts = $doliinfo;
 		if($notePublic !== '')
 			$noteParts[] = $notePublic;
@@ -975,7 +1510,7 @@ class Dolibarr extends AbstractBackend {
 		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
 
-		return $this->_normalizeVCardData($carddata);
+		return $this->vcardStore->merge('th', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
 	}
 
 	/*
@@ -985,18 +1520,26 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _parseDataContact($cardData, $mode) {
 
-		debug_log("_parseDataContact( $cardData )");
+		debug_log('_parseDataContact('.strlen((string) $cardData).' bytes)');
 
-		$rdata = [] ;
+		// A CardDAV PUT replaces the complete vCard. Initializing every mapped
+		// field is essential: removing a phone or email on a client must clear it
+		// in Dolibarr instead of resurrecting the old value on the next sync.
+		$rdata = array(
+			'lastname' => '', 'firstname' => '', 'civility' => '', 'poste' => '', 'priv' => 0,
+			'phone' => '', 'phone_perso' => '', 'phone_mobile' => '', 'fax' => '',
+			'email' => '', 'url' => '', 'address' => '', 'town' => '', 'zip' => '',
+			'fk_pays' => 0, 'socialnetworks' => '', 'birthday' => null,
+			'note_public' => '', 'photo' => '',
+		);
 
-		$vCard = VObject\Reader::read($cardData);
-		$vCard->validate(VObject\Node::REPAIR | VObject\Node::PROFILE_CARDDAV);
-		$vCard->convert(VObject\Document::VCARD30);
+		$vCard = $this->_readVCard($cardData);
 		$rdata['_category_labels'] = $this->_extractCategoryLabels($vCard);
 
 		// debug_log("_parseData__converted( ".$vCard->PHOTO." )");
 
-		$rdata['_uid'] = (string)$vCard->UID;
+		$rdata['_uid'] = isset($vCard->UID) ? trim((string) $vCard->UID) : '';
+		$this->_validateCardUid($rdata['_uid']);
 		if(isset($vCard->PHOTO) && strpos(substr($vCard->PHOTO,0,10),'://')===false) // exist and not uri
 		{
 			$rdata['_photo_bin'] = (string)$vCard->PHOTO;
@@ -1004,7 +1547,7 @@ class Dolibarr extends AbstractBackend {
 		else
 			$rdata['_photo_bin'] = false;
 
-		$names = $vCard->N->getParts();
+		$names = isset($vCard->N) ? $vCard->N->getParts() : array();
 		if(isset($names[0]) && trim((string)$names[0])!='')
 			$rdata['lastname'] = (string)$names[0];
 		if($rdata['lastname']=='' && isset($vCard->FN) && trim((string)$vCard->FN)!='')
@@ -1032,12 +1575,7 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->TEL as $tel)
 			{
-				$teltype = [];
-				$types = $tel['TYPE'];
-				foreach($types as $type)
-				{
-					$teltype[strtoupper($type)]=true;
-				}
+				$teltype = $this->_getPropertyTypes($tel);
 
 				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
 					$rdata['phone'] = (string)$tel;
@@ -1050,8 +1588,10 @@ class Dolibarr extends AbstractBackend {
 
 				if(isset($teltype['HOME']) && isset($teltype['FAX']))
 					$rdata['fax'] = (string)$tel;
-				elseif(isset($teltype['FAX']) && !isset($rdata['fax']))
+				elseif(isset($teltype['FAX']) && $rdata['fax'] === '')
 					$rdata['fax'] = (string)$tel;
+				elseif (!$teltype && $rdata['phone'] === '')
+					$rdata['phone'] = (string) $tel;
 			}
 		}
 
@@ -1059,26 +1599,31 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->EMAIL as $email)
 			{
-				if(!isset($rdata['email']))
+				if($rdata['email'] === '')
 					$rdata['email'] = (string)$email;
 				if($this->_isPreferredProperty($email))
 					$rdata['email'] = (string)$email;
 			}
 		}
 
+		if (isset($vCard->URL))
+			$rdata['url'] = trim((string) $vCard->URL);
+
 		if(isset($vCard->ADR))
 		{
+			$hasHomeAddress = false;
+			foreach ($vCard->ADR as $candidateAddress) {
+				if (isset($this->_getPropertyTypes($candidateAddress)['HOME'])) {
+					$hasHomeAddress = true;
+					break;
+				}
+			}
 			foreach($vCard->ADR as $adr)
 			{
-				$types = $adr['TYPE'];
-				$adrtype = [];
-				foreach($types as $type)
-				{
-					$adrtype[strtoupper($type)]=true;
-				}
+				$adrtype = $this->_getPropertyTypes($adr);
 				$adrparts = $adr->getParts();
 				// debug_log("adrparts:\n".print_r($adrtype, true).print_r($adrparts, true));
-				if(isset($adrtype['HOME']) || !isset($rdata['address']))
+				if(isset($adrtype['HOME']) || (!$hasHomeAddress && $rdata['address'] === ''))
 				{
 					$rdata['address'] = '';
 					$rdata['town'] = '';
@@ -1097,44 +1642,30 @@ class Dolibarr extends AbstractBackend {
 						$rdata['zip'] = $adrparts[5];
 					if(isset($adrparts[6]))
 						$rdata['_country_label'] = $adrparts[6];
-					if($mode=='C' && isset($vCard->ORG))	// keep ORG info in address
-						$rdata['address'] = trim((string)$vCard->ORG," ;\n\r\t") . "\n" . $rdata['address'];
 				}
 			}
 		}
 
-		$socialNetworks = array();
-		if(isset($vCard->{'X-JABBER'}))
-			$socialNetworks['jabber'] = (string)$vCard->{'X-JABBER'};
-
-		if(isset($vCard->{'X-SKYPE'}))
-			$socialNetworks['skype'] = (string)$vCard->{'X-SKYPE'};
-		elseif(isset($vCard->{'X-SKYPE-USERNAME'}))
-			$socialNetworks['skype'] = (string)$vCard->{'X-SKYPE-USERNAME'};
+		$socialNetworks = $this->_extractSocialNetworks($vCard);
 		$this->_storeSocialNetworks($rdata, $socialNetworks);
+		$rdata['_organization'] = isset($vCard->ORG) ? trim((string) $vCard->ORG, " ;\r\n\t") : '';
 
 		$bday = '';
 		if( isset($vCard->BDAY))
 			$bday = trim((string)$vCard->BDAY);
-		if( isset($vCard->BDAY) &&
-			!empty($bday) &&
-			date("Y-m-d", strtotime(trim($bday))) == trim($bday) )
-			$rdata['birthday'] = trim($bday);
+		if (preg_match('/^(\d{4})-?(\d{2})-?(\d{2})/', $bday, $birthdayParts)
+			&& checkdate((int) $birthdayParts[2], (int) $birthdayParts[3], (int) $birthdayParts[1]))
+			$rdata['birthday'] = $birthdayParts[1].'-'.$birthdayParts[2].'-'.$birthdayParts[3];
 
 		if(isset($vCard->NOTE))
-			$rdata['note_public'] = strtr(trim((string)$vCard->NOTE),"\\n", "\n");
+			$rdata['note_public'] = trim((string)$vCard->NOTE);
 
 		if(isset($rdata['_country_label']) && $rdata['_country_label']!='')
 		{
-			$sql = 'SELECT rowid FROM '.MAIN_DB_PREFIX.'c_country
-					WHERE label LIKE "'.$this->db->escape($rdata['_country_label']).'"
-					AND active = 1';
-			$result = $this->db->query($sql);
-			if ($result !== false && ($row = $this->db->fetch_array($result)))
-				$rdata['fk_pays'] = $row['rowid'];
+			$rdata['fk_pays'] = $this->_getCountryIdFromLabel($rdata['_country_label']);
 		}
 
-		debug_log("parsed:\n".print_r($rdata, true));
+		debug_log('parsed contact UID '.$rdata['_uid']);
 
 		return $rdata;
 	}
@@ -1146,18 +1677,22 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _parseDataMember($cardData, $mode) {
 
-		debug_log("_parseDataMember( $cardData )");
+		debug_log('_parseDataMember('.strlen((string) $cardData).' bytes)');
 
-		$rdata = [] ;
+		$rdata = array(
+			'lastname' => '', 'firstname' => '', 'civility' => '', 'phone' => '', 'phone_perso' => '',
+			'phone_mobile' => '', 'email' => '', 'url' => '', 'socialnetworks' => '',
+			'address' => '', 'town' => '', 'zip' => '', 'country' => 0,
+			'birth' => null, 'note_public' => '', 'photo' => '',
+		);
 
-		$vCard = VObject\Reader::read($cardData);
-		$vCard->validate(VObject\Node::REPAIR | VObject\Node::PROFILE_CARDDAV);
-		$vCard->convert(VObject\Document::VCARD30);
+		$vCard = $this->_readVCard($cardData);
 		$rdata['_category_labels'] = $this->_extractCategoryLabels($vCard);
 
 		// debug_log("_parseData__converted( ".$vCard->PHOTO." )");
 
-		$rdata['_uid'] = (string)$vCard->UID;
+		$rdata['_uid'] = isset($vCard->UID) ? trim((string) $vCard->UID) : '';
+		$this->_validateCardUid($rdata['_uid']);
 		if(isset($vCard->PHOTO) && strpos(substr($vCard->PHOTO,0,10),'://')===false) // exist and not uri
 		{
 			$rdata['_photo_bin'] = (string)$vCard->PHOTO;
@@ -1165,7 +1700,7 @@ class Dolibarr extends AbstractBackend {
 		else
 			$rdata['_photo_bin'] = false;
 
-		$names = $vCard->N->getParts();
+		$names = isset($vCard->N) ? $vCard->N->getParts() : array();
 		if(isset($names[0]) && trim((string)$names[0])!='')
 			$rdata['lastname'] = (string)$names[0];
 		if($rdata['lastname']=='' && isset($vCard->FN) && trim((string)$vCard->FN)!='')
@@ -1188,12 +1723,7 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->TEL as $tel)
 			{
-				$teltype = [];
-				$types = $tel['TYPE'];
-				foreach($types as $type)
-				{
-					$teltype[strtoupper($type)]=true;
-				}
+				$teltype = $this->_getPropertyTypes($tel);
 
 				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
 					$rdata['phone'] = (string)$tel;
@@ -1203,6 +1733,8 @@ class Dolibarr extends AbstractBackend {
 
 				if(isset($teltype['CELL']))
 					$rdata['phone_mobile'] = (string)$tel;
+				elseif (!$teltype && $rdata['phone'] === '')
+					$rdata['phone'] = (string) $tel;
 			}
 		}
 
@@ -1210,26 +1742,31 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->EMAIL as $email)
 			{
-				if(!isset($rdata['email']))
+				if($rdata['email'] === '')
 					$rdata['email'] = (string)$email;
 				if($this->_isPreferredProperty($email))
 					$rdata['email'] = (string)$email;
 			}
 		}
 
+		if (isset($vCard->URL))
+			$rdata['url'] = trim((string) $vCard->URL);
+
 		if(isset($vCard->ADR))
 		{
+			$hasHomeAddress = false;
+			foreach ($vCard->ADR as $candidateAddress) {
+				if (isset($this->_getPropertyTypes($candidateAddress)['HOME'])) {
+					$hasHomeAddress = true;
+					break;
+				}
+			}
 			foreach($vCard->ADR as $adr)
 			{
-				$types = $adr['TYPE'];
-				$adrtype = [];
-				foreach($types as $type)
-				{
-					$adrtype[strtoupper($type)]=true;
-				}
+				$adrtype = $this->_getPropertyTypes($adr);
 				$adrparts = $adr->getParts();
 				// debug_log("adrparts:\n".print_r($adrtype, true).print_r($adrparts, true));
-				if(isset($adrtype['HOME']) || !isset($rdata['address']))
+				if(isset($adrtype['HOME']) || (!$hasHomeAddress && $rdata['address'] === ''))
 				{
 					$rdata['address'] = '';
 					$rdata['town'] = '';
@@ -1248,34 +1785,29 @@ class Dolibarr extends AbstractBackend {
 						$rdata['zip'] = $adrparts[5];
 					if(isset($adrparts[6]))
 						$rdata['_country_label'] = $adrparts[6];
-					if($mode=='C' && isset($vCard->ORG))	// keep ORG info in address
-						$rdata['address'] = trim((string)$vCard->ORG," ;\n\r\t") . "\n" . $rdata['address'];
 				}
 			}
 		}
 
+		$this->_storeSocialNetworks($rdata, $this->_extractSocialNetworks($vCard));
+		$rdata['_organization'] = isset($vCard->ORG) ? trim((string) $vCard->ORG, " ;\r\n\t") : '';
+
 		$bday = '';
 		if( isset($vCard->BDAY))
 			$bday = trim((string)$vCard->BDAY);
-		if( isset($vCard->BDAY) &&
-			!empty($bday) &&
-			date("Y-m-d", strtotime(trim($bday))) == trim($bday) )
-			$rdata['birth'] = trim($bday);
+		if (preg_match('/^(\d{4})-?(\d{2})-?(\d{2})/', $bday, $birthdayParts)
+			&& checkdate((int) $birthdayParts[2], (int) $birthdayParts[3], (int) $birthdayParts[1]))
+			$rdata['birth'] = $birthdayParts[1].'-'.$birthdayParts[2].'-'.$birthdayParts[3];
 
 		if(isset($vCard->NOTE))
-			$rdata['note_public'] = strtr(trim((string)$vCard->NOTE),"\\n", "\n");
+			$rdata['note_public'] = trim((string)$vCard->NOTE);
 
 		if(isset($rdata['_country_label']) && $rdata['_country_label']!='')
 		{
-			$sql = 'SELECT rowid FROM '.MAIN_DB_PREFIX.'c_country
-					WHERE label LIKE "'.$this->db->escape($rdata['_country_label']).'"
-					AND active = 1';
-			$result = $this->db->query($sql);
-			if ($result !== false && ($row = $this->db->fetch_array($result)))
-				$rdata['country'] = $row['rowid'];
+			$rdata['country'] = $this->_getCountryIdFromLabel($rdata['_country_label']);
 		}
 
-		debug_log("parsed:\n".print_r($rdata, true));
+		debug_log('parsed member UID '.$rdata['_uid']);
 
 		return $rdata;
 	}
@@ -1288,35 +1820,38 @@ class Dolibarr extends AbstractBackend {
 	 */
 	protected function _parseDataThirdparty($cardData, $mode) {
 
-		debug_log("_parseDataThirdparty( $cardData )");
+		debug_log('_parseDataThirdparty('.strlen((string) $cardData).' bytes)');
 
-		$rdata = [] ;
+		$rdata = array(
+			'name_alias' => '', 'phone' => '', 'phone_mobile' => '', 'fax' => '',
+			'email' => '', 'url' => '', 'address' => '', 'town' => '', 'zip' => '',
+			'fk_pays' => 0, 'socialnetworks' => '', 'note_public' => '',
+		);
 
-		$vCard = VObject\Reader::read($cardData);
-		$vCard->validate(VObject\Node::REPAIR | VObject\Node::PROFILE_CARDDAV);
-		$vCard->convert(VObject\Document::VCARD30);
+		$vCard = $this->_readVCard($cardData);
 		$rdata['_category_labels'] = $this->_extractCategoryLabels($vCard);
 
 		// debug_log("_parseData__converted( ".$vCard->PHOTO." )");
 
-		$rdata['_uid'] = (string)$vCard->UID;
+		$rdata['_uid'] = isset($vCard->UID) ? trim((string) $vCard->UID) : '';
+		$this->_validateCardUid($rdata['_uid']);
 
 		if($mode=='C')
 			$rdata['status']=1;
 
-		if(!empty((string)$vCard->FN))
+		if(isset($vCard->FN) && !empty((string)$vCard->FN))
 			$rdata['nom'] = (string)$vCard->FN;
 		else
 		{
 			$rdata['nom']='';
-			$names = $vCard->N->getParts();
-			if(!empty((string)$names[0]))
+			$names = isset($vCard->N) ? $vCard->N->getParts() : array();
+			if(!empty($names[0]))
 				$rdata['nom'].= (string)$names[0];
-			if(!empty((string)$names[1]))
+			if(!empty($names[1]))
 				$rdata['nom'] = trim($rdata['nom']." ".(string)$names[1]);
-			if(!empty((string)$names[2]))
+			if(!empty($names[2]))
 				$rdata['nom'] = trim($rdata['nom']." ".(string)$names[2]);
-			if(!empty((string)$names[3]))
+			if(!empty($names[3]))
 				$rdata['nom'] = trim((string)$names[3]." ".$rdata['nom']);
 			if(empty($rdata['nom']))
 				$rdata['nom'] = "New ".date('Y-m-d H:i:s');
@@ -1329,12 +1864,7 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->TEL as $tel)
 			{
-				$teltype = [];
-				$types = $tel['TYPE'];
-				foreach($types as $type)
-				{
-					$teltype[strtoupper($type)]=true;
-				}
+				$teltype = $this->_getPropertyTypes($tel);
 
 				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
 					$rdata['phone'] = (string)$tel;
@@ -1343,6 +1873,8 @@ class Dolibarr extends AbstractBackend {
 
 				if(isset($teltype['FAX']))
 					$rdata['fax'] = (string)$tel;
+				elseif (!$teltype && $rdata['phone'] === '')
+					$rdata['phone'] = (string) $tel;
 			}
 		}
 
@@ -1350,7 +1882,7 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->EMAIL as $email)
 			{
-				if(!isset($rdata['email']))
+				if($rdata['email'] === '')
 					$rdata['email'] = (string)$email;
 				if($this->_isPreferredProperty($email))
 					$rdata['email'] = (string)$email;
@@ -1364,15 +1896,10 @@ class Dolibarr extends AbstractBackend {
 		{
 			foreach($vCard->ADR as $adr)
 			{
-				$types = $adr['TYPE'];
-				$adrtype = [];
-				foreach($types as $type)
-				{
-					$adrtype[strtoupper($type)]=true;
-				}
+				$adrtype = $this->_getPropertyTypes($adr);
 				$adrparts = $adr->getParts();
 				// debug_log("adrparts:\n".print_r($adrtype, true).print_r($adrparts, true));
-				if(isset($adrtype['WORK']) || !isset($rdata['address']))
+				if(isset($adrtype['WORK']) || $rdata['address'] === '')
 				{
 					$rdata['address'] = '';
 					$rdata['town'] = '';
@@ -1395,61 +1922,7 @@ class Dolibarr extends AbstractBackend {
 			}
 		}
 
-		$socialNetworks = array();
-		if(isset($vCard->{'X-WHATSAPP'}))
-			$socialNetworks['whatsapp'] = (string)$vCard->{'X-WHATSAPP'};
-		if(isset($vCard->{'X-SNAPCHAT'}))
-			$socialNetworks['snapchat'] = (string)$vCard->{'X-SNAPCHAT'};
-		if(isset($vCard->{'X-LINKEDIN'}))
-			$socialNetworks['linkedin'] = (string)$vCard->{'X-LINKEDIN'};
-		if(isset($vCard->{'X-INSTAGRAM'}))
-			$socialNetworks['instagram'] = (string)$vCard->{'X-INSTAGRAM'};
-		if(isset($vCard->{'X-SKYPE'}))
-			$socialNetworks['skype'] = (string)$vCard->{'X-SKYPE'};
-		elseif(isset($vCard->{'X-SKYPE-USERNAME'}))
-			$socialNetworks['skype'] = (string)$vCard->{'X-SKYPE-USERNAME'};
-
-		/**
-			IMPP;X-SERVICE-TYPE=GOOGLETALK:xmpp:goog
-			IMPP;X-SERVICE-TYPE=JABBER:xmpp:jabjab
-			IMPP;X-SERVICE-TYPE=YAHOO:ymsgr:yahoo
-			IMPP;X-SERVICE-TYPE=QQ:x-apple:qq
-			IMPP;X-SERVICE-TYPE=AIM:aim:aim
-			IMPP;X-SERVICE-TYPE=MSN:msnim:msn
-			IMPP;X-SERVICE-TYPE=SKYPE:skype:skyp
-			IMPP;X-SERVICE-TYPE=ICQ:aim:icqq
-			IMPP;X-SERVICE-TYPE=IRC:irc:irc
-		**/
-		if(isset($vCard->IMPP))
-		{
-			foreach($vCard->IMPP as $impp)
-			{
-				$type = strtoupper((string)$impp['X-SERVICE-TYPE']);
-				$pseudo = (string)$impp;
-				if(mb_strpos($pseudo,':',0,'UTF-8')!==false)
-					$pseudo = mb_substr($pseudo, mb_strpos($pseudo,':',0,'UTF-8')+1, null, 'UTF-8');
-
-				switch($type)
-				{
-					case "WHATSAPP":
-						$socialNetworks['whatsapp'] = $pseudo;
-						break;
-					case "SNAPCHAT":
-						$socialNetworks['snapchat'] = $pseudo;
-						break;
-					case "LINKEDIN":
-						$socialNetworks['linkedin'] = $pseudo;
-						break;
-					case "INSTAGRAM":
-						$socialNetworks['instagram'] = $pseudo;
-						break;
-					case "SKYPE":
-						$socialNetworks['skype'] = $pseudo;
-						break;
-				}
-			}
-		}
-		$this->_storeSocialNetworks($rdata, $socialNetworks);
+		$this->_storeSocialNetworks($rdata, $this->_extractSocialNetworks($vCard));
 
 
 		if(isset($vCard->NOTE))
@@ -1472,17 +1945,99 @@ class Dolibarr extends AbstractBackend {
 
 		if(isset($rdata['_country_label']) && $rdata['_country_label']!='')
 		{
-			$sql = 'SELECT rowid FROM '.MAIN_DB_PREFIX.'c_country
-					WHERE label LIKE "'.$this->db->escape($rdata['_country_label']).'"
-					AND active = 1';
-			$result = $this->db->query($sql);
-			if ($result !== false && ($row = $this->db->fetch_array($result)))
-				$rdata['fk_pays'] = $row['rowid'];
+			$rdata['fk_pays'] = $this->_getCountryIdFromLabel($rdata['_country_label']);
 		}
 
-		debug_log("parsed:\n".print_r($rdata, true));
+		debug_log('parsed third-party UID '.$rdata['_uid']);
 
 		return $rdata;
+	}
+
+	/** Populate Dolibarr's native Contact object from normalized vCard data. */
+	private function _applyContactData($contact, array $data)
+	{
+		$contact->lastname = (string) $data['lastname'];
+		$contact->firstname = (string) $data['firstname'];
+		$contact->civility_code = (string) $data['civility'];
+		$contact->civility_id = (string) $data['civility'];
+		$contact->poste = (string) $data['poste'];
+		$contact->priv = (int) $data['priv'];
+		$contact->phone_pro = (string) $data['phone'];
+		$contact->phone_perso = (string) $data['phone_perso'];
+		$contact->phone_mobile = (string) $data['phone_mobile'];
+		$contact->fax = (string) $data['fax'];
+		$contact->email = (string) $data['email'];
+		$contact->url = (string) $data['url'];
+		$contact->address = (string) $data['address'];
+		$contact->town = (string) $data['town'];
+		$contact->zip = (string) $data['zip'];
+		$contact->country_id = (int) $data['fk_pays'];
+		$contact->socialnetworks = $this->_decodeSocialNetworks($data['socialnetworks']);
+		$contact->birthday = $data['birthday'] ? strtotime((string) $data['birthday']) : null;
+		$contact->note_public = (string) $data['note_public'];
+		$contact->photo = (string) $data['photo'];
+		$contact->status = 1;
+		$contact->statut = 1;
+		// -1 is the native Contact sentinel for removing a third-party link.
+		$contact->socid = -1;
+		$contact->fk_soc = null;
+		if (!empty($data['_organization'])) {
+			$thirdPartyId = $this->_resolveThirdPartyId($data['_organization']);
+			if ($thirdPartyId > 0) {
+				$contact->socid = $thirdPartyId;
+				$contact->fk_soc = $thirdPartyId;
+			}
+		}
+	}
+
+	/** Populate Dolibarr's native third-party object without touching accounting fields. */
+	private function _applyThirdPartyData($thirdParty, array $data)
+	{
+		$thirdParty->name = (string) $data['nom'];
+		$thirdParty->nom = (string) $data['nom'];
+		$thirdParty->name_alias = (string) $data['name_alias'];
+		$thirdParty->phone = (string) $data['phone'];
+		$thirdParty->phone_mobile = (string) $data['phone_mobile'];
+		$thirdParty->fax = (string) $data['fax'];
+		$thirdParty->email = (string) $data['email'];
+		$thirdParty->url = (string) $data['url'];
+		$thirdParty->address = (string) $data['address'];
+		$thirdParty->town = (string) $data['town'];
+		$thirdParty->zip = (string) $data['zip'];
+		$thirdParty->country_id = (int) $data['fk_pays'];
+		$thirdParty->socialnetworks = $this->_decodeSocialNetworks($data['socialnetworks']);
+		$thirdParty->note_public = (string) $data['note_public'];
+		$thirdParty->status = 1;
+	}
+
+	/** Populate Dolibarr's native member object from normalized vCard data. */
+	private function _applyMemberData($member, array $data)
+	{
+		$member->lastname = (string) $data['lastname'];
+		$member->firstname = (string) $data['firstname'];
+		$member->civility_id = (string) $data['civility'];
+		$member->phone = (string) $data['phone'];
+		$member->phone_perso = (string) $data['phone_perso'];
+		$member->phone_mobile = (string) $data['phone_mobile'];
+		$member->email = (string) $data['email'];
+		$member->url = (string) $data['url'];
+		$member->socialnetworks = $this->_decodeSocialNetworks($data['socialnetworks']);
+		$member->address = (string) $data['address'];
+		$member->town = (string) $data['town'];
+		$member->zip = (string) $data['zip'];
+		$member->country_id = (int) $data['country'];
+		$member->birth = $data['birth'] ? strtotime((string) $data['birth']) : null;
+		$member->note_public = (string) $data['note_public'];
+		$member->photo = (string) $data['photo'];
+		$member->statut = 1;
+		$member->status = 1;
+		$member->socid = 0;
+		if (!empty($data['_organization'])) {
+			$thirdPartyId = $this->_resolveThirdPartyId($data['_organization']);
+			if ($thirdPartyId > 0) {
+				$member->socid = $thirdPartyId;
+			}
+		}
 	}
 
 	/**
@@ -1717,123 +2272,70 @@ class Dolibarr extends AbstractBackend {
 	 * @return string|null
 	 */
 	function createCard($addressbookId, $cardUri, $cardData) {
-
-		global $conf;
-
 		debug_log("createContactObject( $addressbookId , $cardUri )");
+		$this->_validateCardUri($cardUri);
 		if (!$this->db->begin()) {
 			throw new \Sabre\DAV\Exception('Unable to start the CardDAV transaction');
 		}
-		try {
+			try {
+				$this->_lockAddressBookOwner($addressbookId);
 
-		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
-		{
-			$rdata = $this->_parseDataContact($cardData, 'C');
-			$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
-
-			if($rdata['_photo_bin']!==false)
+				if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
 			{
-				$gdim = @imagecreatefromstring($rdata['_photo_bin']);
-				if($gdim!==false)
-					$rdata['photo'] = 'cdavimage.jpg';
+				$rdata = $this->_parseDataContact($cardData, 'C');
+				$this->_assertCardUidAvailable('ct', $rdata['_uid']);
+				$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
+
+			$gdim = $this->_decodeVCardPhoto($rdata['_photo_bin']);
+			if ($gdim !== false) {
+				$rdata['photo'] = 'cdavimage.jpg';
 			}
 
-			$sql = "INSERT INTO ".MAIN_DB_PREFIX."socpeople (";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="`".$fld."`,";
-			}
-			$sql.= "entity,datec,tms,fk_user_creat,fk_user_modif) VALUES(";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="'".$this->db->escape($val)."',";
-			}
-			$sql.= ((int) $conf->entity).",NOW(),NOW(),".$this->user->id.",".$this->user->id.")";
-
-			$res = $this->db->query($sql);
-			if ( ! $res)
-			{
-				throw new \Sabre\DAV\Exception('Unable to create the Dolibarr contact');
-			}
-
-			//Récupérer l'ID de l'event créer et faire une insertion dans actioncomm_resources
-			$id = $this->db->last_insert_id(MAIN_DB_PREFIX.'socpeople');
-			if ( ! $id)
-			{
-				throw new \Sabre\DAV\Exception('Unable to retrieve the new Dolibarr contact');
-			}
-
-			if (isModEnabled('categorie') && intval(CDAV_CONTACT_TAG)>0)
-			{
-				$tagid = intval(CDAV_CONTACT_TAG);
-				$sql = "INSERT INTO ".MAIN_DB_PREFIX."categorie_contact (`fk_categorie`, `fk_socpeople`)
-						VALUES ( ".$tagid.", ".$id.")";
-				if (!$this->db->query($sql)) {
-					throw new \Sabre\DAV\Exception('Unable to assign the mandatory contact category');
+				require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
+				$contact = new \Contact($this->db);
+				$this->_applyContactData($contact, $rdata);
+				$contact->ref_ext = $rdata['ref_ext'];
+				$id = $contact->create($this->user);
+				if ($id <= 0) {
+					throw new \Sabre\DAV\Exception('Unable to create the Dolibarr contact: '.$contact->error);
 				}
-			}
-			$this->_syncCategories('contact', $id, $rdata['_category_labels'] ?? array());
+				// Contact::create()/update() do not persist url in Dolibarr 23.
+				// Keep this field on the native CommonObject write path as well.
+				if ($contact->setValueFrom('url', $rdata['url'], '', null, 'text', '', $this->user) < 0) {
+					throw new \Sabre\DAV\Exception('Unable to save the Dolibarr contact URL: '.$contact->error);
+				}
+				$this->_storeCardMapping('ct', $id, $cardUri, $rdata['_uid']);
+				$this->vcardStore->save('ct', $id, $cardData);
+				$this->_syncCategories('contact', $id, $rdata['_category_labels'] ?? array());
 
 			// save photo with jpeg format
-			if(isset($rdata['photo']))
-			{
-				$dir = $conf->societe->dir_output."/contact/".$id."/photos";
-				@mkdir($dir, 0777, true);
-				if(@imagejpeg($gdim, $dir.'/'.$rdata['photo']))
-				{
-					$object = new \Contact($this->db);
-					if($object->fetch($id)>0)
-						$object->addThumbs($dir.'/'.$rdata['photo']);
-				}
-			}
+			$this->_saveVCardPhoto($gdim, $this->_photoDirectory('contact', $id), $rdata['photo'], $contact);
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV contact');
 			}
 			return null;
 		}
 
-		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))
-		{
-			$rdata = $this->_parseDataThirdparty($cardData, 'C');
-			$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
-
-
-			$sql = "INSERT INTO ".MAIN_DB_PREFIX."societe (";
-			foreach($rdata as $fld => $val)
+			if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))
 			{
-				if(substr($fld,0,1)!='_')
-					$sql.="`".$fld."`,";
-			}
-			$sql.= "entity,datec,tms,fk_user_creat,fk_user_modif) VALUES(";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="'".$this->db->escape($val)."',";
-			}
-			$sql.= ((int) $conf->entity).",NOW(),NOW(),".$this->user->id.",".$this->user->id.")";
+				$rdata = $this->_parseDataThirdparty($cardData, 'C');
+				$this->_assertCardUidAvailable('th', $rdata['_uid']);
+				$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
 
-			$res = $this->db->query($sql);
-			if ( ! $res)
-			{
-				throw new \Sabre\DAV\Exception('Unable to create the Dolibarr third party');
-			}
-
-			//Récupérer l'ID de l'event créer et faire une insertion dans actioncomm_resources
-			$id = $this->db->last_insert_id(MAIN_DB_PREFIX.'societe');
-			if ( ! $id)
-			{
-				throw new \Sabre\DAV\Exception('Unable to retrieve the new Dolibarr third party');
-			}
-
-			//Insérer association user/thirdpartie
-			$sql = "INSERT INTO ".MAIN_DB_PREFIX."societe_commerciaux (`fk_soc`, `fk_user`)
-					VALUES (".$id.",".$this->user->id.")";
-			if (!$this->db->query($sql)) {
-				throw new \Sabre\DAV\Exception('Unable to assign the Dolibarr third party to its user');
-			}
-			$this->_syncCategories('thirdparty', $id, $rdata['_category_labels'] ?? array());
+				require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+				$thirdParty = new \Societe($this->db);
+				$this->_applyThirdPartyData($thirdParty, $rdata);
+				$thirdParty->ref_ext = $rdata['ref_ext'];
+				$id = $thirdParty->create($this->user);
+				if ($id <= 0) {
+					throw new \Sabre\DAV\Exception('Unable to create the Dolibarr third party: '.$thirdParty->error);
+				}
+				if ($thirdParty->add_commercial($this->user, (int) $this->user->id) <= 0) {
+					throw new \Sabre\DAV\Exception('Unable to assign the Dolibarr third party to its user');
+				}
+				$this->_storeCardMapping('th', $id, $cardUri, $rdata['_uid']);
+				$this->vcardStore->save('th', $id, $cardData);
+				$this->_syncCategories('thirdparty', $id, $rdata['_category_labels'] ?? array());
 
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV third party');
@@ -1841,41 +2343,37 @@ class Dolibarr extends AbstractBackend {
 			return null;
 		}
 
-		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
-		{
-			$rdata = $this->_parseDataMember($cardData, 'C');
-			$memberType = $this->_getDefaultMemberType();
-			$rdata['ref'] = substr('CDAV-'.date('YmdHis').'-'.bin2hex(random_bytes(3)), 0, 30);
-			$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 128);
-			$rdata['fk_adherent_type'] = $memberType['id'];
-			$rdata['morphy'] = $memberType['morphy'];
-			$rdata['statut'] = 1;
-
-
-			$sql = "INSERT INTO ".MAIN_DB_PREFIX."adherent (";
-			foreach($rdata as $fld => $val)
+			if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
 			{
-				if(substr($fld,0,1)!='_')
-					$sql.="`".$fld."`,";
-			}
-			$sql.= "entity,datec,tms,fk_user_author,fk_user_mod) VALUES(";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="'".$this->db->escape($val)."',";
-			}
-			$sql.= ((int) $conf->entity).",NOW(),NOW(),".$this->user->id.",".$this->user->id.")";
+				$rdata = $this->_parseDataMember($cardData, 'C');
+				$this->_assertCardUidAvailable('mb', $rdata['_uid']);
+				$gdim = $this->_decodeVCardPhoto($rdata['_photo_bin']);
+				if ($gdim !== false) {
+					$rdata['photo'] = 'cdavimage.jpg';
+				}
+				$memberType = $this->_getDefaultMemberType();
+				$rdata['ref_ext'] = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 128);
 
-			$res = $this->db->query($sql);
-			if ( ! $res)
-			{
-				throw new \Sabre\DAV\Exception('Unable to create the Dolibarr member');
-			}
-			$id = $this->db->last_insert_id(MAIN_DB_PREFIX.'adherent');
-			if (!$id) {
-				throw new \Sabre\DAV\Exception('Unable to retrieve the new Dolibarr member');
-			}
-			$this->_syncCategories('member', $id, $rdata['_category_labels'] ?? array());
+				require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent.class.php';
+				$member = new \Adherent($this->db);
+				$this->_applyMemberData($member, $rdata);
+				$member->typeid = $memberType['id'];
+				$member->morphy = $memberType['morphy'];
+				$member->ref_ext = $rdata['ref_ext'];
+				if (!getDolGlobalString('ADHERENT_LOGIN_NOT_REQUIRED')) {
+					$member->login = 'cdav-'.substr(hash('sha256', $cardUri.'|'.$rdata['_uid']), 0, 20);
+				}
+				$id = $member->create($this->user);
+				if ($id <= 0) {
+					throw new \Sabre\DAV\Exception('Unable to create the Dolibarr member: '.$member->error);
+				}
+				if ($member->setThirdPartyId((int) $member->socid) < 0) {
+					throw new \Sabre\DAV\Exception('Unable to save the Dolibarr member third-party link: '.$member->error);
+				}
+				$this->_storeCardMapping('mb', $id, $cardUri, $rdata['_uid']);
+				$this->vcardStore->save('mb', $id, $cardData);
+				$this->_syncCategories('member', $id, $rdata['_category_labels'] ?? array());
+				$this->_saveVCardPhoto($gdim, $this->_photoDirectory('member', $id), $rdata['photo'], $member);
 
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV member');
@@ -1916,58 +2414,60 @@ class Dolibarr extends AbstractBackend {
 	 * @return string|null
 	 */
 	function updateCard($addressbookId, $cardUri, $cardData) {
-
-		global $conf;
-
 		debug_log("updateContactObject( $addressbookId , $cardUri )");
+		$this->_validateCardUri($cardUri);
+		$obsoletePhoto = null;
 		if (!$this->db->begin()) {
 			throw new \Sabre\DAV\Exception('Unable to start the CardDAV transaction');
 		}
-		try {
+			try {
+			$this->_lockAddressBookOwner($addressbookId);
+			$this->_assertCardVersion($addressbookId, $cardUri);
 
-		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
+			if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
 		{
 			$rdata = $this->_parseDataContact($cardData, 'U');
 			$existing = $this->getCard($addressbookId, $cardUri);
 			if ($existing === false) {
 				throw new \Sabre\DAV\Exception\NotFound('Contact not found');
 			}
-			$contactid = (int) $existing['id'];
+				$contactid = (int) $existing['id'];
 
-			if($rdata['_photo_bin']!==false)
-			{
-				$gdim = @imagecreatefromstring($rdata['_photo_bin']);
-				if($gdim!==false)
-					$rdata['photo'] = 'cdavimage.jpg';
+			$gdim = $this->_decodeVCardPhoto($rdata['_photo_bin']);
+			if ($gdim !== false) {
+				$rdata['photo'] = 'cdavimage.jpg';
 			}
 
-			$sql = "UPDATE ".MAIN_DB_PREFIX."socpeople SET ";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="`".$fld."` = '".$this->db->escape($val)."', ";
-			}
-			$sql.= " tms = NOW(), fk_user_modif = ".$this->user->id;
-			$sql.= " WHERE rowid = ".$contactid." AND entity IN (".getEntity('societe').")";
-			$res = $this->db->query($sql);
-			if (!$res) {
-				throw new \Sabre\DAV\Exception('Unable to update the Dolibarr contact');
-			}
-			$this->_updateCardExternalRef('socpeople', $contactid, $cardUri, $rdata['_uid'], 255);
-			$this->_syncCategories('contact', $contactid, $rdata['_category_labels'] ?? array());
+				require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
+				$contact = new \Contact($this->db);
+				if ($contact->fetch($contactid, $this->user) <= 0) {
+					throw new \Sabre\DAV\Exception\NotFound('Contact not found');
+				}
+				if ($gdim === false && !empty($contact->photo)) {
+					$obsoletePhoto = array($this->_photoFilePath('contact', $contactid, $contact->photo), $contact);
+				}
+				$this->_assertCardUidAvailable('ct', $rdata['_uid'], $contactid);
+				$rdata['socialnetworks'] = json_encode(
+					$this->_mergeSocialNetworks($contact->socialnetworks, $rdata['_socialnetworks_patch'] ?? array()),
+					JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+				);
+				$this->_applyContactData($contact, $rdata);
+				if ($this->_decodeCardExternalRef((string) $contact->ref_ext) !== null) {
+					$contact->ref_ext = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
+				}
+				$res = $contact->update($contactid, $this->user);
+				if ($res <= 0) {
+					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr contact: '.$contact->error);
+				}
+				if ($contact->setValueFrom('url', $rdata['url'], '', null, 'text', '', $this->user) < 0) {
+					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr contact URL: '.$contact->error);
+				}
+				$this->_storeCardMapping('ct', $contactid, $cardUri, $rdata['_uid']);
+				$this->vcardStore->save('ct', $contactid, $cardData);
+				$this->_syncCategories('contact', $contactid, $rdata['_category_labels'] ?? array());
 
 			// save photo with jpeg format
-			if(isset($rdata['photo']))
-			{
-				$dir = $conf->societe->dir_output."/contact/".$contactid."/photos";
-				@mkdir($dir, 0777, true);
-				if(@imagejpeg($gdim, $dir.'/'.$rdata['photo']))
-				{
-					$object = new \Contact($this->db);
-					if($object->fetch($contactid)>0)
-						$object->addThumbs($dir.'/'.$rdata['photo']);
-				}
-			}
+			$this->_saveVCardPhoto($gdim, $this->_photoDirectory('contact', $contactid), $rdata['photo'], $contact);
 		}
 
 		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))
@@ -1977,52 +2477,80 @@ class Dolibarr extends AbstractBackend {
 			if ($existing === false) {
 				throw new \Sabre\DAV\Exception\NotFound('Third party not found');
 			}
-			$socid = (int) $existing['id'];
+				$socid = (int) $existing['id'];
 
-			$sql = "UPDATE ".MAIN_DB_PREFIX."societe SET ";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="`".$fld."` = '".$this->db->escape($val)."', ";
-			}
-			$sql.= " tms = NOW(), fk_user_modif = ".$this->user->id;
-			$sql.= " WHERE rowid = ".$socid." AND entity IN (".getEntity('societe').")";
-			$res = $this->db->query($sql);
-			if (!$res) {
-				throw new \Sabre\DAV\Exception('Unable to update the Dolibarr third party');
-			}
-			$this->_updateCardExternalRef('societe', $socid, $cardUri, $rdata['_uid'], 255);
-			$this->_syncCategories('thirdparty', $socid, $rdata['_category_labels'] ?? array());
+				require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+				$thirdParty = new \Societe($this->db);
+				if ($thirdParty->fetch($socid) <= 0) {
+					throw new \Sabre\DAV\Exception\NotFound('Third party not found');
+				}
+				$this->_assertCardUidAvailable('th', $rdata['_uid'], $socid);
+				$rdata['socialnetworks'] = json_encode(
+					$this->_mergeSocialNetworks($thirdParty->socialnetworks, $rdata['_socialnetworks_patch'] ?? array()),
+					JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+				);
+				$this->_applyThirdPartyData($thirdParty, $rdata);
+				if ($this->_decodeCardExternalRef((string) $thirdParty->ref_ext) !== null) {
+					$thirdParty->ref_ext = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
+				}
+				$res = $thirdParty->update($socid, $this->user);
+				if ($res < 0) {
+					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr third party: '.$thirdParty->error);
+				}
+				$this->_storeCardMapping('th', $socid, $cardUri, $rdata['_uid']);
+				$this->vcardStore->save('th', $socid, $cardData);
+				$this->_syncCategories('thirdparty', $socid, $rdata['_category_labels'] ?? array());
 		}
 
-		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
-		{
-			$rdata = $this->_parseDataMember($cardData, 'U');
+			if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
+			{
+				$rdata = $this->_parseDataMember($cardData, 'U');
+				$gdim = $this->_decodeVCardPhoto($rdata['_photo_bin']);
+				if ($gdim !== false) {
+					$rdata['photo'] = 'cdavimage.jpg';
+				}
 			$existing = $this->getCard($addressbookId, $cardUri);
 			if ($existing === false) {
 				throw new \Sabre\DAV\Exception\NotFound('Member not found');
 			}
-			$adhid = (int) $existing['id'];
+				$adhid = (int) $existing['id'];
 
-			$sql = "UPDATE ".MAIN_DB_PREFIX."adherent SET ";
-			foreach($rdata as $fld => $val)
-			{
-				if(substr($fld,0,1)!='_')
-					$sql.="`".$fld."` = '".$this->db->escape($val)."', ";
-			}
-			$sql.= " tms = NOW(), fk_user_mod = ".$this->user->id;
-			$sql.= " WHERE rowid = ".$adhid." AND entity IN (".getEntity('adherent').")";
-			$res = $this->db->query($sql);
-			if (!$res) {
-				throw new \Sabre\DAV\Exception('Unable to update the Dolibarr member');
-			}
-			$this->_updateCardExternalRef('adherent', $adhid, $cardUri, $rdata['_uid'], 128);
-			$this->_syncCategories('member', $adhid, $rdata['_category_labels'] ?? array());
+				require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent.class.php';
+				$member = new \Adherent($this->db);
+				if ($member->fetch($adhid) <= 0) {
+					throw new \Sabre\DAV\Exception\NotFound('Member not found');
+				}
+				if ($gdim === false && !empty($member->photo)) {
+					$obsoletePhoto = array($this->_photoFilePath('member', $adhid, $member->photo), $member);
+				}
+				$this->_assertCardUidAvailable('mb', $rdata['_uid'], $adhid);
+				$rdata['socialnetworks'] = json_encode(
+					$this->_mergeSocialNetworks($member->socialnetworks, $rdata['_socialnetworks_patch'] ?? array()),
+					JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+				);
+				$this->_applyMemberData($member, $rdata);
+				if ($this->_decodeCardExternalRef((string) $member->ref_ext) !== null) {
+					$member->ref_ext = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 128);
+				}
+				$res = $member->update($this->user, 0, 1, 1, 1);
+				if ($res < 0) {
+					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr member: '.$member->error);
+				}
+				if ($member->setThirdPartyId((int) $member->socid) < 0) {
+					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr member third-party link: '.$member->error);
+				}
+				$this->_storeCardMapping('mb', $adhid, $cardUri, $rdata['_uid']);
+				$this->vcardStore->save('mb', $adhid, $cardData);
+				$this->_syncCategories('member', $adhid, $rdata['_category_labels'] ?? array());
+				$this->_saveVCardPhoto($gdim, $this->_photoDirectory('member', $adhid), $rdata['photo'], $member);
 		}
 
 		if (isset($res)) {
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV update');
+			}
+			if ($obsoletePhoto !== null) {
+				$this->_removeVCardPhoto($obsoletePhoto[0], $obsoletePhoto[1]);
 			}
 			return null;
 		}
@@ -2043,8 +2571,17 @@ class Dolibarr extends AbstractBackend {
 	function deleteCard($addressbookId, $cardUri) {
 
 		debug_log("deleteContactObject( $addressbookId , $cardUri )");
+		$this->_validateCardUri($cardUri);
+		// Security policy: DAV deletion only changes the native Dolibarr status.
+		// Physical deletion of business records is deliberately unavailable here.
+		if (!$this->db->begin()) {
+			throw new \Sabre\DAV\Exception('Unable to start the CardDAV delete transaction');
+		}
+			try {
+			$this->_lockAddressBookOwner($addressbookId);
+			$this->_assertCardVersion($addressbookId, $cardUri);
 
-		if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'delete'))
+			if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'delete'))
 		{
 			$existing = $this->getCard($addressbookId, $cardUri);
 			if ($existing === false) {
@@ -2052,12 +2589,13 @@ class Dolibarr extends AbstractBackend {
 			}
 			$contactid = (int) $existing['id'];
 
-			$sql = "UPDATE ".MAIN_DB_PREFIX."socpeople SET ";
-			$sql.= " statut = 0, tms = NOW(), fk_user_modif = ".$this->user->id;
-			$sql.= " WHERE rowid = ".$contactid." AND entity IN (".getEntity('societe').")";
-			$res = $this->db->query($sql);
-			if (!$res) {
-				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact');
+			require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
+			$contact = new \Contact($this->db);
+			if ($contact->fetch($contactid, $this->user) <= 0 || $contact->setstatus(0) < 0) {
+				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact: '.$contact->error);
+			}
+			if (!$this->db->commit()) {
+				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV contact deletion');
 			}
 			return true;
 		}
@@ -2071,12 +2609,17 @@ class Dolibarr extends AbstractBackend {
 			}
 			$socid = (int) $existing['id'];
 
-			$sql = "UPDATE ".MAIN_DB_PREFIX."societe SET ";
-			$sql.= " status = 0, tms = NOW(), fk_user_modif = ".$this->user->id;
-			$sql.= " WHERE rowid = ".$socid." AND entity IN (".getEntity('societe').")";
-			$res = $this->db->query($sql);
-			if (!$res) {
-				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr third party');
+			require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+			$thirdParty = new \Societe($this->db);
+			if ($thirdParty->fetch($socid) <= 0) {
+				throw new \Sabre\DAV\Exception\NotFound('Third party not found');
+			}
+			$thirdParty->status = 0;
+			if ($thirdParty->update($socid, $this->user) < 0) {
+				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr third party: '.$thirdParty->error);
+			}
+			if (!$this->db->commit()) {
+				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV third-party deletion');
 			}
 			return true;
 		}
@@ -2090,17 +2633,25 @@ class Dolibarr extends AbstractBackend {
 			}
 			$adhid = (int) $existing['id'];
 
-			$sql = "UPDATE ".MAIN_DB_PREFIX."adherent SET ";
-			$sql.= " statut = 0, tms = NOW(), fk_user_mod = ".$this->user->id;
-			$sql.= " WHERE rowid = ".$adhid." AND entity IN (".getEntity('adherent').")";
-			$res = $this->db->query($sql);
-			if (!$res) {
-				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr member');
+			require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent.class.php';
+			$member = new \Adherent($this->db);
+			if ($member->fetch($adhid) <= 0) {
+				throw new \Sabre\DAV\Exception\NotFound('Member not found');
+			}
+			if ($member->resiliate($this->user) < 0) {
+				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr member: '.$member->error);
+			}
+			if (!$this->db->commit()) {
+				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV member deletion');
 			}
 			return true;
 		}
 
 		throw new Forbidden('Not allowed to delete cards from this address book');
+		} catch (\Throwable $e) {
+			$this->db->rollback();
+			throw $e;
+		}
 	}
 
 	/**
@@ -2160,9 +2711,14 @@ class Dolibarr extends AbstractBackend {
 	 * @return array
 	 */
 	function getChangesForAddressBook($addressbookId, $syncToken, $syncLevel, $limit = null) {
-
-		// TODO
-		return null;
+		if ((int) $syncLevel !== 1) {
+			return null;
+		}
+		$objects = array();
+		foreach ($this->getCards((int) $addressbookId) as $card) {
+			$objects[(string) $card['uri']] = (string) ($card['etag'] ?? '');
+		}
+		return $this->syncStore->getChanges('card', (int) $addressbookId, $syncToken, $limit, $objects);
 	}
 
 }

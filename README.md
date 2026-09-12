@@ -2,7 +2,7 @@
 
 ## What is it ?
 
-This branch targets Dolibarr 23.0 (tested with 23.0.3) and adds CardDAV / CalDAV and ICS synchronisation. It uses Dolibarr [Sabre/DAV](http://sabre.io/dav/) server library.
+This branch targets Dolibarr 23.0 and 24.0 and adds CardDAV / CalDAV and ICS synchronisation. It uses Dolibarr's bundled [Sabre/DAV](http://sabre.io/dav/) server library.
 
 You can :
 
@@ -11,7 +11,7 @@ You can :
  * Read and edit intervention cards through CalDAV
  * Read and edit address books through CardDAV
  * Read calendars through ICS Full version or only Free/Busy (hide details)
- * Access Dolibarr documents through WebDAV (if admin)
+ * Reuse Dolibarr's native DAV module for controlled WebDAV document access
  * Generate project tasks from documents like proposals and/or orders
 
 Each user can access his/her contacts and thirdparties address books (public and own private contacts), his/her own calendar and other users calendars according to his/her rights.
@@ -38,6 +38,47 @@ Dolibarr's native permission/loading/logging APIs to prevent PHP warning storms.
 Version 4.0.3 completes the French interface, replaces invalid sentence-based
 translation keys, and localizes CardDAV address-book names and private ICS
 Free/Busy labels using the Dolibarr user's language.
+
+Version 4.0.4 hardens two-way synchronization. CardDAV creations and updates use
+Dolibarr's native Contact, ThirdParty and Member APIs, preserve external resource
+names and UIDs, clear fields removed on a phone, and resolve company links from
+the vCard organization. CalDAV writes use the native ActionComm, Project Task and
+Intervention APIs; recurrence, invitations, attendance and alarms are retained.
+Deleting a contact, third party or member from a DAV client only deactivates the
+Dolibarr record. Definitive deletion remains possible exclusively in Dolibarr.
+
+Version 4.0.5 hardens the DAV transport and protocol surface. Basic
+authentication now requires HTTPS except for loopback integration tests,
+request bodies have a configurable global size limit, decoded traversal paths
+are rejected, sensitive responses are not cached, and the Sabre/DAV version is
+not disclosed. Set `CDAV_ALLOW_INSECURE_HTTP` only for a deliberately isolated
+test environment; it must remain disabled in production.
+
+When TLS terminates on a reverse proxy, list that proxy's exact connection IP
+in `CDAV_TRUSTED_PROXY_IPS`. Forwarded HTTPS headers from every other address
+are ignored so a direct HTTP caller cannot enable Basic authentication merely
+by spoofing `X-Forwarded-Proto`.
+
+Version 4.0.6 integrates appointment attachments with Dolibarr's native
+document model. Credential-free HTTPS `ATTACH` URIs are mirrored through the
+native `Link` API and appear on the appointment Documents tab; native links and
+securely served agenda files are exported back as `ATTACH`. Inline attachments
+remain lossless CalDAV metadata but are not silently written to disk. The CDav
+endpoint no longer publishes a raw filesystem tree: document WebDAV is
+delegated to Dolibarr's native DAV module.
+
+Version 5.0.0 completes the P1/P2 reliability work. It adds real RFC 6578
+incremental sync tokens and tombstones, lossless vCard extensions and social
+profiles, native-compatible recurrences and opt-in browser reminders. Optional
+CalDAV delegation, local RFC 6638 inbox/outbox scheduling and RFC 8607 managed
+attachments are backed by persistent stores and Dolibarr ACLs. Conflicting
+UIDs and replayed PUTs are handled deterministically. Managed files use the
+native Agenda document directory and upload security pipeline.
+
+Dolibarr remains the business source of truth. Contact, third-party, member,
+agenda, project-task and intervention writes use native business classes. A
+CardDAV DELETE only deactivates a contact, third party or member; permanent
+deletion is available only from Dolibarr.
 
 Automatic tasks generation in projects with services from linked Propositions and/or Orders 
 Module setup offer you to :
@@ -77,8 +118,8 @@ If you find the module is useful and want to finance improvements, consider to p
 
 ## How to install
 
-PHP 8.0+ and Dolibarr 23.0+ are required. Version 4.0.3 is tested on Dolibarr
-23.0.3 with PHP 8.5.
+PHP 8.0+ and Dolibarr 23.0+ are required. Version 5.0.0 is integration-tested
+against local Dolibarr 23.0 and 24.0 installations.
 
 Dolibarr native calendar module must be activated *before* installing CDav module.
 
@@ -97,9 +138,55 @@ Use these URLs in your CardDAV or CalDAV client software.
 * Unzip last version or _git pull_ in dolibarr/htdocs/cdav
 * Enable CDav module in Modules list.
 
-After updating an existing installation, disable and enable the module once so it
-creates the `llx_cdav_scheduling` metadata table used for recurrence, invitations
-and alarms.
+After updating an existing installation, disable and enable the module once so
+Dolibarr's module loader applies the idempotent schemas and migrations. The
+`llx_cdav_*` tables contain only protocol state that has no native equivalent:
+stable resource mappings, lossless vCard/iCalendar data, native-link/reminder
+provenance, RFC 6578 journals, scheduling queues and managed-attachment
+metadata. Foreign keys bind event/user metadata to the native lifecycle.
+
+## Security-sensitive options
+
+RFC 6578 sync is always available and retains 180 days of journal history by
+default. The following features remain disabled after installation or upgrade
+and must be enabled deliberately in the module setup page:
+
+* `CDAV_NATIVE_REMINDERS`: projects only compatible relative `DISPLAY` alarms
+  to Dolibarr browser reminders; email and SMS are never generated by DAV.
+* `CDAV_DELEGATION`: exposes proxy principals derived from native Agenda
+  all-actions rights. DAV clients cannot change those memberships.
+* `CDAV_SCHEDULING`: enables persistent local iTIP inbox/outbox handling. No
+  iMIP email transport is installed.
+* `CDAV_MANAGED_ATTACHMENTS`: enables protected RFC 8607 uploads with native
+  Dolibarr filename/antivirus checks, size/count/user quotas and active-content
+  rejection.
+
+Keep `CDAV_ALLOW_INSECURE_HTTP` disabled outside an isolated test system. Set
+`CDAV_TRUSTED_PROXY_IPS` only to exact reverse-proxy connection addresses. See
+[`doc/well-known-webserver.md`](doc/well-known-webserver.md) for HTTPS proxy and
+RFC 6764 discovery configuration.
+
+The lightweight regression suite can be run without a Dolibarr database:
+
+    DOLIBARR_ROOT=/path/to/dolibarr/htdocs php tests/run.php
+
+The opt-in live suite exercises Basic authentication and real HTTP
+CardDAV/CalDAV requests against an explicitly named test database. It creates
+an isolated Dolibarr user and uniquely prefixed records, verifies native
+Contact, Societe and ActionComm data, then removes the test data and restores
+the previous CDav constants:
+
+    CDAV_LIVE_TEST=1 \
+    DOLIBARR_ROOT=/path/to/test-dolibarr/htdocs \
+    CDAV_LIVE_URL=http://127.0.0.1/custom/cdav/server.php/ \
+    php tests/live_integration.php
+
+The live suite refuses to run unless the configured database name contains
+`test`. It covers native contact/company/event round trips, soft deletion,
+vCard/iCalendar losslessness, recurrence/reminders, links and managed files,
+scheduling/delegation, RFC 6578 initial/delta/deletion sync, UID conflicts,
+conditional requests, locks, collection mutation attempts, multi-user ACLs,
+malformed/hostile XML, traversal attempts and request/attachment limits.
 
 
 ## DAV URLs
@@ -134,9 +221,13 @@ iOS uses _principals_ url to grab list of CalDAV or CardDAV resources :
 
 ### WebDAV
 
-Admin users can also access Dolibarr documents through WebDAV with WebDAV URL :
+Document WebDAV is intentionally handled by Dolibarr's native DAV module and
+its public/private/ECM settings. CDav no longer exposes the complete Dolibarr
+data directory through the calendar/contact endpoint, even to administrators,
+because that would bypass document-level scoping and could expose unrelated
+backups or temporary files.
 
-    https://server.example.com/dolibarr/htdocs/cdav/server.php/documents/
+    https://server.example.com/dolibarr/htdocs/dav/fileserver.php/
 
 ## Troubleshooting
 
