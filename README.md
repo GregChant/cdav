@@ -75,6 +75,10 @@ attachments are backed by persistent stores and Dolibarr ACLs. Conflicting
 UIDs and replayed PUTs are handled deterministically. Managed files use the
 native Agenda document directory and upload security pipeline.
 
+Version 5.0.1 prevents warning storms in Dolibarr 23's native agenda and
+intervention iCalendar exports by supplying safe defaults for optional event
+URLs and assigned users before the legacy xcal serializer runs.
+
 Dolibarr remains the business source of truth. Contact, third-party, member,
 agenda, project-task and intervention writes use native business classes. A
 CardDAV DELETE only deactivates a contact, third party or member; permanent

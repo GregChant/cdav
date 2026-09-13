@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '5.0.0';
+		$this->version = '5.0.1';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -86,7 +86,7 @@ class modCDav extends DolibarrModules
 		//							'workflow' => array('WORKFLOW_MODULE1_YOURACTIONTYPE_MODULE2'=>array('enabled'=>'! empty($conf->module1->enabled) && ! empty($conf->module2->enabled)', 'picto'=>'yourpicto@mymodule')) // Set here all workflow context managed by module
 		//                        );
 		$this->module_parts = array(
-			'hooks' => array('projectcard', 'projecttaskscard'),
+			'hooks' => array('projectcard', 'projecttaskscard', 'agendaexport', 'fichinterexport'),
 		);
 
 		// Data directories to create when module is enabled.

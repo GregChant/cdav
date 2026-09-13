@@ -7,6 +7,43 @@
 class ActionsCDav
 {
 	/**
+	 * Complete optional fields expected by Dolibarr's legacy xcal exporter.
+	 *
+	 * Dolibarr 23 reads url and assignedUsers without checking that producers
+	 * supplied them. Public agenda and intervention feeds can consequently emit
+	 * one PHP warning per missing field and event. Keep the compatibility shim
+	 * at the export boundary so CDav deployments do not require a core patch.
+	 *
+	 * @param array       $parameters  Hook metadata and eventarray by reference
+	 * @param object|null $object      Current object, when provided by Dolibarr
+	 * @param string      $action      Current action
+	 * @param HookManager $hookmanager Hook manager
+	 * @return int Always 0 to preserve the native export
+	 */
+	public function addMoreEventsExport($parameters, &$object, &$action, $hookmanager)
+	{
+		if (!in_array(($parameters['currentcontext'] ?? ''), array('agendaexport', 'fichinterexport'), true)
+			|| !isset($parameters['eventarray']) || !is_array($parameters['eventarray'])) {
+			return 0;
+		}
+
+		foreach ($parameters['eventarray'] as &$event) {
+			if (!is_array($event)) {
+				continue;
+			}
+			if (!array_key_exists('url', $event) || $event['url'] === null) {
+				$event['url'] = '';
+			}
+			if (!isset($event['assignedUsers']) || !is_array($event['assignedUsers'])) {
+				$event['assignedUsers'] = array();
+			}
+		}
+		unset($event);
+
+		return 0;
+	}
+
+	/**
 	 * Overloading the doActions function : replacing the parent's function with the one below
 	 *
 	 * @param   array           $parameters     Hook metadatas (context, etc...)

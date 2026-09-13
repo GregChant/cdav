@@ -42,6 +42,7 @@ if (!function_exists('getDolGlobalString')) {
 
 require dirname(__DIR__).'/class/CardDAVDolibarr.php';
 require dirname(__DIR__).'/class/CalDAVDolibarr.php';
+require dirname(__DIR__).'/class/actions_cdav.class.php';
 
 function invokeParser($object, $method, array $arguments)
 {
@@ -68,6 +69,21 @@ function truthy($actual, $message)
 
 $cardBackend = (new ReflectionClass('Sabre\\CardDAV\\Backend\\Dolibarr'))->newInstanceWithoutConstructor();
 $calendarBackend = (new ReflectionClass('Sabre\\CalDAV\\Backend\\Dolibarr'))->newInstanceWithoutConstructor();
+
+$exportEvents = array(
+	array('uid' => 'missing-optionals'),
+	array('uid' => 'existing-optionals', 'url' => 'https://example.test/event', 'assignedUsers' => array('sentinel')),
+);
+$exportParameters = array('currentcontext' => 'agendaexport', 'eventarray' => &$exportEvents);
+$hookObject = null;
+$hookAction = '';
+$exportHook = new ActionsCDav();
+sameValue(0, $exportHook->addMoreEventsExport($exportParameters, $hookObject, $hookAction, null),
+	'The xcal compatibility hook must preserve the native exporter');
+sameValue('', $exportEvents[0]['url'], 'The xcal compatibility hook must default a missing event URL');
+sameValue(array(), $exportEvents[0]['assignedUsers'], 'The xcal compatibility hook must default missing attendees');
+sameValue('https://example.test/event', $exportEvents[1]['url'], 'The xcal compatibility hook must preserve event URLs');
+sameValue(array('sentinel'), $exportEvents[1]['assignedUsers'], 'The xcal compatibility hook must preserve attendees');
 
 $contactCard = "BEGIN:VCARD\r\n"
 	."VERSION:4.0\r\n"
