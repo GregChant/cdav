@@ -139,6 +139,9 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<meta name="robots" content="noindex,nofollow">
 	<title><?php print dol_escape_htmltag($langs->trans('CDavBookingTitle')); ?></title>
+	<?php if (!empty($bookingPublicIdentity['company_logo'])) { ?>
+	<link rel="icon" href="<?php print dol_escape_htmltag($bookingPublicIdentity['company_logo']); ?>">
+	<?php } ?>
 	<style>
 		* { box-sizing: border-box; }
 		body { margin: 0; background: #f3f5f7; color: #202b37; font: 1rem/1.55 system-ui, sans-serif; }

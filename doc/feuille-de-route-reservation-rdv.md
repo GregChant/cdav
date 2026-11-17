@@ -484,6 +484,8 @@ Texte de référence pour l'objectif :
   avec contrôle des droits, marges, disponibilités, concurrence et rejouabilité.
 - [x] Reprendre le logo et le nom de l'entreprise, puis l'identité, la photo et
   les coordonnées professionnelles natives en respectant les masquages publics.
+- [x] Utiliser aussi le logo natif de l'entreprise comme icône de l'onglet de
+  réservation (correctif 6.1.2).
 - [x] Ajouter tests métier, rendu et HTTP réels ; exécuter les 48 parcours
   navigateur sur la matrice 23/24 × PHP 8.4/8.5 et contrôler le style natif.
 - [x] Qualifier le ZIP 6.1 installé et mis à niveau : profils et liens conservés,

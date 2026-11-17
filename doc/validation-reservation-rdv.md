@@ -464,3 +464,21 @@ Les quatre serveurs, bases et configurations jetables ont été supprimés ;
 l'instance préexistante sur le port 8023, les configurations des deux cœurs
 partagés et le cache Chromium sont préservés. La preuve de retrait figure dans
 `dist/qa/details-validation/teardown.json`.
+
+## Icône de l'onglet — 6.1.2
+
+La page publique déclare désormais une icône d'onglet avec le même logo que
+l'en-tête de l'entreprise. La balise utilise l'URL native `viewimage.php`, déjà
+validée et échappée, autorisée par la CSP actuelle. Elle est omise lorsque le
+logo manque, est invalide ou que le profil n'est pas disponible. Aucun nouvel
+endpoint, helper, schéma ni réglage global n'est ajouté.
+
+La revue indépendante confirme cette modification limitée au rendu. Les dix
+suites rapides, dont 72 rendus FR/EN par combinaison, le lint complet et PHPCS
+natif passent sur Dolibarr 23.0.4/24.0.0 × PHP 8.4.26/8.5.11. Un contrôle du
+HTML rendu sur 24/PHP 8.5 confirme la correspondance entre icône et logo et
+l'absence d'icône pour les trois cas manquant, hostile et profil indisponible.
+Les logs sont dans `dist/qa/favicon-validation/`. Les suites HTTP et navigateur
+de 6.1.1 ne sont pas relancées pour cette seule déclaration HTML ; aucun serveur
+ni base de test n'est créé. L'archive finale correspond aux blobs Git et son
+empreinte reproductible est enregistrée dans le manifeste local de livraison.

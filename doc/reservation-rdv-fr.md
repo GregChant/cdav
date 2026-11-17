@@ -1,6 +1,6 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.1.1 propose un calendrier mensuel de réservation relié directement à
+CDav 6.1.2 propose un calendrier mensuel de réservation relié directement à
 l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
 choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
 l'autorise. La confirmation crée les rendez-vous natifs affectés au
@@ -18,8 +18,8 @@ La version 6.1 ajoute une table de liaison technique entre un reçu et ses
 ZIP, y compris pour une mise à niveau depuis 6.0. Les profils et liens publiés
 sont conservés ; les deux nouvelles autorisations de multisélection restent
 désactivées tant qu'un administrateur ne les active pas.
-La mise à jour 6.1.1 ne modifie pas le schéma et conserve les profils et les
-publications de 6.1.
+Les mises à jour 6.1.1 et 6.1.2 ne modifient pas le schéma et conservent les
+profils et les publications de 6.1.
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
 24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
@@ -146,7 +146,8 @@ du professionnel sélectionné. Les champs non renseignés sont omis. Les option
 natives de masquage public de cet utilisateur pour la photo et les coordonnées
 sont respectées.
 
-Le logo utilise le point d'accès public natif `viewimage.php`. La photo utilise
+Le logo sert aussi d'icône à l'onglet du navigateur depuis la version 6.1.2.
+Il utilise le point d'accès public natif `viewimage.php`. La photo utilise
 les fichiers natifs de l'utilisateur, avec préférence pour sa miniature, et est
 intégrée à la page ; aucune activation de la carte virtuelle publique ni nouvelle
 copie de photo n'est nécessaire. Les photos PNG, JPEG, GIF et WebP jusqu'à 1 Mio

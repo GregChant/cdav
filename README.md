@@ -112,6 +112,8 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.1.2 uses the native company logo as the booking page's browser tab icon.
+
 Version 6.1.1 adds the visitor's required appointment subject and intervention
 address. These are stored in native Agenda title/location fields for every
 booked segment, included in replay checks and shown in the visitor's confirmation.
