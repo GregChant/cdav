@@ -1,6 +1,6 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.1.0 propose un calendrier mensuel de réservation relié directement à
+CDav 6.1.1 propose un calendrier mensuel de réservation relié directement à
 l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
 choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
 l'autorise. La confirmation crée les rendez-vous natifs affectés au
@@ -18,6 +18,8 @@ La version 6.1 ajoute une table de liaison technique entre un reçu et ses
 ZIP, y compris pour une mise à niveau depuis 6.0. Les profils et liens publiés
 sont conservés ; les deux nouvelles autorisations de multisélection restent
 désactivées tant qu'un administrateur ne les active pas.
+La mise à jour 6.1.1 ne modifie pas le schéma et conserve les profils et les
+publications de 6.1.
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
 24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
@@ -98,6 +100,21 @@ choisit un seul créneau, comme auparavant. Sinon, il coche ses créneaux puis
 utilise **Ajouter les créneaux cochés**. Sa sélection est conservée lorsqu'il
 change de jour, de mois ou de langue. Il peut retirer une unité ou vider sa
 sélection avant de renseigner ses coordonnées et de confirmer.
+
+Le client indique aussi l'**objet du rendez-vous** et l'**adresse du rendez-vous**,
+tous deux obligatoires pour une nouvelle réservation. L'adresse est saisie par
+le client : elle désigne le lieu où le professionnel doit se rendre. Le sujet
+accepte jusqu'à 120 caractères et l'adresse jusqu'à 128 caractères UTF-8, avec
+des retours à la ligne. Les champs trop longs sont refusés sans troncature.
+
+L'objet devient le titre natif Agenda et l'adresse son lieu ; ils figurent aussi
+dans les notes privées et dans la confirmation affichée au visiteur. Toutes les
+parties d'une réservation groupée reprennent le même objet et la même adresse.
+Ces valeurs ne sont pas ajoutées aux liens de navigation, aux disponibilités
+publiques ou aux réponses JSON de reçu. Les anciens reçus 6.1 sans ces champs
+peuvent encore être rejoués, mais ne permettent pas une nouvelle création
+incomplète. Modifier l'objet ou l'adresse d'une demande déjà acceptée produit
+un conflit au lieu d'un second rendez-vous.
 
 - Deux unités consécutives de 30 minutes forment un seul événement natif de
   60 minutes si le regroupement continu est autorisé. Les marges encadrent

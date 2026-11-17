@@ -198,6 +198,9 @@ try {
 	$temporaryDirectory = sys_get_temp_dir().'/cdav-browser-'.bin2hex(random_bytes(8));
 	if (!mkdir($temporaryDirectory, 0700)) throw new RuntimeException('Unable to create the private fixture directory');
 	$origin = $parsed['scheme'].'://'.$parsed['host'].(isset($parsed['port']) ? ':'.$parsed['port'] : '');
+	$appointmentSubjects = array('single' => 'Entretien de chaudière — visite', 'lost' => 'Dépannage d’urgence',
+		'continuous' => 'Révision annuelle continue', 'split' => 'Visite technique fractionnée');
+	$clientAddress = "Rue de l’Église 12\n1000 Lausanne";
 	$fixture = array('isolated' => true, 'booking_url' => $bookingUrl,
 		'home_url' => $origin.DOL_URL_ROOT.'/index.php',
 		'admin_url' => substr($bookingUrl, 0, -strlen('/public/booking.php')).'/admin/booking.php',
@@ -212,6 +215,7 @@ try {
 		'company_name' => $companyName, 'professional_name' => $owner->getFullName($langs),
 		'professional_email' => $owner->email, 'professional_phone_href' => 'tel:+41215550101',
 		'professional_mobile_href' => 'tel:+41795550102',
+		'appointment_subjects' => $appointmentSubjects, 'client_address' => $clientAddress,
 		'php' => PHP_VERSION, 'dolibarr' => DOL_VERSION);
 	$fixturePath = $temporaryDirectory.'/fixture.json';
 	if (file_put_contents($fixturePath, json_encode($fixture, JSON_THROW_ON_ERROR)) === false || !chmod($fixturePath, 0600)) {
@@ -231,16 +235,21 @@ try {
 	if (!$eventCount || (int) $eventCount->nb !== 7) throw new RuntimeException('Browser bookings duplicated or lost a native segment');
 	$groupCounts = array('CDav Browser Continuous' => 0, 'CDav Browser Split' => 0);
 	foreach (array_keys($groupCounts) as $name) {
+		$subject = $appointmentSubjects[$name === 'CDav Browser Continuous' ? 'continuous' : 'split'];
 		$expectedStarts = $name === 'CDav Browser Continuous' ? array($contiguousDay->setTime(9, 0)->getTimestamp())
 			: array($splitDay->setTime(9, 0)->getTimestamp(), $splitDay->setTime(13, 0)->getTimestamp(), $otherSplitDay->setTime(9, 0)->getTimestamp());
 		$seenStarts = array();
 		$events = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId
-			.' AND entity = '.$entity." AND label = '".$db->escape('RDV — '.$name)."' ORDER BY id");
+			.' AND entity = '.$entity." AND label = '".$db->escape($subject)."' ORDER BY id");
 		while ($row = $db->fetch_object($events)) {
 			$event = new ActionComm($db);
 			$duration = $name === 'CDav Browser Continuous' ? 3600 : 1800;
 			if ($event->fetch((int) $row->id) <= 0 || $event->datef - $event->datep !== $duration) {
 				throw new RuntimeException('Browser selection has an incorrect native duration');
+			}
+			if ($event->label !== $subject || $event->location !== $clientAddress
+				|| strpos($event->note_private, $subject) === false || strpos($event->note_private, $clientAddress) === false) {
+				throw new RuntimeException('Browser selection lost or truncated its native subject/client address');
 			}
 			$seenStarts[] = (int) $event->datep;
 			$groupCounts[$name]++;
@@ -251,6 +260,15 @@ try {
 	}
 	if ($groupCounts !== array('CDav Browser Continuous' => 1, 'CDav Browser Split' => 3)) {
 		throw new RuntimeException('Browser grouped booking segment count mismatch');
+	}
+	foreach (array('single', 'lost') as $kind) {
+		$rows = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId
+			.' AND entity = '.$entity." AND label = '".$db->escape($appointmentSubjects[$kind])."'");
+		$row = $db->fetch_object($rows);
+		$event = new ActionComm($db);
+		if (!$row || $event->fetch((int) $row->id) <= 0 || $event->location !== $clientAddress || $db->fetch_object($rows)) {
+			throw new RuntimeException('Browser single/lost-response booking lost its native subject or address');
+		}
 	}
 	$receiptGroups = bookingBrowserQuery('SELECT COUNT(m.fk_actioncomm) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request r INNER JOIN '
 		.MAIN_DB_PREFIX.'cdav_booking_request_event m ON m.request_hash = r.request_hash INNER JOIN '

@@ -223,7 +223,8 @@ function bookingFields(array $form, $start, array $changes = array())
 	global $prefix;
 	return array_replace(array('key' => $form['key'], 'date' => $form['date'], 'format' => 'json',
 		'token' => $form['data']['token'], 'request' => $form['data']['request'], 'start' => (string) $start,
-		'name' => $prefix.' Customer', 'email' => 'booking@example.test', 'phone' => '', 'website' => ''), $changes);
+		'name' => $prefix.' Customer', 'email' => 'booking@example.test', 'phone' => '', 'website' => '',
+		'subject' => $prefix." Visite d'entretien", 'address' => "Rue de l'Église 12\n1000 Lausanne"), $changes);
 }
 
 /**
@@ -269,7 +270,8 @@ function bookingConcurrent(array $forms, array $starts, $ownerId, $beforeRelease
 					'Referer: '.$bookingUrl), null, $headers[$i]);
 			curl_multi_add_handle($multi, $handles[$i]);
 		}
-		$deadline = microtime(true) + 5;
+		$deadline = microtime(true) + 10;
+		$ownerLock = 'FROM '.MAIN_DB_PREFIX.'user WHERE rowid = '.((int) $ownerId).' AND ';
 		$waiting = 0;
 		do {
 			bookingAssert(curl_multi_exec($multi, $running) === CURLM_OK, 'Concurrency transport failed');
@@ -277,7 +279,7 @@ function bookingConcurrent(array $forms, array $starts, $ownerId, $beforeRelease
 			$list = bookingQuery('SHOW FULL PROCESSLIST');
 			while ($row = $db->fetch_object($list)) {
 				if (($row->db ?? '') === $dolibarr_main_db_name && strpos((string) ($row->Info ?? ''), 'FOR UPDATE') !== false
-					&& strpos((string) $row->Info, MAIN_DB_PREFIX.'user') !== false) $waiting++;
+					&& strpos((string) $row->Info, $ownerLock) !== false) $waiting++;
 			}
 			if ($waiting >= count($forms)) break;
 			curl_multi_select($multi, 0.02);
@@ -496,6 +498,13 @@ try {
 	$initialToken = bookingSyncToken($initialSync);
 	$start = $form['data']['slots'][0]['start'];
 	$before = bookingCountEvents($owner->id);
+	$queryOrigin = parse_url($bookingUrl, PHP_URL_SCHEME).'://'.parse_url($bookingUrl, PHP_URL_HOST)
+		.(parse_url($bookingUrl, PHP_URL_PORT) ? ':'.parse_url($bookingUrl, PHP_URL_PORT) : '');
+	$detailsInUrl = bookingHttp($bookingUrl.'?'.http_build_query(array('subject' => 'Conflicting URL subject', 'address' => 'Conflicting URL address')),
+		'POST', http_build_query(bookingFields($form, $start)), $form['cookie'],
+		array('Content-Type: application/x-www-form-urlencoded', 'Origin: '.$queryOrigin, 'Referer: '.$bookingUrl));
+	bookingStatus($detailsInUrl, array(422), 'Appointment details are forbidden in the URL even with a valid complete POST');
+	bookingAssert(bookingCountEvents($owner->id) === $before, 'URL appointment details cannot create a native event or consume the request');
 	$created = bookingPost($form, $start);
 	bookingStatus($created, array(201), 'First public booking');
 	$receipt = bookingJson($created);
@@ -508,6 +517,13 @@ try {
 		&& $db->jdate($native->datep2) === $start + 1800 && bookingCountEvents($owner->id) === $before + 1,
 		'Public booking must create one native occupied event with correct assignment and dates');
 	$events[] = $native->fk_actioncomm;
+	$nativeDetails = new ActionComm($db);
+	bookingAssert($nativeDetails->fetch((int) $native->fk_actioncomm) > 0
+		&& $nativeDetails->label === bookingFields($form, $start)['subject']
+		&& $nativeDetails->location === bookingFields($form, $start)['address']
+		&& strpos($nativeDetails->note_private, bookingFields($form, $start)['subject']) !== false
+		&& strpos($nativeDetails->note_private, bookingFields($form, $start)['address']) !== false,
+		'Public subject and complete client address must be stored without truncation in native Agenda fields');
 	$deltaBody = str_replace('<d:sync-token/>', '<d:sync-token>'.htmlspecialchars($initialToken, ENT_XML1).'</d:sync-token>', $syncBody);
 	$delta = bookingHttp($calendarUrl, 'REPORT', $deltaBody, '', array('Depth: 0', 'Content-Type: application/xml'), $auth);
 	bookingSyncToken($delta);
@@ -515,6 +531,19 @@ try {
 	$calendarRead = bookingHttp($calendarUrl, 'REPORT', '<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"/></c:comp-filter></c:filter></c:calendar-query>', '', array('Depth: 1', 'Content-Type: application/xml'), $auth);
 	bookingStatus($calendarRead, array(207), 'CalDAV read-back');
 	bookingAssert(strpos($calendarRead['body'], $prefix) !== false, 'Native booking missing from CalDAV calendar data');
+	$calendarXml = new DOMDocument();
+	bookingAssert($calendarXml->loadXML($calendarRead['body'], LIBXML_NONET), 'CalDAV response must contain valid XML');
+	$calendarXpath = new DOMXPath($calendarXml);
+	$detailsExported = false;
+	foreach ($calendarXpath->query('//*[local-name()="calendar-data"]') as $calendarNode) {
+		$calendar = \Sabre\VObject\Reader::read($calendarNode->textContent);
+		foreach ($calendar->select('VEVENT') as $calendarEvent) {
+			if ((string) $calendarEvent->SUMMARY === bookingFields($form, $start)['subject']
+				&& (string) $calendarEvent->LOCATION === str_replace("\n", ' ', bookingFields($form, $start)['address'])) $detailsExported = true;
+		}
+		$calendar->destroy();
+	}
+	bookingAssert($detailsExported, 'Authenticated CalDAV retains the subject and complete address with its native single-line location format');
 	bookingOk('native ActionComm assignment, dates, CalDAV read-back and incremental sync (B01)');
 	$proof['scenarios'][] = 'B01';
 
@@ -522,6 +551,31 @@ try {
 	bookingStatus($retry, array(200), 'Idempotent replay');
 	bookingAssert(bookingJson($retry)['reference'] === $receipt['reference'] && bookingCountEvents($owner->id) === $before + 1, 'Replay must keep the same receipt and event');
 	bookingStatus(bookingPost($form, $start, array('name' => $prefix.' changed')), array(409), 'Idempotency key with different content');
+	bookingStatus(bookingPost($form, $start, array('subject' => $prefix.' changed subject')), array(409), 'Idempotency key with a different subject');
+	bookingStatus(bookingPost($form, $start, array('address' => 'Changed appointment address')), array(409), 'Idempotency key with a different address');
+	$publicAfterDetails = bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'date' => $form['date'], 'format' => 'json')));
+	bookingStatus($publicAfterDetails, array(200), 'Availability after recording private appointment details');
+	bookingAssert(strpos($publicAfterDetails['body'], "Visite d'entretien") === false
+		&& strpos($publicAfterDetails['body'], "Rue de l'Église") === false
+		&& strpos($created['body'], "Visite d'entretien") === false && strpos($created['body'], "Rue de l'Église") === false,
+		'Appointment details must not appear in public availability or receipt JSON');
+	$receiptState = bookingRow('SELECT request_hash,body_hash FROM '.MAIN_DB_PREFIX.'cdav_booking_request WHERE reference = \''
+		.$db->escape($receipt['reference']).'\'');
+	$oldContact = array('name' => $prefix.' Customer', 'email' => 'booking@example.test', 'phone' => '');
+	$legacyHash = hash('sha256', json_encode(array($start, $oldContact)));
+	bookingQuery('UPDATE '.MAIN_DB_PREFIX."cdav_booking_request SET body_hash = '".$legacyHash."' WHERE request_hash = '".$db->escape($receiptState->request_hash)."'");
+	$legacyDetails = new ActionComm($db);
+	bookingAssert($legacyDetails->fetch((int) $native->fk_actioncomm) > 0, 'Cannot prepare the old-receipt native fixture');
+	$legacyDetails->label = 'RDV — '.$oldContact['name'];
+	$legacyDetails->location = '';
+	bookingAssert($legacyDetails->update($owner) > 0, 'Cannot prepare the native 6.1 appointment shape');
+	$oldReplay = bookingPost($form, $start, array('subject' => null, 'address' => null));
+	bookingStatus($oldReplay, array(200), 'A pre-update receipt with both details absent remains replayable');
+	bookingAssert(bookingJson($oldReplay)['reference'] === $receipt['reference'] && bookingCountEvents($owner->id) === $before + 1,
+		'Legacy replay returns the same receipt without creating a new appointment');
+	bookingStatus(bookingPost($form, $start, array('subject' => '', 'address' => '')), array(422), 'Explicit empty details cannot use legacy compatibility');
+	bookingQuery('UPDATE '.MAIN_DB_PREFIX."cdav_booking_request SET body_hash = '".$db->escape($receiptState->body_hash)."' WHERE request_hash = '".$db->escape($receiptState->request_hash)."'");
+	bookingAssert($nativeDetails->update($owner) > 0, 'Cannot restore the current appointment details after old-receipt replay');
 	$expired = $service->requestTicket($service->publicProfile($key), time() - BookingService::REQUEST_TTL - 1);
 	bookingStatus(bookingPost($form, $start, array('request' => $expired)), array(409), 'Expired signed request');
 	bookingAssert(bookingCountEvents($owner->id) === $before + 1, 'Rejected replays must not create events');
@@ -716,6 +770,29 @@ try {
 	$proof['scenarios'][] = 'A02';
 
 	bookingQuery('DELETE FROM '.MAIN_DB_PREFIX.'cdav_booking_rate');
+	$boundaryForm = bookingForm($key, $day->modify('+25 days')->format('Y-m-d'));
+	$boundaryStart = $boundaryForm['data']['slots'][0]['start'];
+	$boundarySubject = str_repeat('é', 120);
+	$boundaryAddress = str_repeat('É', 128);
+	$boundaryResponse = bookingPost($boundaryForm, $boundaryStart, array('subject' => $boundarySubject, 'address' => $boundaryAddress));
+	bookingStatus($boundaryResponse, array(201), 'Native character limits accept multibyte subject and address without byte truncation');
+	$boundaryRow = bookingRow('SELECT a.id,a.label,a.location FROM '.MAIN_DB_PREFIX.'actioncomm a INNER JOIN '
+		.MAIN_DB_PREFIX."cdav_booking_request r ON r.fk_actioncomm=a.id WHERE r.reference = '".$db->escape(bookingJson($boundaryResponse)['reference'])."'");
+	bookingAssert($boundaryRow && $boundaryRow->label === $boundarySubject && $boundaryRow->location === $boundaryAddress,
+		'Native fields retain exactly 120/128 Unicode characters');
+	$events[] = $boundaryRow->id;
+	$lineForm = bookingForm($key, $day->modify('+26 days')->format('Y-m-d'));
+	$lineStart = $lineForm['data']['slots'][0]['start'];
+	$lineAddress = "Rue de l'Église 12\r\n1000 Lausanne\rSuisse";
+	$lineResponse = bookingPost($lineForm, $lineStart, array('address' => $lineAddress));
+	bookingStatus($lineResponse, array(201), 'Multiline client address accepts CRLF and CR input');
+	$lineRow = bookingRow('SELECT a.id,a.location FROM '.MAIN_DB_PREFIX.'actioncomm a INNER JOIN '
+		.MAIN_DB_PREFIX."cdav_booking_request r ON r.fk_actioncomm=a.id WHERE r.reference = '".$db->escape(bookingJson($lineResponse)['reference'])."'");
+	bookingAssert($lineRow && $lineRow->location === "Rue de l'Église 12\n1000 Lausanne\nSuisse", 'Native location uses canonical line feeds');
+	$events[] = $lineRow->id;
+	bookingStatus(bookingPost($lineForm, $lineStart, array('address' => str_replace(array("\r\n", "\r"), "\n", $lineAddress))), array(200),
+		'Canonical line endings preserve idempotence');
+	bookingQuery('DELETE FROM '.MAIN_DB_PREFIX.'cdav_booking_rate');
 	$badDate = $day->modify('+5 days')->format('Y-m-d');
 	$bad = bookingForm($key, $badDate);
 	$badStart = $bad['data']['slots'][0]['start'];
@@ -726,6 +803,19 @@ try {
 	bookingStatus(bookingPost($bad, $badStart, array('name' => '<script>alert(1)</script>')), array(403, 422), 'Native or module rejection of hostile HTML');
 	bookingStatus(bookingPost($bad, $badStart, array('name' => str_repeat('x', 121))), array(422), 'Oversized name');
 	bookingStatus(bookingPost($bad, $badStart, array('email' => 'bad-email')), array(422), 'Invalid email');
+	bookingQuery('DELETE FROM '.MAIN_DB_PREFIX.'cdav_booking_rate');
+	foreach (array(
+		array('subject' => ''), array('address' => ''), array('subject' => null, 'address' => null),
+		array('subject' => null), array('address' => null),
+		array('subject' => array('hostile')), array('address' => array('hostile')),
+		array('subject' => '<b>Unsafe subject</b>'), array('address' => '<b>Unsafe address</b>'),
+		array('subject' => str_repeat('é', 121)), array('address' => str_repeat('é', 129)),
+		array('subject' => "A subject\nwith a new line"), array('address' => "An address\x01with a control"),
+		array('subject' => "Invalid UTF-8 \xff"), array('address' => "Invalid UTF-8 \xff")
+	) as $invalidDetails) {
+		bookingStatus(bookingPost($bad, $badStart, $invalidDetails), array(403, 422), 'Invalid or missing subject/address rejected');
+	}
+	bookingQuery('DELETE FROM '.MAIN_DB_PREFIX.'cdav_booking_rate');
 	bookingStatus(bookingPost($bad, $badStart, array('website' => 'https://spam.example.test')), array(422), 'Honeypot submission');
 	$csrfFailure = bookingPost($bad, $badStart, array('token' => 'forged'));
 	bookingStatus($csrfFailure, array(403), 'Native CSRF mismatch');
@@ -734,6 +824,11 @@ try {
 	bookingStatus(bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'date' => '2099-01-01', 'format' => 'json'))), array(422), 'Unbounded booking horizon');
 	bookingStatus(bookingHttp($bookingUrl, 'POST', str_repeat('x', 8200), '', array('Content-Type: application/x-www-form-urlencoded')), array(413), 'Oversized request');
 	bookingAssert(bookingCountEvents($owner->id) === $before, 'Rejected input or GET must not create a business event');
+	$proof['appointment_details'] = array('required_fields' => 'PASS', 'native_subject_exact' => 'PASS',
+		'native_address_complete' => 'PASS', 'private_notes_complete' => 'PASS', 'unicode_limits_120_128' => 'PASS',
+		'line_endings_normalized' => 'PASS', 'changed_details_conflict' => 'PASS', 'legacy_61_receipt_replay' => 'PASS',
+		'missing_arrays_html_controls_invalid_utf8_rejected' => 'PASS', 'public_json_privacy' => 'PASS', 'query_details_rejected_without_mutation' => 'PASS',
+		'authenticated_caldav_export' => 'PASS');
 	$crossEntity = new BookingService($db, $entity + 1000);
 	try { $crossEntity->publicProfile($key); throw new RuntimeException('Cross-entity publication key accepted'); } catch (BookingException $e) { bookingAssert($e->getCode() === 404, 'Cross-entity key must be hidden'); }
 	bookingOk('server-owned profile, native CSRF, malicious inputs and resource limits (S02, S03, S05, S06)');
@@ -766,21 +861,22 @@ try {
 	$triggerMarker = tempnam(sys_get_temp_dir(), 'cdav-booking-trigger-');
 	bookingAssert(!file_exists($triggerPath) && is_writable(dirname($triggerPath)), 'A writable isolated native trigger directory is required');
 	$rollbackName = $prefix.' ROLLBACK';
+	$rollbackSubject = $prefix.' rollback subject';
 	$fixture = '<?php require_once DOL_DOCUMENT_ROOT."/core/triggers/dolibarrtriggers.class.php";class '
 		.$triggerClass.' extends DolibarrTriggers {public function runTrigger($action,$object,$user,$langs,$conf) {if($action === "ACTION_CREATE" && ($object->label ?? "") === '
-		.var_export('RDV — '.$rollbackName, true).') {file_put_contents('.var_export($triggerMarker, true)
+		.var_export($rollbackSubject, true).') {file_put_contents('.var_export($triggerMarker, true)
 		.', "native rollback trigger reached");$this->error="Deliberate isolated booking test rollback";return -1;}return 0;}}';
 	bookingAssert(file_put_contents($triggerPath, $fixture) !== false, 'Cannot install temporary native fault fixture');
 	$faultForm = bookingForm($key, $badDate);
 	$before = bookingCountEvents($owner->id);
 	$requestBefore = (int) bookingRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request WHERE fk_profile = '.$profile['id'])->nb;
-	bookingStatus(bookingPost($faultForm, $badStart, array('name' => $rollbackName)), array(503), 'Native trigger rejection');
+	bookingStatus(bookingPost($faultForm, $badStart, array('name' => $rollbackName, 'subject' => $rollbackSubject)), array(503), 'Native trigger rejection');
 	bookingAssert(strpos((string) file_get_contents($triggerMarker), 'native rollback trigger reached') !== false, 'Fault fixture did not run');
 	bookingAssert(bookingCountEvents($owner->id) === $before && (int) bookingRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request WHERE fk_profile = '.$profile['id'])->nb === $requestBefore,
 		'Native trigger failure must roll back event, resources and receipt');
 	unlink($triggerPath);
 	$triggerPath = '';
-	bookingStatus(bookingPost($faultForm, $badStart, array('name' => $rollbackName)), array(201), 'A rolled-back request may be retried');
+	bookingStatus(bookingPost($faultForm, $badStart, array('name' => $rollbackName, 'subject' => $rollbackSubject)), array(201), 'A rolled-back request may be retried');
 	bookingOk('real native trigger failure rolls back event/resources/receipt (B06)');
 
 	bookingQuery('DELETE FROM '.MAIN_DB_PREFIX.'cdav_booking_rate');

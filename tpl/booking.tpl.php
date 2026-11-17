@@ -11,7 +11,7 @@ $bookingDate = is_string($bookingDate ?? null) ? $bookingDate : '';
 $bookingTimezone = new DateTimeZone($bookingConfig['timezone'] ?? 'UTC');
 $bookingLanguage = substr((string) ($langs->defaultlang ?? 'en_US'), 0, 2) === 'fr' ? 'fr' : 'en';
 $bookingValues = is_array($bookingValues ?? null) ? $bookingValues : array();
-foreach (array('name', 'email', 'phone') as $bookingValueName) {
+foreach (array('name', 'email', 'phone', 'subject', 'address') as $bookingValueName) {
 	if (!is_string($bookingValues[$bookingValueName] ?? '')) {
 		unset($bookingValues[$bookingValueName]);
 	}
@@ -147,10 +147,11 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 		h2, legend { font-size: 1.15rem; font-weight: 650; }
 		a { color: #174a78; }
 		label { display: block; font-weight: 600; }
-		input, button { font: inherit; }
-		input[type=date], input[type=text], input[type=email], input[type=tel] {
+		input, textarea, button { font: inherit; }
+		input[type=date], input[type=text], input[type=email], input[type=tel], textarea {
 			width: 100%; padding: .6rem; border: 1px solid #637385; border-radius: .25rem;
 		}
+		textarea { min-height: 6rem; resize: vertical; }
 		button { margin-top: 1rem; padding: .6rem 1rem; border: 1px solid #174a78; border-radius: .3rem; background: #174a78; color: white; cursor: pointer; }
 		fieldset { padding: 1rem; border: 1px solid #bdc7d1; margin: 1.2rem 0; }
 		.slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .5rem; }
@@ -197,6 +198,7 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 		dl { display: grid; grid-template-columns: auto 1fr; gap: .5rem 1rem; }
 		dt { font-weight: 650; }
 		dd { margin: 0; overflow-wrap: anywhere; }
+		.booking-address-value { white-space: pre-line; }
 		:focus-visible { outline: 3px solid #b45f00; outline-offset: 3px; }
 		@media (max-width: 38rem) {
 			main { margin: 0; padding: 1rem; border-radius: 0; border: 0; }
@@ -257,6 +259,14 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 					<?php } else { ?><time datetime="<?php print dol_escape_htmltag((new DateTimeImmutable('@'.((int) $bookingResult['start'])))->setTimezone($bookingTimezone)->format(DateTimeInterface::ATOM)); ?>"><?php print dol_escape_htmltag((new DateTimeImmutable('@'.((int) $bookingResult['start'])))->setTimezone($bookingTimezone)->format('Y-m-d H:i')); ?></time> – <?php print dol_escape_htmltag((new DateTimeImmutable('@'.((int) $bookingResult['end'])))->setTimezone($bookingTimezone)->format('H:i')); ?><?php } ?></dd>
 				<dt><?php print dol_escape_htmltag($langs->trans('CDavBookingTimezone')); ?></dt>
 				<dd><?php print dol_escape_htmltag($bookingTimezone->getName()); ?></dd>
+				<?php if (($bookingValues['subject'] ?? '') !== '') { ?>
+				<dt><?php print dol_escape_htmltag($langs->trans('CDavBookingSubject')); ?></dt>
+				<dd id="booking-confirmation-subject"><?php print dol_escape_htmltag($bookingValues['subject']); ?></dd>
+				<?php } ?>
+				<?php if (($bookingValues['address'] ?? '') !== '') { ?>
+				<dt><?php print dol_escape_htmltag($langs->trans('CDavBookingClientAddress')); ?></dt>
+				<dd class="booking-address-value" id="booking-confirmation-address"><?php print dol_escape_htmltag($bookingValues['address'], 0, 1); ?></dd>
+				<?php } ?>
 			</dl>
 			<p><?php print dol_escape_htmltag($langs->trans('CDavBookingKeepReference')); ?></p>
 		</section>
@@ -397,6 +407,8 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 			<div class="field"><label for="booking-name"><?php print dol_escape_htmltag($langs->trans('CDavBookingName')); ?></label><input type="text" id="booking-name" name="name" autocomplete="name" maxlength="120" required<?php if (!empty($bookingError)) print ' aria-describedby="booking-error"'; ?> value="<?php print dol_escape_htmltag($bookingValues['name'] ?? ''); ?>"></div>
 			<div class="field"><label for="booking-email"><?php print dol_escape_htmltag($langs->trans('CDavBookingEmail')); ?></label><input type="email" id="booking-email" name="email" autocomplete="email" maxlength="254" required<?php if (!empty($bookingError)) print ' aria-describedby="booking-error"'; ?> value="<?php print dol_escape_htmltag($bookingValues['email'] ?? ''); ?>"></div>
 			<div class="field"><label for="booking-phone"><?php print dol_escape_htmltag($langs->trans('CDavBookingPhone')); ?></label><input type="tel" id="booking-phone" name="phone" autocomplete="tel" maxlength="40"<?php if (!empty($bookingError)) print ' aria-describedby="booking-error"'; ?> value="<?php print dol_escape_htmltag($bookingValues['phone'] ?? ''); ?>"></div>
+			<div class="field"><label for="booking-subject"><?php print dol_escape_htmltag($langs->trans('CDavBookingSubject')); ?></label><input type="text" id="booking-subject" name="subject" maxlength="120" required<?php if (!empty($bookingError)) print ' aria-describedby="booking-error"'; ?> value="<?php print dol_escape_htmltag($bookingValues['subject'] ?? ''); ?>"></div>
+			<div class="field"><label for="booking-address"><?php print dol_escape_htmltag($langs->trans('CDavBookingClientAddress')); ?></label><textarea id="booking-address" name="address" rows="3" autocomplete="street-address" maxlength="128" required aria-describedby="booking-address-help<?php if (!empty($bookingError)) print ' booking-error'; ?>"><?php print dol_escape_htmltag($bookingValues['address'] ?? '', 0, 1); ?></textarea><p class="muted" id="booking-address-help"><?php print dol_escape_htmltag($langs->trans('CDavBookingClientAddressHelp')); ?></p></div>
 			<div hidden aria-hidden="true"><label for="booking-website">Website</label><input type="text" id="booking-website" name="website" tabindex="-1" autocomplete="off" value=""></div>
 			<p class="muted"><?php print dol_escape_htmltag($langs->trans('CDavBookingPrivacy')); ?></p>
 			<button type="submit"><?php print dol_escape_htmltag($langs->trans($bookingMultiple && count($bookingSelection) > 1 ? 'CDavBookingSubmitSelection' : 'CDavBookingSubmit')); ?></button>

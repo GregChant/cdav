@@ -9,7 +9,7 @@ $bookingWantsJson = ($_GET['format'] ?? $_POST['format'] ?? '') === 'json';
 
 // Bound parsing even for anonymous requests, before Dolibarr's request helpers.
 if ((int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 8192 || strlen((string) ($_SERVER['QUERY_STRING'] ?? '')) > 8192
-	|| count($_POST) > 12 || count($_GET) > 8 || !empty($_FILES)) {
+	|| count($_POST) > 14 || count($_GET) > 8 || !empty($_FILES)) {
 	http_response_code(413);
 	header('Cache-Control: no-store');
 	exit;
@@ -97,10 +97,13 @@ try {
 	// The publication key must be scalar; never trust request-supplied owner/entity.
 	if (!is_string($bookingKey)) throw new BookingException('CDavBookingNotFound', 404);
 	$allowed = $method === 'POST'
-		? array('key', 'date', 'lang', 'format', 'token', 'request', 'start', 'selection', 'name', 'email', 'phone', 'website')
+		? array('key', 'date', 'lang', 'format', 'token', 'request', 'start', 'selection', 'name', 'email', 'phone', 'website', 'subject', 'address')
 		: array('key', 'date', 'month', 'lang', 'format', 'selection', 'add', 'selection_action');
 	foreach (array_keys(($_GET ?? array()) + ($_POST ?? array())) as $field) {
 		if (!in_array($field, $allowed, true)) throw new BookingException('CDavBookingInvalid', 422);
+	}
+	if ($method === 'POST' && (array_key_exists('subject', $_GET) || array_key_exists('address', $_GET))) {
+		throw new BookingException('CDavBookingInvalid', 422);
 	}
 	$service = new BookingService($db, $conf->entity);
 	$remote = (string) getUserRemoteIP(1); // Native trusted IP; no client-supplied forwarding headers.
@@ -134,6 +137,13 @@ try {
 			// The service validates originals; filtering must not silently accept hostile HTML.
 			$contact[$field] = $_POST[$field] ?? '';
 			if (is_string($contact[$field])) $bookingValues[$field] = mb_substr($contact[$field], 0, 254);
+		}
+		foreach (array('subject', 'address') as $field) {
+			// Keep absent fields absent so historical receipts can still be replayed.
+			if (array_key_exists($field, $_POST)) {
+				$contact[$field] = $_POST[$field];
+				if (is_string($contact[$field])) $bookingValues[$field] = mb_substr($contact[$field], 0, 512);
+			}
 		}
 		// Release the browser session before entering the owner transaction.
 		session_write_close();

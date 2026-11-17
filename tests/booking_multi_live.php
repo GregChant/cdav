@@ -137,7 +137,8 @@ function multiLiveFields(array $form, array $starts, array $changes = array()): 
 {
 	return array_replace(array('key' => $form['key'], 'date' => $form['date'], 'format' => 'json',
 		'token' => $form['token'], 'request' => $form['ticket'], 'selection' => implode(',', $starts),
-		'name' => 'CDav isolated group fixture', 'email' => 'group@example.test', 'phone' => '', 'website' => ''), $changes);
+		'name' => 'CDav isolated group fixture', 'email' => 'group@example.test', 'phone' => '', 'website' => '',
+		'subject' => 'Visite d’entretien groupée', 'address' => "Rue de l’Église 12\n1000 Lausanne"), $changes);
 }
 
 /**
@@ -270,6 +271,8 @@ try {
 	multiLiveCheck($replayed['status'] === 200 && $replayed['json']['reference'] === $accepted['json']['reference'] && $replayed['json']['replayed'],
 		'Reordered units must replay one stable group receipt');
 	multiLiveCheck(multiLivePost($form, $chosen, array('email' => 'changed@example.test'))['status'] === 409, 'Divergent group body must conflict');
+	multiLiveCheck(multiLivePost($form, $chosen, array('subject' => 'Different group subject'))['status'] === 409, 'Changing the group subject must conflict');
+	multiLiveCheck(multiLivePost($form, $chosen, array('address' => 'Different group address'))['status'] === 409, 'Changing the group address must conflict');
 	$proof['checks'][] = 'continuous native event, canonical replay and divergent body';
 
 	$splitForm = multiLiveForm($key, $day->modify('+1 day')->format('Y-m-d'));
@@ -282,6 +285,17 @@ try {
 	$memberIds = array();
 	while ($member = $db->fetch_object($members)) $memberIds[] = (int) $member->fk_actioncomm;
 	multiLiveCheck(count($memberIds) === 3, 'Every native segment must belong to the technical receipt');
+	foreach ($memberIds as $memberId) {
+		$nativeDetails = new ActionComm($db);
+		multiLiveCheck($nativeDetails->fetch($memberId) > 0
+			&& $nativeDetails->label === multiLiveFields($splitForm, $splitStarts)['subject']
+			&& $nativeDetails->location === multiLiveFields($splitForm, $splitStarts)['address']
+			&& strpos($nativeDetails->note_private, multiLiveFields($splitForm, $splitStarts)['subject']) !== false
+			&& strpos($nativeDetails->note_private, multiLiveFields($splitForm, $splitStarts)['address']) !== false,
+			'All native segments carry the same complete client subject and address');
+	}
+	multiLiveCheck(strpos(json_encode($split['json']), 'Visite d’entretien') === false
+		&& strpos(json_encode($split['json']), 'Rue de l’Église') === false, 'The public group receipt must not disclose private appointment details');
 	$moved = new ActionComm($db);
 	multiLiveCheck($moved->fetch($memberIds[1]) > 0, 'Cannot fetch second native segment');
 	$moved->datep += 1800;
@@ -318,20 +332,21 @@ try {
 	$rollbackForm = multiLiveForm($key, $day->modify('+5 days')->format('Y-m-d'));
 	$rollbackStarts = array($at(5, 9, 30), $at(5, 13, 30));
 	$rollbackName = $prefix.' rollback';
+	$rollbackSubject = $prefix.' rollback subject';
 	$marker = $temporaryDirectory.'/trigger-count';
 	$triggerClass = 'InterfaceCdavMultiQa'.bin2hex(random_bytes(5));
 	$triggerPath = DOL_DOCUMENT_ROOT.'/core/triggers/interface_99_modCDav_'.substr($triggerClass, 9).'.class.php';
 	multiLiveCheck(!file_exists($triggerPath) && is_writable(dirname($triggerPath)), 'Use an exclusively disposable trigger tree');
 	$trigger = '<?php require_once DOL_DOCUMENT_ROOT."/core/triggers/dolibarrtriggers.class.php";class '.$triggerClass
 		.' extends DolibarrTriggers {public function runTrigger($action,$object,$user,$langs,$conf) {if($action==="ACTION_CREATE" && ($object->label??"")==='
-		.var_export('RDV — '.$rollbackName, true).') {$p='.var_export($marker, true).';$n=(int)@file_get_contents($p)+1;file_put_contents($p,(string)$n);if($n===2){$this->error="Isolated second-segment rollback";return -1;}}return 0;}}';
+		.var_export($rollbackSubject, true).') {$p='.var_export($marker, true).';$n=(int)@file_get_contents($p)+1;file_put_contents($p,(string)$n);if($n===2){$this->error="Isolated second-segment rollback";return -1;}}return 0;}}';
 	multiLiveCheck(file_put_contents($triggerPath, $trigger) !== false, 'Cannot install native group rollback trigger');
 	$before = (int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId)->nb;
 	$rollbackCounts = array();
 	foreach (array('actioncomm_resources', 'cdav_booking_request', 'cdav_booking_request_event') as $table) {
 		$rollbackCounts[$table] = (int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.$table)->nb;
 	}
-	multiLiveCheck(multiLivePost($rollbackForm, $rollbackStarts, array('name' => $rollbackName))['status'] === 503
+	multiLiveCheck(multiLivePost($rollbackForm, $rollbackStarts, array('name' => $rollbackName, 'subject' => $rollbackSubject))['status'] === 503
 		&& file_get_contents($marker) === '2', 'The second real native create trigger must reject the group');
 	multiLiveCheck((int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId)->nb === $before,
 		'Failure on the second segment must roll back the first native event');
@@ -341,7 +356,7 @@ try {
 	}
 	unlink($triggerPath);
 	$triggerPath = '';
-	multiLiveCheck(multiLivePost($rollbackForm, $rollbackStarts, array('name' => $rollbackName))['status'] === 201, 'The same group ticket may succeed after a complete rollback');
+	multiLiveCheck(multiLivePost($rollbackForm, $rollbackStarts, array('name' => $rollbackName, 'subject' => $rollbackSubject))['status'] === 201, 'The same group ticket may succeed after a complete rollback');
 	$proof['checks'][] = 'second native trigger failure rolls back every segment and permits retry';
 
 	$raceDate = $day->modify('+6 days')->format('Y-m-d');

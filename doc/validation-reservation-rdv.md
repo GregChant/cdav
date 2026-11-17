@@ -402,3 +402,42 @@ Les preuves locales sanitizées sont dans `dist/qa/` :
 
 Ces artefacts locaux sont ignorés par Git. Les journaux web bruts et les
 identifiants temporaires ne font pas partie des livrables de validation.
+
+## Sujet et adresse d'intervention — 6.1.1
+
+Le client renseigne le sujet et l'adresse d'intervention. `ActionComm::create()`
+enregistre le sujet comme libellé et l'adresse comme lieu, sur chaque partie
+d'une réservation. Les notes privées et la confirmation affichent aussi ces
+détails. Aucun schéma supplémentaire ni mise à niveau SQL n'est nécessaire.
+
+La validation spécifique du formulaire est centralisée dans `BookingDetails` ;
+les API natives gardent la validation de l'email, l'échappement HTML et l'écriture
+de l'Agenda. Les bornes sont de 120 caractères UTF-8 pour le sujet et 128 pour
+l'adresse multiligne, compatible avec `location`, sans troncature. Les fins de
+ligne CRLF/CR sont normalisées en LF. Une nouvelle réservation sans ces champs
+échoue avec `422`. Un ancien reçu peut encore être rejoué avec sa forme 6.1 ;
+un changement des détails d'une même demande donne `409`, sans second événement.
+
+Les détails ne circulent pas dans les liens de navigation ni les JSON publics.
+Un POST qui les place en paramètres d'URL est refusé avant mutation. La revue
+indépendante a vérifié le contrôleur, la validation, l'idempotence et le rendu.
+
+La matrice source Dolibarr 23.0.4/24.0.0 × PHP 8.4.26/8.5.11 passe : dix suites
+rapides par combinaison, lint PHP complet et PHPCS natif, 288 rendus FR/EN,
+quatre suites HTTP simples et quatre groupées, 48 parcours navigateur sans
+violation axe. Les régressions couvrent limites Unicode, saisies invalides,
+multilignes, stockage natif, export CalDAV, confidentialité, concurrence,
+rejeux historiques et absence de doublons. Le format `LOCATION` CalDAV existant
+aplatit les retours à la ligne en espaces ; l'Agenda conserve l'adresse multiligne.
+
+Une première exécution concurrente de tests surchargés a manqué l'observation
+de leur barrière, avec deux réponses métier `201` sur des créneaux distincts.
+Le délai d'observation est porté à dix secondes et vise exactement la requête
+de verrouillage du propriétaire ; le nombre de workers exigés reste inchangé.
+La matrice finale séquentielle réussit. Aucun diagnostic PHP du module ni
+résidu de fixture n'est présent. Les preuves sont dans
+`dist/qa/details-validation/source-matrix.json`, `source-cleanup.json`,
+`runtime-diagnostics.json` et les dossiers `dist/qa/details-doli*/`.
+
+La qualification du paquet et sa clôture sont consignées dans le manifeste
+`dist/qa/booking-release-manifest.json` avant publication de la version 6.1.1.

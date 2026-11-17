@@ -4,6 +4,7 @@ namespace Dolibarr\CDav;
 
 require_once __DIR__.'/CDavBookingAvailability.php';
 require_once __DIR__.'/CDavBookingCalendarReader.php';
+require_once __DIR__.'/CDavBookingDetails.php';
 
 /** Public errors are translation keys, never SQL, event titles or coordinates. */
 class BookingException extends \RuntimeException
@@ -478,24 +479,20 @@ class BookingService
 	 */
 	private function reserveSelection($key, $ticket, array $starts, array $contact): array
 	{
+		global $langs;
 		$now = time();
 		$initial = $this->publicProfile($key);
 		list($requestHash, $validUntil) = $this->validateTicket($initial, $ticket, $now);
-		$clean = array();
-		foreach (array('name' => 120, 'email' => 254, 'phone' => 40) as $field => $limit) {
-			$value = $contact[$field] ?? '';
-			if (!is_string($value) || strlen($value) > $limit || preg_match('/[\x00-\x1f\x7f<>]/u', $value)
-				|| !mb_check_encoding($value, 'UTF-8')) throw new BookingException('CDavBookingInvalid', 422);
-			$clean[$field] = trim($value);
-		}
-		if ($clean['name'] === '' || !isValidEmail($clean['email']) || !empty($contact['website'])) {
+		try { $details = BookingDetails::normalize($contact); } catch (\InvalidArgumentException $e) {
 			throw new BookingException('CDavBookingInvalid', 422);
 		}
+		$clean = $details['contact'];
 		try { $selection = BookingAvailability::planSelection($initial['config'], $starts); } catch (\InvalidArgumentException $e) {
 			throw new BookingException('CDavBookingInvalid', 422);
 		}
 		$starts = $selection['starts'];
-		// Retain the historical single-unit hash, including for reserveMany([start]).
+		// A legacy replay retains its historical contact shape and hash; new
+		// requests include subject and address in the same canonical payload.
 		$bodyHash = hash('sha256', json_encode(array(count($starts) === 1 ? $starts[0] : $starts, $clean)));
 		if (!$this->db->begin()) throw new BookingException('CDavBookingUnavailable', 503);
 		try {
@@ -510,6 +507,7 @@ class BookingService
 				$this->verifyReceipt($previous, $profile, $selection);
 				$result = $this->selectionReceipt($selection, (string) $previous->reference, true);
 			} else {
+				if ($details['legacy']) throw new BookingException('CDavBookingInvalid', 422);
 				$selection = $this->previewSelection($profile, $starts, time());
 				$owner = $this->owner($profile['owner_id']);
 				require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
@@ -518,7 +516,8 @@ class BookingService
 				foreach ($selection['segments'] as $segment) {
 					$event = new \ActionComm($this->db);
 					$event->type_code = 'AC_RDV';
-					$event->label = 'RDV — '.$clean['name'];
+					$event->label = $clean['subject'];
+					$event->location = $clean['address'];
 					$event->datep = $segment['start'];
 					$event->datef = $segment['end'];
 					$event->userownerid = $owner->id;
@@ -526,7 +525,9 @@ class BookingService
 					$event->transparency = 1;
 					$event->percentage = -1;
 					$event->priority = 0;
-					$event->note_private = 'CDav booking '.$reference."\n".$clean['name']."\n".$clean['email']."\n".$clean['phone'];
+					$event->note_private = 'CDav booking '.$reference."\n".$clean['name']."\n".$clean['email']."\n".$clean['phone']
+						."\n".$langs->transnoentitiesnoconv('CDavBookingSubject').': '.$clean['subject']
+						."\n".$langs->transnoentitiesnoconv('CDavBookingClientAddress').":\n".$clean['address'];
 					if ($event->create($owner) <= 0) throw new BookingException('CDavBookingUnavailable', 503);
 					$ids[] = (int) $event->id;
 				}

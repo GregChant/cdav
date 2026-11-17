@@ -49,6 +49,8 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		}
 	}
 	foreach (array('slots', 'empty', 'error', 'confirmed', 'malformed', 'invalid-month', 'invalid-days', 'leap-month', 'full-week-month', 'current-day', 'six-month-horizon',
+		'details-malformed', 'details-hostile', 'details-multiline', 'details-oversized',
+		'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed',
 		'multi-empty', 'multi-contiguous', 'multi-split', 'multi-both', 'multi-disabled', 'multi-invalid', 'multi-malformed', 'multi-scalar', 'multi-dst', 'confirmed-split',
 		'branding-full', 'branding-no-images', 'branding-no-contacts', 'branding-hostile', 'branding-hidden', 'branding-malformed', 'branding-large-photo', 'branding-oversized-photo') as $scenario) {
 		$bookingProfile = array('config' => array('timezone' => 'Europe/Zurich', 'duration' => 30, 'horizon' => 60));
@@ -58,13 +60,14 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		$bookingCalendar = array('month' => '2026-11', 'previous' => '2026-10', 'next' => '2026-12',
 			'days' => array('2026-11-20' => 4, '2026-11-21' => 0, '2026-11-23' => 2));
 		$bookingRequest = 'request-sentinel';
-		$bookingSlots = in_array($scenario, array('slots', 'error'), true)
+		$bookingSlots = in_array($scenario, array('slots', 'error', 'details-malformed', 'details-hostile', 'details-multiline', 'details-oversized'), true)
 			? array(array('start' => 1795179600, 'end' => 1795181400)) : array();
-		$bookingResult = $scenario === 'confirmed'
+		$bookingResult = in_array($scenario, array('confirmed', 'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed'), true)
 			? array('reference' => 'public-ref', 'start' => 1795179600, 'end' => 1795181400) : null;
 		$bookingMessage = '';
 		$bookingError = $scenario === 'error' ? 'Please reload <script>alert(1)</script>' : '';
-		$bookingValues = array('name' => 'Client " onfocus="alert(1)', 'email' => 'client@example.test', 'phone' => '0041000000000');
+		$bookingValues = array('name' => 'Client " onfocus="alert(1)', 'email' => 'client@example.test', 'phone' => '0041000000000',
+			'subject' => 'Diagnostic chauffage', 'address' => "Rue de l’Église 12\n2e étage\n1000 Lausanne");
 		$bookingSelection = array();
 		$bookingSelectionSegments = array();
 		$bookingSelectionDuration = 0;
@@ -109,6 +112,33 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		if ($scenario === 'six-month-horizon') {
 			$bookingProfile['config']['horizon'] = 6;
 			$bookingProfile['config']['horizon_unit'] = 'months';
+		}
+		if ($scenario === 'details-malformed') {
+			$bookingValues['subject'] = array('malformed');
+			$bookingValues['address'] = array('malformed');
+		}
+		if ($scenario === 'details-hostile') {
+			$bookingValues['subject'] = 'Visite" autofocus onfocus="alert(1)';
+			$bookingValues['address'] = "</textarea><script>alert(1)</script><textarea>\n1000 Lausanne";
+		}
+		if ($scenario === 'details-multiline') {
+			$bookingValues['subject'] = 'Réparation — chaudière';
+			$bookingValues['address'] = "Rue de l’Église 12\r\n2e étage\n1000 Lausanne";
+			$bookingError = 'Please correct the selected appointment.';
+		}
+		if ($scenario === 'details-oversized') {
+			$bookingValues['subject'] = str_repeat('s', 121);
+			$bookingValues['address'] = str_repeat('a', 129);
+			$bookingError = 'Please correct the appointment details.';
+		}
+		if ($scenario === 'confirmed-legacy') unset($bookingValues['subject'], $bookingValues['address']);
+		if ($scenario === 'confirmed-details-hostile') {
+			$bookingValues['subject'] = '</dd><script>alert(1)</script>';
+			$bookingValues['address'] = "</dd><script>alert(1)</script>\n1000 Lausanne";
+		}
+		if ($scenario === 'confirmed-details-malformed') {
+			$bookingValues['subject'] = array('malformed');
+			$bookingValues['address'] = array('malformed');
 		}
 		if (str_starts_with($scenario, 'multi-') || $scenario === 'confirmed-split') {
 			$selectionStart = (new DateTimeImmutable('2026-11-20 09:00', new DateTimeZone('Europe/Zurich')))->getTimestamp();
@@ -211,35 +241,75 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		bookingUiAssert($xpath->query('//form[@method="get"]//input[@name="action" or @name="token"]')->length === 0,
 			'Read-only selection forms use no native mutation action and expose no CSRF token in URLs');
 		bookingUiAssert(strpos($html, 'PRIVATE-SENTINEL') === false, 'Calendar rendering must not expose malformed or private source values');
-		foreach ($xpath->query('//input[not(@type="hidden")]') as $input) {
+		foreach ($xpath->query('//input[not(@type="hidden")] | //textarea') as $input) {
 			bookingUiAssert($input->hasAttribute('id'), 'Visible fields must have an identifier');
 			bookingUiAssert($xpath->query('//label[@for="'.$input->getAttribute('id').'"]')->length === 1,
 				'Visible fields must have exactly one associated label');
 		}
 		foreach ($xpath->query('//form[@method="post"]') as $confirmationForm) {
 			bookingUiAssert($confirmationForm->getAttribute('action') === '?', 'A confirmation POST clears month/add parameters from the current URL');
+			$subject = $xpath->query('.//input[@name="subject"]', $confirmationForm);
+			$address = $xpath->query('.//textarea[@name="address"]', $confirmationForm);
+			bookingUiAssert($subject->length === 1 && $address->length === 1,
+				'Every single or grouped confirmation collects exactly one subject and one client address');
+			bookingUiAssert($subject->item(0)->hasAttribute('required') && $subject->item(0)->getAttribute('maxlength') === '120'
+				&& $address->item(0)->hasAttribute('required') && $address->item(0)->getAttribute('maxlength') === '128',
+				'Subject and address are required with limits matching the native Agenda fields');
+			bookingUiAssert($address->item(0)->getAttribute('autocomplete') === 'street-address'
+				&& $address->item(0)->getAttribute('rows') === '3', 'A client can enter a complete multiline intervention address');
+			bookingUiAssert($subject->item(0)->getAttribute('value') === ($bookingValues['subject'] ?? '')
+				&& str_replace("\r\n", "\n", $address->item(0)->textContent) === str_replace("\r\n", "\n", $bookingValues['address'] ?? ''),
+				'Rendered appointment details preserve the visitor input, including address line breaks, after an error');
+			$addressDescriptions = preg_split('/\s+/', $address->item(0)->getAttribute('aria-describedby'));
+			bookingUiAssert(in_array('booking-address-help', $addressDescriptions, true)
+				&& $xpath->query('//*[@id="booking-address-help"]')->length === 1, 'The address field has associated explanatory text');
+			if ($bookingError !== '') {
+				bookingUiAssert($subject->item(0)->getAttribute('aria-describedby') === 'booking-error'
+					&& in_array('booking-error', $addressDescriptions, true), 'Validation errors are associated with both appointment-detail fields');
+			}
+		}
+		bookingUiAssert($xpath->query('//form[@method="get"]//*[@name="subject" or @name="address"]')->length === 0,
+			'Subject and client address are submitted only by POST');
+		foreach ($xpath->query('//a[@href]') as $navigationLink) {
+			parse_str(parse_url($navigationLink->getAttribute('href'), PHP_URL_QUERY) ?? '', $query);
+			bookingUiAssert(!array_intersect(array_keys($query), array('subject', 'address')),
+				'Calendar, language and selection links never expose appointment details in URLs');
 		}
 		if (in_array($scenario, array('slots', 'error'), true)) {
 			bookingUiAssert($xpath->query('//form[@method="post"]')->length === 1, 'Available slots must have a confirmation form');
-			foreach (array('key', 'token', 'request', 'date', 'start', 'name', 'email', 'phone', 'website') as $name) {
+			foreach (array('key', 'token', 'request', 'date', 'start', 'name', 'email', 'phone', 'subject', 'website') as $name) {
 				bookingUiAssert($xpath->query('//form[@method="post"]//input[@name="'.$name.'"]')->length === 1,
 					'The confirmation form must preserve '.$name);
 			}
 			bookingUiAssert($xpath->query('//input[@name="token"]')->item(0)->getAttribute('value') === 'native-csrf-sentinel',
 				'The form must use the native session CSRF token');
 		}
-		if ($scenario === 'confirmed') {
+		if (in_array($scenario, array('confirmed', 'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed'), true)) {
 			bookingUiAssert($xpath->query('//form[@method="post"]')->length === 0, 'Confirmation must not offer an accidental repeat submission');
 			bookingUiAssert(strpos($html, 'public-ref') !== false, 'Confirmation must expose the public reference');
 		}
+		if ($bookingResult !== null) {
+			foreach (array('subject', 'address') as $detailField) {
+				$detail = $xpath->query('//*[@id="booking-confirmation-'.$detailField.'"]');
+				if (($bookingValues[$detailField] ?? '') === '') {
+					bookingUiAssert($detail->length === 0, 'Legacy or missing details do not invent a confirmation value');
+				} else {
+					bookingUiAssert($detail->length === 1
+						&& str_replace("\r\n", "\n", $detail->item(0)->textContent) === str_replace("\r\n", "\n", $bookingValues[$detailField]),
+						'Confirmation preserves and escapes the visitor\'s own '.$detailField.' without exposing it in navigation');
+					if ($detailField === 'address') bookingUiAssert(strpos($detail->item(0)->getAttribute('class'), 'booking-address-value') !== false,
+						'The confirmed address preserves its visible line breaks');
+				}
+			}
+		}
 		if ($scenario === 'error') {
 			bookingUiAssert($xpath->query('//*[@role="alert" and @id="booking-error"]')->length === 1, 'Errors must be announced');
-			foreach (array('name', 'email', 'phone', 'start') as $name) {
+			foreach (array('name', 'email', 'phone', 'subject', 'start') as $name) {
 				bookingUiAssert($xpath->query('//input[@name="'.$name.'" and @aria-describedby="booking-error"]')->length === 1,
 					'Errors must be associated with the '.$name.' field');
 			}
 		}
-		if (!in_array($scenario, array('confirmed', 'confirmed-split', 'malformed', 'invalid-month', 'branding-hidden'), true)) {
+		if ($bookingResult === null && !in_array($scenario, array('malformed', 'invalid-month', 'branding-hidden'), true)) {
 			bookingUiAssert($xpath->query('//table[contains(@class,"calendar-grid")]')->length === 1, 'A valid public month must render a calendar table');
 			bookingUiAssert($xpath->query('//table[contains(@class,"calendar-grid")]//th[@scope="col"]')->length === 7, 'The monthly calendar has seven named weekday columns');
 			$firstHeader = $xpath->query('//table[contains(@class,"calendar-grid")]//th')->item(0);
@@ -307,7 +377,7 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			foreach ($xpath->query('//nav[contains(@class,"language")]/a | //nav[contains(@class,"calendar-navigation")]/a | //a[contains(@class,"calendar-day")]') as $navigationLink) {
 				parse_str(parse_url($navigationLink->getAttribute('href'), PHP_URL_QUERY), $query);
 				bookingUiAssert(($query['selection'] ?? '') === $bookingSelectionCsv, 'Changing day, month or language preserves only the sanitized timestamp selection');
-				bookingUiAssert(!array_intersect(array_keys($query), array('name', 'email', 'phone', 'website')), 'Contact details never appear in navigation URLs');
+				bookingUiAssert(!array_intersect(array_keys($query), array('name', 'email', 'phone', 'subject', 'address', 'website')), 'Contact and appointment details never appear in navigation URLs');
 			}
 			if (!empty($bookingSelection)) {
 				bookingUiAssert($xpath->query('//section[@id="booking-selection"]//li[@data-start]')->length === count($bookingSelection), 'The basket lists every selected unit separately');
@@ -330,7 +400,7 @@ foreach (array('fr_FR', 'en_US') as $language) {
 					'Confirmation submits the exact verified selection');
 				bookingUiAssert($xpath->query('//form[@method="post"]//input[@name="start" or @name="add[]" or @name="month" or @name="action"]')->length === 0,
 					'A selection POST does not mix legacy starts or transient GET actions');
-				foreach (array('key', 'token', 'request', 'date', 'name', 'email', 'phone', 'website') as $name) {
+				foreach (array('key', 'token', 'request', 'date', 'name', 'email', 'phone', 'subject', 'website') as $name) {
 					bookingUiAssert($xpath->query('//form[@method="post"]//input[@name="'.$name.'"]')->length === 1, 'Selection confirmation preserves the single '.$name.' field');
 				}
 			} else {

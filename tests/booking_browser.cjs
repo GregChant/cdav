@@ -44,6 +44,8 @@ async function follow(page, action, expected = 200) {
 }
 
 async function checkBasket(page, starts) {
+  check(!new URL(page.url()).searchParams.has('subject') && !new URL(page.url()).searchParams.has('address'),
+    'Appointment subject and client address never enter calendar or basket URLs');
   const displayed = await page.locator('#booking-selection li[data-start]').evaluateAll(items => items.map(item => Number(item.dataset.start)));
   check(selectionCsv(displayed) === selectionCsv(starts), 'The basket preserves exactly the chosen units');
   const confirmation = page.locator('#booking-confirm-selection');
@@ -54,6 +56,13 @@ async function checkBasket(page, starts) {
     check(await confirmation.locator('#booking-name').count() === 1 && await confirmation.locator('#booking-email').count() === 1,
       'The basket asks for contact details once');
   }
+}
+
+async function checkAppointmentDetails(page, subject) {
+  check(await page.locator('#booking-confirmation-subject').textContent() === subject,
+    'The HTML confirmation retains the exact visitor subject');
+  check(await page.locator('#booking-confirmation-address').textContent() === fixture.client_address,
+    'The HTML confirmation retains the complete multiline client address');
 }
 
 async function addUnits(page, starts) {
@@ -166,6 +175,12 @@ async function checkBranding(page) {
     check(await page.evaluate(() => document.activeElement.id) === 'booking-phone', 'Email leads to phone');
     await page.keyboard.type('+41000000000');
     await page.keyboard.press('Tab');
+    check(await page.evaluate(() => document.activeElement.id) === 'booking-subject', 'Phone leads to the appointment subject');
+    await page.keyboard.type(fixture.appointment_subjects.single);
+    await page.keyboard.press('Tab');
+    check(await page.evaluate(() => document.activeElement.id) === 'booking-address', 'Subject leads to the client appointment address');
+    await page.keyboard.insertText(fixture.client_address);
+    await page.keyboard.press('Tab');
     check(await page.evaluate(() => document.activeElement.tagName) === 'BUTTON', 'Hidden anti-spam field does not take focus');
     const posted = page.waitForResponse(r => r.request().method() === 'POST' && r.url().includes('/booking.php'));
     await page.keyboard.press('Enter');
@@ -173,6 +188,7 @@ async function checkBranding(page) {
     await page.waitForLoadState();
     check(response.status() === 201, 'Keyboard booking confirmation status ' + response.status());
     check(await page.locator('#booking-confirmation').textContent() === 'Votre rendez-vous est réservé', 'Booking confirmation shown');
+    await checkAppointmentDetails(page, fixture.appointment_subjects.single);
     check(await page.locator('form[method=post]').count() === 0, 'No accidental repeat form after confirmation');
     axe = await new AxeBuilder({page}).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
     check(axe.violations.length === 0, 'Confirmation accessibility: ' + axe.violations.map(v => v.id).join(','));
@@ -195,6 +211,8 @@ async function checkBranding(page) {
     await phone.getByRole('radio').first().check();
     await phone.locator('#booking-name').fill('CDav Browser QA');
     await phone.locator('#booking-email').fill('browser-qa@example.test');
+    await phone.locator('#booking-subject').fill(fixture.appointment_subjects.single);
+    await phone.locator('#booking-address').fill(fixture.client_address);
     await phone.locator('input[name=request]').evaluate(el => { el.value = 'expired.invalid'; });
     const refused = phone.waitForResponse(r => r.request().method() === 'POST' && r.url().includes('/booking.php'));
     await phone.getByRole('button', {name: 'Confirm appointment'}).click();
@@ -202,6 +220,8 @@ async function checkBranding(page) {
     await phone.waitForLoadState();
     check(response.status() === 409, 'Expired form returns conflict status ' + response.status());
     check(await phone.locator('#booking-error').textContent(), 'Expired form has an announced error');
+    check(await phone.locator('#booking-subject').inputValue() === fixture.appointment_subjects.single
+      && await phone.locator('#booking-address').inputValue() === fixture.client_address, 'An expired form preserves the visitor subject and multiline address');
     await capture(phone, 'booking-ui-mobile-expired-form.png');
     results.push({case: 'U03 expired form', http: response.status(), announcedError: true});
 
@@ -224,6 +244,8 @@ async function checkBranding(page) {
     await lost.getByRole('radio').first().check();
     await lost.locator('#booking-name').fill('CDav Browser Lost Response');
     await lost.locator('#booking-email').fill('browser-lost@example.test');
+    await lost.locator('#booking-subject').fill(fixture.appointment_subjects.lost);
+    await lost.locator('#booking-address').fill(fixture.client_address);
     await lost.locator('form[method=post]').evaluate(form => {
       const format = document.createElement('input');
       format.type = 'hidden'; format.name = 'format'; format.value = 'json';
@@ -238,10 +260,15 @@ async function checkBranding(page) {
         const request = route.request();
         const body = request.postData();
         const values = new URLSearchParams(body);
+        check(values.get('subject') === fixture.appointment_subjects.lost && values.get('address').replace(/\r\n/g, '\n') === fixture.client_address,
+          'Lost-response replay contains the same explicit subject and complete client address');
         secrets.add(values.get('token')); secrets.add(values.get('request'));
         const upstream = await route.fetch();
         check(upstream.status() === 201, 'The lost-response request is accepted once');
         const receipt = await upstream.json();
+        check(!('subject' in receipt) && !('address' in receipt)
+          && !JSON.stringify(receipt).includes(fixture.appointment_subjects.lost)
+          && !JSON.stringify(receipt).includes(fixture.client_address), 'Public receipt JSON excludes visitor subject and address');
         await route.abort('connectionreset');
         acceptedResolve({url: request.url(), body, contentType: request.headers()['content-type'], receipt, status: upstream.status()});
       } catch (error) {
@@ -327,8 +354,11 @@ async function checkBranding(page) {
     await checkBasket(page, fixture.contiguous_starts);
     await page.locator('#booking-name').fill('CDav Browser Continuous');
     await page.locator('#booking-email').fill('browser-continuous@example.test');
+    await page.locator('#booking-subject').fill(fixture.appointment_subjects.continuous);
+    await page.locator('#booking-address').fill(fixture.client_address);
     await capture(page, 'booking-ui-continuous-basket.png');
     response = await follow(page, () => page.locator('#booking-confirm-selection button[type=submit]').click(), 201);
+    await checkAppointmentDetails(page, fixture.appointment_subjects.continuous);
     check(await page.locator('#booking-confirmation-segments li').count() === 1, 'Adjacent units have one continuous confirmation segment');
     check(await page.locator('form[method=post]').count() === 0, 'Continuous confirmation cannot be resubmitted accidentally');
     const continuousAxe = await checkAccessible(page, 'Continuous confirmation accessibility');
@@ -379,7 +409,10 @@ async function checkBranding(page) {
     await phone.locator('#booking-name').fill('CDav Browser Split');
     await phone.locator('#booking-email').fill('browser-split@example.test');
     await phone.locator('#booking-phone').fill('+41000000001');
+    await phone.locator('#booking-subject').fill(fixture.appointment_subjects.split);
+    await phone.locator('#booking-address').fill(fixture.client_address);
     response = await follow(phone, () => phone.locator('#booking-confirm-selection button[type=submit]').click(), 201);
+    await checkAppointmentDetails(phone, fixture.appointment_subjects.split);
     check(await phone.locator('#booking-confirmation-segments li').count() === 3, 'Two working ranges and another day have three confirmation segments');
     check(await phone.locator('form[method=post]').count() === 0, 'Grouped confirmation replaces the complete contact form');
     check(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'No horizontal overflow in the multi-day confirmation');

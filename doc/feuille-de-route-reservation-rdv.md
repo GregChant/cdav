@@ -492,6 +492,23 @@ Texte de référence pour l'objectif :
 - [x] Publier les commits et retirer les instances jetables après conservation
   des preuves.
 
+## Sujet et adresse d'intervention demandés après la livraison 6.1
+
+- [x] Demander au client un sujet et une adresse d'intervention, obligatoires
+  pour toute nouvelle réservation ; conserver les valeurs en cas d'erreur.
+- [x] Utiliser les champs natifs `ActionComm::label` et `location`, sans table
+  supplémentaire ; répéter les détails sur chaque partie d'un rendez-vous.
+- [x] Respecter les limites natives sans troncature : sujet de 120 caractères
+  UTF-8, adresse multiligne de 128 caractères ; normaliser les fins de ligne.
+- [x] Afficher les détails échappés dans la confirmation, les exclure des URL
+  et des réponses publiques de disponibilité et de reçu.
+- [x] Préserver le rejeu des anciens reçus 6.1 et refuser la création incomplète ;
+  inclure les nouveaux détails dans le contrôle d'idempotence.
+- [x] Ajouter les tests métier et les régressions HTTP/navigateur ; valider les
+  quatre combinaisons Dolibarr 23/24 × PHP 8.4/8.5 et la revue indépendante.
+- [ ] Qualifier le paquet 6.1.1, publier sur les branches autorisées et retirer
+  les instances jetables après conservation des preuves.
+
 ## Références locales
 
 - [Guide actuel : disponibilités, documents et photos](disponibilites-documents-photos-fr.md).

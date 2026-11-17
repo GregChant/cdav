@@ -28,6 +28,7 @@ pour rendre visibles les incompatibilités propres à une combinaison.
 | `booking_calendar.php` | Vue mensuelle, correspondance jours/créneaux, une lecture Agenda par mois, navigation bornée, années bissextiles et confidentialité |
 | `booking_multi.php` | Permissions indépendantes, regroupement, pauses, limites, refus des chevauchements, marges et horaires locaux |
 | `booking_identity.php` | Coordonnées publiques, logo natif, photo et miniature, bornes des images et isolation des fichiers utilisateur |
+| `booking_details.php` | Objet et adresse du client obligatoires, bornes UTF-8 natives, adresses multilignes normalisées et compatibilité des anciens reçus |
 | `booking_ui.php` | Rendus FR/EN du formulaire et du calendrier mensuel, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
 
 Les tests de réservation utilisent une horloge fixe. Des cas déterministes
