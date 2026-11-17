@@ -25,7 +25,8 @@ pour rendre visibles les incompatibilités propres à une combinaison.
 | `contact_photos.php` | Photo personnelle, logo du tiers, repli, entité propriétaire, ETag et limites des fichiers, avec fichiers temporaires et doublure SQL ciblée |
 | `attachments.php` | Décodage et limites des pièces jointes, contenu interdit, accès aux documents, traversée de chemin et nettoyage différé des fichiers |
 | `booking.php` | Créneaux réellement libres, bornes, marges, pauses, journées entières, récurrences, changements d’heure, préavis, horizon et validation des profils |
-| `booking_ui.php` | Dix rendus FR/EN du formulaire, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
+| `booking_calendar.php` | Vue mensuelle, correspondance jours/créneaux, une lecture Agenda par mois, navigation bornée, années bissextiles et confidentialité |
+| `booking_ui.php` | Rendus FR/EN du formulaire et du calendrier mensuel, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
 
 Les tests de réservation utilisent une horloge fixe. Des cas déterministes
 vérifient que l’ordre et les doublons des occupations ne changent pas les

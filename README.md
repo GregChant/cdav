@@ -219,7 +219,7 @@ Repeat with the other target core and `CDAV_PHP_BIN=php8.5`. The optional
 `CDAV_PHPCS_STANDARD` uses Dolibarr's native code-style rules when PHP_CodeSniffer
 is installed.
 
-[GitHub Actions](.github/workflows/qa.yml) runs these six database-free suites,
+[GitHub Actions](.github/workflows/qa.yml) runs these seven database-free suites,
 PHP lint for the whole module and native PHPCS on the booking/transport files
 for every pull request and every push to `23.0` or `master`. All four combinations
 of Dolibarr 23.0.4 / 24.0.0 and PHP 8.4 / 8.5 must pass. Dependencies are the

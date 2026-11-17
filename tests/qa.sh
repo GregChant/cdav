@@ -9,7 +9,7 @@ rg --files -g '*.php' -0 | while IFS= read -r -d '' cdav_qa_file; do
     "$cdav_qa_php" -l "$cdav_qa_file" > /dev/null
 done
 printf '%s\n' 'PHP lint passed.'
-for cdav_qa_suite in run freebusy contact_photos attachments booking booking_ui; do
+for cdav_qa_suite in run freebusy contact_photos attachments booking booking_calendar booking_ui; do
     "$cdav_qa_php" "tests/$cdav_qa_suite.php"
 done
 if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
@@ -17,7 +17,7 @@ if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
         class/CDavBookingAvailability.php class/CDavBookingCalendarReader.php \
         class/CDavBookingService.php public/booking.php lib/cdav_transport.lib.php \
         admin/booking.php tpl/booking.tpl.php \
-        tests/bootstrap.php tests/booking.php tests/booking_ui.php tests/booking_live.php tests/booking_browser.php
+        tests/bootstrap.php tests/booking.php tests/booking_calendar.php tests/booking_ui.php tests/booking_live.php tests/booking_browser.php
 fi
 if [[ "${CDAV_LIVE_TEST:-0}" == 1 ]]; then
     : "${CDAV_LIVE_URL:?Set the DAV URL of the isolated test instance}"

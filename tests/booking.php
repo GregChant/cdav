@@ -6,7 +6,7 @@ if (PHP_SAPI !== 'cli') {
 	exit;
 }
 
-/** Booking business regressions A01–A12; no database or HTTP server required. */
+/** Booking business regressions A01–A14; no database or HTTP server required. */
 date_default_timezone_set('Europe/Zurich');
 error_reporting(E_ALL);
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
@@ -197,7 +197,7 @@ $config = BookingAvailability::validateConfig(array('notice' => 60, 'horizon' =>
 $clock = bookingStamp('2026-11-02 09:00');
 bookingCheck(bookingHours(BookingAvailability::slots($config, array(), $start, $end, $clock))[0] === '10:00', 'A06: minimum notice includes exact boundary');
 bookingCheck(BookingAvailability::slots($config, array(), bookingStamp('2026-11-09'), bookingStamp('2026-11-10'), $clock) === array(), 'A06: future dates beyond horizon stay unavailable');
-foreach (array(array('duration' => 0), array('step' => '1e9'), array('horizon' => 91), array('timezone' => 'private/invalid'),
+foreach (array(array('duration' => 0), array('step' => '1e9'), array('horizon' => 181), array('timezone' => 'private/invalid'),
 	array('weekly' => array(1 => array(array('10:00', '09:00')))), array('weekly' => array(1 => array(array('09:00', '11:00'), array('10:00', '12:00'))))) as $invalid) {
 	bookingThrows(static function () use ($invalid) {
 		BookingAvailability::validateConfig($invalid); }, 'A06: invalid profile rejected');
@@ -249,7 +249,7 @@ fwrite(STDOUT, "[OK] A07 free/cancelled/tasks, recurrence availability exception
 
 $bounds = array('duration' => array(5, 480), 'step' => array(5, 240),
 	'buffer_before' => array(0, 240), 'buffer_after' => array(0, 240),
-	'notice' => array(0, 43200), 'horizon' => array(1, 90));
+	'notice' => array(0, 43200), 'horizon' => array(1, 180));
 foreach ($bounds as $setting => $limits) {
 	foreach ($limits as $limit) {
 		$normalized = BookingAvailability::validateConfig(array($setting => (string) $limit));
@@ -404,6 +404,84 @@ try {
 	Sabre\VObject\Settings::$maxRecurrences = $previousRecurrenceLimit;
 }
 fwrite(STDOUT, "[OK] A12 native duration/date semantics, ambiguous calendars and recurrence-setting restoration\n");
+
+$longAppointment = BookingAvailability::validateConfig(array('duration' => 240, 'step' => 7,
+	'buffer_before' => 60, 'buffer_after' => 60, 'notice' => 1440, 'horizon' => 90,
+	'weekly' => array_fill(1, 5, array(array('07:00', '12:00'), array('13:00', '17:00')))));
+$longAppointmentSnapshot = $longAppointment;
+bookingCheck(!BookingAvailability::hasWeeklySlot($longAppointment)
+	&& BookingAvailability::slots($longAppointment, array(), $start, $end, $now) === array(),
+	'A13: the reported 240-minute appointment and two 60-minute margins fit no split working range, even in an empty calendar');
+bookingCheck($longAppointment === $longAppointmentSnapshot && $longAppointment['step'] === 7,
+	'A13: the feasibility warning neither rejects a valid seven-minute grid nor changes stored settings');
+$extendedAppointment = $longAppointment;
+$extendedAppointment['weekly'][1] = array(array('07:00', '13:00'));
+bookingCheck(!BookingAvailability::hasWeeklySlot($extendedAppointment),
+	'A13: a six-hour window remains too short when a seven-minute grid rounds a sixty-minute margin up to sixty-three minutes');
+$extendedAppointment['weekly'][1] = array(array('07:00', '13:03'));
+bookingCheck(BookingAvailability::hasWeeklySlot($extendedAppointment)
+	&& bookingHours(BookingAvailability::slots($extendedAppointment, array(), $start, $end, $now)) === array('08:03'),
+	'A13: the exact first start permitted by the grid fits a six-hour-three-minute working window');
+$extendedAppointment['weekly'][1] = array(array('07:00', '13:00'));
+$extendedAppointment['step'] = 15;
+bookingCheck(BookingAvailability::hasWeeklySlot($extendedAppointment)
+	&& bookingHours(BookingAvailability::slots($extendedAppointment, array(), $start, $end, $now)) === array('08:00'),
+	'A13: six continuous hours suffice when the grid aligns with the margins');
+$shorterAppointment = $longAppointment;
+$shorterAppointment['duration'] = 120;
+bookingCheck(BookingAvailability::hasWeeklySlot($shorterAppointment)
+	&& BookingAvailability::slots($shorterAppointment, array(), $start, $end, $now) !== array(),
+	'A13: reducing the appointment duration can restore available starts without silently changing margins');
+$sameDayAppointment = $longAppointment;
+$sameDayAppointment['buffer_before'] = $sameDayAppointment['buffer_after'] = 0;
+bookingCheck(BookingAvailability::hasWeeklySlot($sameDayAppointment)
+	&& BookingAvailability::slots($sameDayAppointment, array(), $start, $end, bookingStamp('2026-11-02 07:00')) === array(),
+	'A13: weekly feasibility does not bypass a twenty-four-hour notice period on the selected day');
+$closedAppointment = $longAppointment;
+$closedAppointment['weekly'] = array();
+bookingCheck(!BookingAvailability::hasWeeklySlot($closedAppointment), 'A13: a fully closed week has no possible start');
+bookingThrows(static function () {
+	BookingAvailability::hasWeeklySlot(array('step' => 0));
+}, 'A13: feasibility diagnostics use the same profile validation as the booking engine');
+fwrite(STDOUT, "[OK] A13 impossible split hours, unchanged valid settings, exact start-grid margins and minimum notice\n");
+
+$legacyHorizon = array('timezone' => 'Europe/Zurich', 'horizon' => 90);
+bookingCheck(BookingAvailability::validateConfig($legacyHorizon)['horizon_unit'] === 'days'
+	&& BookingAvailability::horizonEnd($legacyHorizon, $clock) === (new DateTimeImmutable('@'.$clock))
+	->setTimezone(new DateTimeZone('Europe/Zurich'))->modify('+90 days')->getTimestamp(),
+	'A14: stored profiles without an explicit unit retain the exact previous local-day deadline');
+bookingCheck(BookingAvailability::validateConfig(array('horizon' => 180))['horizon'] === 180
+	&& BookingAvailability::validateConfig(array('horizon_unit' => 'months', 'horizon' => 6))['horizon'] === 6,
+	'A14: booking may open for up to one hundred eighty days or six calendar months');
+foreach (array(array('horizon' => 181), array('horizon_unit' => 'months', 'horizon' => 7),
+	array('horizon_unit' => 'months', 'horizon' => 0), array('horizon_unit' => 'weeks'),
+	array('horizon_unit' => array()), array('horizon_unit' => true)) as $invalidHorizon) {
+	bookingThrows(static function () use ($invalidHorizon) {
+		BookingAvailability::validateConfig($invalidHorizon);
+	}, 'A14: calendar-month and day limits remain server-validated');
+}
+foreach (array(
+	array('2026-08-31 10:15:30', 6, '2027-02-28 10:15:30'),
+	array('2027-08-31 10:15:30', 6, '2028-02-29 10:15:30'),
+	array('2026-01-31 10:15:30', 1, '2026-02-28 10:15:30'),
+	array('2026-10-31 10:15:30', 1, '2026-11-30 10:15:30'),
+	array('2026-03-15 10:15:30', 1, '2026-04-15 10:15:30')
+) as $monthCase) {
+	$calendarConfig = array('timezone' => 'Europe/Zurich', 'horizon_unit' => 'months', 'horizon' => $monthCase[1]);
+	$calendarEnd = BookingAvailability::horizonEnd($calendarConfig, bookingStamp($monthCase[0]));
+	bookingCheck($calendarEnd === bookingStamp($monthCase[2]),
+		'A14: calendar-month deadlines clamp to the last valid day while preserving local time and seconds across DST');
+}
+$calendarConfig = array('timezone' => 'Europe/Zurich', 'horizon_unit' => 'months', 'horizon' => 6,
+	'notice' => 0, 'weekly' => array_fill(1, 7, array(array('09:00', '12:00'))));
+$calendarNow = bookingStamp('2026-08-31 10:00');
+$calendarLastDay = bookingStamp('2027-02-28 00:00');
+bookingCheck(bookingHours(BookingAvailability::slots($calendarConfig, array(), $calendarLastDay,
+	bookingStamp('2027-03-01 00:00'), $calendarNow)) === array('09:00', '09:30'),
+	'A14: sixth-month slots end exactly at the local deadline and never cross it');
+bookingCheck(BookingAvailability::slots($calendarConfig, array(), bookingStamp('2027-03-01 00:00'),
+	bookingStamp('2027-03-02 00:00'), $calendarNow) === array(), 'A14: dates after six calendar months remain closed');
+fwrite(STDOUT, "[OK] A14 legacy day horizons, six calendar months, month-end clamping, leap years and local DST deadlines\n");
 
 if (getenv('CDAV_BOOKING_BENCHMARK') === '1') {
 	$load = array();

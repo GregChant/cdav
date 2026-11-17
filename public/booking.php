@@ -55,8 +55,10 @@ $json = $bookingWantsJson;
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $bookingProfile = null;
 $bookingSlots = array();
+$bookingCalendar = null;
 $bookingKey = GETPOST('key', 'alphanohtml');
 $bookingDate = GETPOST('date', 'alphanohtml');
+$bookingMonth = GETPOST('month', 'alphanohtml');
 $bookingRequest = '';
 $bookingResult = null;
 $bookingMessage = '';
@@ -82,7 +84,7 @@ try {
 	if (!is_string($bookingKey)) throw new BookingException('CDavBookingNotFound', 404);
 	$allowed = $method === 'POST'
 		? array('key', 'date', 'lang', 'format', 'token', 'request', 'start', 'name', 'email', 'phone', 'website')
-		: array('key', 'date', 'lang', 'format');
+		: array('key', 'date', 'month', 'lang', 'format');
 	foreach (array_keys(($_GET ?? array()) + ($_POST ?? array())) as $field) {
 		if (!in_array($field, $allowed, true)) throw new BookingException('CDavBookingInvalid', 422);
 	}
@@ -118,13 +120,24 @@ try {
 		$bookingMessage = $langs->transnoentitiesnoconv('CDavBookingConfirmed');
 	} else {
 		$timezone = new DateTimeZone($bookingProfile['config']['timezone']);
-		if ($bookingDate === '') $bookingDate = (new DateTimeImmutable('now', $timezone))->format('Y-m-d');
-		if (!is_string($bookingDate) || !preg_match('/^\d{4}-\d{2}-\d{2}$/D', $bookingDate)) {
+		if (!is_string($bookingDate) || !is_string($bookingMonth)) {
 			throw new BookingException('CDavBookingInvalid', 422);
 		}
-		$day = DateTimeImmutable::createFromFormat('!Y-m-d', $bookingDate, $timezone);
-		if (!$day || $day->format('Y-m-d') !== $bookingDate) throw new BookingException('CDavBookingInvalid', 422);
-		$bookingSlots = $service->slots($bookingProfile, $day->getTimestamp(), $day->modify('+1 day')->getTimestamp());
+		if (!$json || $bookingMonth !== '') {
+			if ($bookingMonth === '') {
+				$bookingMonth = $bookingDate !== '' ? substr($bookingDate, 0, 7) : (new DateTimeImmutable('now', $timezone))->format('Y-m');
+			}
+			$availability = $service->calendar($bookingProfile, $bookingMonth, $bookingDate);
+			$bookingDate = $availability['date'];
+			$bookingSlots = $availability['slots'];
+			$bookingCalendar = $availability['calendar'];
+		} else {
+			if ($bookingDate === '') $bookingDate = (new DateTimeImmutable('now', $timezone))->format('Y-m-d');
+			if (!preg_match('/^\d{4}-\d{2}-\d{2}$/D', $bookingDate)) throw new BookingException('CDavBookingInvalid', 422);
+			$day = DateTimeImmutable::createFromFormat('!Y-m-d', $bookingDate, $timezone);
+			if (!$day || $day->format('Y-m-d') !== $bookingDate) throw new BookingException('CDavBookingInvalid', 422);
+			$bookingSlots = $service->slots($bookingProfile, $day->getTimestamp(), $day->modify('+1 day')->getTimestamp());
+		}
 		$bookingRequest = $service->requestTicket($bookingProfile);
 	}
 } catch (BookingException $e) {
@@ -149,7 +162,9 @@ if (!$json && $method === 'POST' && $bookingError !== '' && $bookingProfile !== 
 		$retryDay = is_string($bookingDate) ? DateTimeImmutable::createFromFormat('!Y-m-d', $bookingDate, $zone) : false;
 		if (!$retryDay || $retryDay->format('Y-m-d') !== $bookingDate) $retryDay = new DateTimeImmutable('today', $zone);
 		$bookingDate = $retryDay->format('Y-m-d');
-		$bookingSlots = $service->slots($bookingProfile, $retryDay->getTimestamp(), $retryDay->modify('+1 day')->getTimestamp());
+		$availability = $service->calendar($bookingProfile, $retryDay->format('Y-m'), $bookingDate);
+		$bookingSlots = $availability['slots'];
+		$bookingCalendar = $availability['calendar'];
 		$bookingRequest = $service->requestTicket($bookingProfile);
 	} catch (Throwable $e) {
 		$bookingSlots = array();
@@ -163,6 +178,7 @@ if ($json) {
 		'timezone' => $bookingProfile['config']['timezone'], 'duration' => $bookingProfile['config']['duration'],
 		'date' => $bookingDate, 'slots' => $bookingSlots, 'request' => $bookingRequest, 'token' => newToken(),
 	));
+	if ($bookingError === '' && $bookingResult === null && $bookingCalendar !== null) $response['calendar'] = $bookingCalendar;
 	echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 } else {
 	header('Content-Type: text/html; charset=utf-8');

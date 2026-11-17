@@ -277,7 +277,7 @@ class BookingService
 		global $langs;
 		$now = $now === null ? time() : (int) $now;
 		if ($end <= $start || $end - $start > 32 * 86400 || $start < $now - 86400
-			|| $end > $now + ($profile['config']['horizon'] + 2) * 86400) {
+			|| $end > BookingAvailability::horizonEnd($profile['config'], $now) + 2 * 86400) {
 			throw new BookingException('CDavBookingInvalid', 422);
 		}
 		$owner = $this->owner($profile['owner_id']);
@@ -287,6 +287,60 @@ class BookingService
 		// nearby native occupations whose expanded interval reaches this day.
 		$busy = $reader->busy($start - $padding, $end + $padding, $profile['config']['timezone']);
 		return BookingAvailability::slots($profile['config'], $busy, $start, $end, $now);
+	}
+
+	/**
+	 * Build a public month from one fresh native Agenda read.
+	 *
+	 * @param array $profile Validated public profile
+	 * @param string $month Month in the owner's timezone, YYYY-MM
+	 * @param string $date Selected day, or empty to choose the first available day
+	 * @param int|null $now Test clock, otherwise system time
+	 * @return array Selected date, its slots and anonymous daily availability
+	 */
+	public function calendar(array $profile, string $month, string $date = '', ?int $now = null): array
+	{
+		$now = $now ?? time();
+		$zone = new \DateTimeZone($profile['config']['timezone']);
+		$today = (new \DateTimeImmutable('@'.$now))->setTimezone($zone);
+		if (!preg_match('/^\d{4}-\d{2}$/D', $month)) throw new BookingException('CDavBookingInvalid', 422);
+		$first = \DateTimeImmutable::createFromFormat('!Y-m', $month, $zone);
+		$last = (new \DateTimeImmutable('@'.BookingAvailability::horizonEnd($profile['config'], $now)))->setTimezone($zone);
+		if (!$first || $first->format('Y-m') !== $month
+			|| $month < $today->format('Y-m') || $month > $last->format('Y-m')) {
+			throw new BookingException('CDavBookingInvalid', 422);
+		}
+		if ($date !== '') {
+			if (!preg_match('/^\d{4}-\d{2}-\d{2}$/D', $date)) throw new BookingException('CDavBookingInvalid', 422);
+			$selected = \DateTimeImmutable::createFromFormat('!Y-m-d', $date, $zone);
+			if (!$selected || $selected->format('Y-m-d') !== $date
+				|| $selected->format('Y-m') !== $month) throw new BookingException('CDavBookingInvalid', 422);
+		}
+		$next = $first->modify('+1 month');
+		$previous = $first->modify('-1 month');
+		$days = array();
+		$byDay = array();
+		for ($day = $first; $day < $next; $day = $day->modify('+1 day')) $days[$day->format('Y-m-d')] = 0;
+		$from = max($first->getTimestamp(), $now);
+		$until = min($next->getTimestamp(), $last->getTimestamp());
+		$slots = $until > $from ? $this->slots($profile, $from, $until, $now) : array();
+		foreach ($slots as $slot) {
+			$dayKey = (new \DateTimeImmutable('@'.$slot['start']))->setTimezone($zone)->format('Y-m-d');
+			$days[$dayKey]++;
+			$byDay[$dayKey][] = $slot;
+		}
+		if ($date === '') {
+			$date = $month === $today->format('Y-m') ? $today->format('Y-m-d') : $first->format('Y-m-d');
+			foreach ($days as $dayKey => $count) {
+				if ($count > 0) { $date = $dayKey; break; }
+			}
+		}
+		return array('date' => $date, 'slots' => $byDay[$date] ?? array(), 'calendar' => array(
+			'month' => $month,
+			'previous' => $previous->format('Y-m') >= $today->format('Y-m') ? $previous->format('Y-m') : null,
+			'next' => $next->format('Y-m') <= $last->format('Y-m') ? $next->format('Y-m') : null,
+			'days' => $days,
+		));
 	}
 
 	/**

@@ -56,7 +56,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 			$conf->global->CDAV_BOOKING_ENABLED = $bookingEnabled;
 			setEventMessages($langs->trans('CDavBookingSaved'), null, 'mesgs');
 		} elseif ($action === 'save_profile') {
-			$bookingPostedConfig = array('timezone' => GETPOST('timezone', 'alphanohtml'), 'weekly' => array());
+			$bookingPostedConfig = array('timezone' => GETPOST('timezone', 'alphanohtml'),
+				'horizon_unit' => GETPOSTISSET('horizon_unit') ? GETPOST('horizon_unit', 'aZ09') : 'days', 'weekly' => array());
 			foreach (array('duration', 'step', 'buffer_before', 'buffer_after', 'notice', 'horizon') as $bookingSetting) {
 				$bookingPostedConfig[$bookingSetting] = GETPOSTINT($bookingSetting);
 			}
@@ -103,13 +104,22 @@ for ($bookingDay = 1; $bookingDay <= 7; $bookingDay++) {
 $bookingConfig = $bookingPostedConfig ?? ($bookingProfile['config'] ?? array(
 	'timezone' => $_SESSION['dol_tz_string'] ?? getDolGlobalString('MAIN_DOLIBARR_USER_TIMEZONE', 'UTC'),
 	'duration' => 30, 'step' => 30, 'buffer_before' => 0, 'buffer_after' => 0,
-	'notice' => 1440, 'horizon' => 60, 'weekly' => $bookingDefaultWeekly,
+	'notice' => 1440, 'horizon' => 60, 'horizon_unit' => 'days', 'weekly' => $bookingDefaultWeekly,
 ));
 $bookingTimezoneOptions = array();
 foreach (DateTimeZone::listIdentifiers() as $bookingTimezoneName) {
 	$bookingTimezoneOptions[$bookingTimezoneName] = $bookingTimezoneName;
 }
 $bookingDays = array(1 => 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday');
+
+try {
+	if (!\Dolibarr\CDav\BookingAvailability::hasWeeklySlot($bookingConfig)) {
+		$bookingRequiredMinutes = (int) $bookingConfig['duration'] + (int) $bookingConfig['buffer_before'] + (int) $bookingConfig['buffer_after'];
+		setEventMessages($langs->trans('CDavBookingWeeklyTooShort', $bookingRequiredMinutes), null, 'warnings');
+	}
+} catch (InvalidArgumentException $bookingException) {
+	// An invalid submitted profile already has its native error message above.
+}
 
 llxHeader('', $langs->trans('CDavBooking'));
 print load_fiche_titre($langs->trans('CDavBooking'), '', 'calendar');
@@ -146,14 +156,23 @@ $bookingNumericFields = array(
 	'buffer_before' => array('CDavBookingBufferBefore', 0, 240, 'CDavBookingMinutes'),
 	'buffer_after' => array('CDavBookingBufferAfter', 0, 240, 'CDavBookingMinutes'),
 	'notice' => array('CDavBookingNotice', 0, 43200, 'CDavBookingMinutes'),
-	'horizon' => array('CDavBookingHorizon', 1, 90, 'CDavBookingDays'),
+	'horizon' => array('CDavBookingHorizon', 1, 180, 'CDavBookingDays'),
 );
 foreach ($bookingNumericFields as $bookingField => $bookingFieldSpec) {
 	print '<tr><td><label for="'.$bookingField.'">'.dol_escape_htmltag($langs->trans($bookingFieldSpec[0])).'</label></td><td>';
 	print '<input class="maxwidth100" type="number" required name="'.$bookingField.'" id="'.$bookingField.'" min="'.$bookingFieldSpec[1].'" max="'.$bookingFieldSpec[2].'" value="'.((int) $bookingConfig[$bookingField]).'"> ';
-	print dol_escape_htmltag($langs->trans($bookingFieldSpec[3])).'</td></tr>';
+	if ($bookingField === 'horizon') {
+		print '<label for="horizon_unit">'.dol_escape_htmltag($langs->trans('CDavBookingHorizonUnit')).'</label> ';
+		print Form::selectarray('horizon_unit', array('days' => $langs->trans('CDavBookingDays'), 'months' => $langs->trans('CDavBookingMonths')),
+			$bookingConfig['horizon_unit'] ?? 'days', 0, 0, 0, 'required');
+		print '<br><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingHorizonHelp')).'</span>';
+	} else {
+		print dol_escape_htmltag($langs->trans($bookingFieldSpec[3]));
+	}
+	print '</td></tr>';
 }
 print '</table></div>';
+print '<p class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingTimingHelp')).'</p>';
 print '<h2>'.dol_escape_htmltag($langs->trans('CDavBookingWeekly')).'</h2>';
 print '<p>'.dol_escape_htmltag($langs->trans('CDavBookingWeeklyHelp')).'</p>';
 print '<div class="div-table-responsive"><table class="noborder centpercent"><thead><tr class="liste_titre">';

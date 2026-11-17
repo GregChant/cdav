@@ -16,8 +16,37 @@ foreach (array('name', 'email', 'phone') as $bookingValueName) {
 	}
 }
 $bookingToday = (new DateTimeImmutable('now', $bookingTimezone))->format('Y-m-d');
-$bookingLastDate = (new DateTimeImmutable('today', $bookingTimezone))
-	->modify('+'.((int) ($bookingConfig['horizon'] ?? 60)).' days')->format('Y-m-d');
+if (!isset($bookingLastDate)) {
+	require_once dirname(__DIR__).'/class/CDavBookingAvailability.php';
+	$bookingLastDate = (new DateTimeImmutable('@'.\Dolibarr\CDav\BookingAvailability::horizonEnd($bookingConfig, time())))
+		->setTimezone($bookingTimezone)->format('Y-m-d');
+}
+$bookingCalendarMonth = null;
+$bookingCalendarDays = array();
+$bookingCalendarPrevious = null;
+$bookingCalendarNext = null;
+if (is_array($bookingCalendar ?? null) && is_string($bookingCalendar['month'] ?? null)
+	&& preg_match('/^[0-9]{4}-[0-9]{2}$/D', $bookingCalendar['month'])) {
+	$bookingCalendarMonth = DateTimeImmutable::createFromFormat('!Y-m-d', $bookingCalendar['month'].'-01', $bookingTimezone);
+	if (!$bookingCalendarMonth || $bookingCalendarMonth->format('Y-m') !== $bookingCalendar['month']) {
+		$bookingCalendarMonth = null;
+	} else {
+		$bookingCalendarLength = (int) $bookingCalendarMonth->format('t');
+		$bookingCalendarSourceDays = is_array($bookingCalendar['days'] ?? null) ? $bookingCalendar['days'] : array();
+		for ($bookingCalendarIndex = 0; $bookingCalendarIndex < $bookingCalendarLength; $bookingCalendarIndex++) {
+			$bookingCalendarDay = $bookingCalendarMonth->modify('+'.$bookingCalendarIndex.' days')->format('Y-m-d');
+			$bookingCalendarCount = $bookingCalendarSourceDays[$bookingCalendarDay] ?? 0;
+			$bookingCalendarDays[$bookingCalendarDay] = is_int($bookingCalendarCount) && $bookingCalendarCount > 0 && $bookingCalendarCount <= 10000 ? $bookingCalendarCount : 0;
+		}
+		if (($bookingCalendar['previous'] ?? null) === $bookingCalendarMonth->modify('-1 month')->format('Y-m')) {
+			$bookingCalendarPrevious = $bookingCalendar['previous'];
+		}
+		if (($bookingCalendar['next'] ?? null) === $bookingCalendarMonth->modify('+1 month')->format('Y-m')) {
+			$bookingCalendarNext = $bookingCalendar['next'];
+		}
+	}
+}
+$bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday');
 ?>
 <!doctype html>
 <html lang="<?php print dol_escape_htmltag($bookingLanguage); ?>">
@@ -49,6 +78,26 @@ $bookingLastDate = (new DateTimeImmutable('today', $bookingTimezone))
 		.success { background: #eef8ef; border-color: #347140; }
 		.muted { color: #455566; font-size: .94rem; }
 		.language { display: flex; gap: 1rem; justify-content: flex-end; }
+		.calendar { margin: 1.5rem 0; }
+		.calendar-navigation { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: .4rem; }
+		.calendar-navigation a, .calendar-navigation > span { padding: .5rem .25rem; }
+		.calendar-navigation > :last-child { text-align: right; }
+		.calendar-month { font-weight: 650; text-align: center; }
+		.calendar-grid { width: 100%; table-layout: fixed; border-spacing: .25rem; }
+		.calendar-grid th, .calendar-grid td { text-align: center; padding: 0; }
+		.calendar-grid th { font-size: .9rem; font-weight: 600; }
+		.calendar-day { display: flex; flex-direction: column; justify-content: center; align-items: center; width: 100%; min-height: 3.4rem; margin: 0; padding: .2rem; border: 1px solid #c8d1da; border-radius: .3rem; font: inherit; line-height: 1.2; }
+		a.calendar-day { color: #174a78; background: #eef7ff; font-weight: 650; text-decoration: underline; text-underline-offset: .15rem; }
+		a.calendar-day:hover { background: #dceeff; }
+		.calendar-day.unavailable { color: #657180; background: #f3f5f7; cursor: default; }
+		.calendar-day.selected { border: 3px solid #174a78; }
+		.calendar-day[aria-current=date] { outline: 1px dashed #455566; outline-offset: 2px; }
+		.calendar-count { display: block; font-size: .72rem; margin-top: .25rem; }
+		.calendar-legend { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; font-size: .9rem; }
+		.calendar-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+		.calendar-symbol { display: inline-block; width: 1.25rem; height: 1.25rem; text-align: center; border: 1px solid #c8d1da; border-radius: .2rem; background: #eef7ff; }
+		.calendar-symbol.unavailable { background: #f3f5f7; }
+		.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 		dl { display: grid; grid-template-columns: auto 1fr; gap: .5rem 1rem; }
 		dt { font-weight: 650; }
 		dd { margin: 0; overflow-wrap: anywhere; }
@@ -64,8 +113,8 @@ $bookingLastDate = (new DateTimeImmutable('today', $bookingTimezone))
 <body>
 <main>
 	<nav class="language" aria-label="<?php print dol_escape_htmltag($langs->trans('Language')); ?>">
-		<a lang="fr" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=fr&amp;date=<?php print rawurlencode($bookingDate); ?>">Français</a>
-		<a lang="en" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=en&amp;date=<?php print rawurlencode($bookingDate); ?>">English</a>
+		<a lang="fr" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=fr&amp;date=<?php print rawurlencode($bookingDate); ?><?php if ($bookingCalendarMonth) print '&amp;month='.$bookingCalendarMonth->format('Y-m'); ?>">Français</a>
+		<a lang="en" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=en&amp;date=<?php print rawurlencode($bookingDate); ?><?php if ($bookingCalendarMonth) print '&amp;month='.$bookingCalendarMonth->format('Y-m'); ?>">English</a>
 	</nav>
 	<h1><?php print dol_escape_htmltag($langs->trans('CDavBookingTitle')); ?></h1>
 	<?php if (!empty($bookingError)) { ?>
@@ -90,6 +139,58 @@ $bookingLastDate = (new DateTimeImmutable('today', $bookingTimezone))
 	<?php } elseif (!empty($bookingProfile)) { ?>
 		<p><?php print dol_escape_htmltag($langs->trans('CDavBookingDuration')); ?> : <?php print (int) $bookingConfig['duration']; ?> <?php print dol_escape_htmltag($langs->trans('CDavBookingMinutes')); ?>.<br>
 		<?php print dol_escape_htmltag($langs->trans('CDavBookingTimezone')); ?> : <strong><?php print dol_escape_htmltag($bookingTimezone->getName()); ?></strong>.</p>
+		<?php if ($bookingCalendarMonth) { ?>
+		<section class="calendar" aria-labelledby="booking-calendar-heading" aria-describedby="booking-calendar-help">
+			<h2 id="booking-calendar-heading"><?php print dol_escape_htmltag($langs->trans('CDavBookingCalendar')); ?></h2>
+			<nav class="calendar-navigation" aria-label="<?php print dol_escape_htmltag($langs->trans('CDavBookingCalendar')); ?>">
+				<?php if ($bookingCalendarPrevious !== null) { ?>
+				<a rel="prev" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=<?php print rawurlencode($bookingLanguage); ?>&amp;month=<?php print $bookingCalendarPrevious; ?>">← <?php print dol_escape_htmltag($langs->trans('CDavBookingPreviousMonth')); ?></a>
+				<?php } else { ?><span aria-disabled="true" class="muted"><?php print dol_escape_htmltag($langs->trans('CDavBookingPreviousMonth')); ?></span><?php } ?>
+				<span class="calendar-month"><?php print dol_escape_htmltag($langs->trans('Month'.$bookingCalendarMonth->format('m')).' '.$bookingCalendarMonth->format('Y')); ?></span>
+				<?php if ($bookingCalendarNext !== null) { ?>
+				<a rel="next" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=<?php print rawurlencode($bookingLanguage); ?>&amp;month=<?php print $bookingCalendarNext; ?>"><?php print dol_escape_htmltag($langs->trans('CDavBookingNextMonth')); ?> →</a>
+				<?php } else { ?><span aria-disabled="true" class="muted"><?php print dol_escape_htmltag($langs->trans('CDavBookingNextMonth')); ?></span><?php } ?>
+			</nav>
+			<p id="booking-calendar-help" class="muted"><?php print dol_escape_htmltag($langs->trans('CDavBookingCalendarHelp')); ?></p>
+			<table class="calendar-grid">
+				<caption class="sr-only"><?php print dol_escape_htmltag($langs->trans('Month'.$bookingCalendarMonth->format('m')).' '.$bookingCalendarMonth->format('Y')); ?></caption>
+				<thead><tr><?php foreach ($bookingWeekdays as $bookingWeekday) { ?><th scope="col"><abbr title="<?php print dol_escape_htmltag($langs->trans($bookingWeekday)); ?>"><?php print dol_escape_htmltag($langs->trans($bookingWeekday.'Min')); ?></abbr></th><?php } ?></tr></thead>
+				<tbody><tr>
+				<?php $bookingCalendarColumn = (int) $bookingCalendarMonth->format('N') - 1;
+				for ($bookingCalendarIndex = 0; $bookingCalendarIndex < $bookingCalendarColumn; $bookingCalendarIndex++) print '<td></td>';
+				foreach ($bookingCalendarDays as $bookingCalendarDay => $bookingCalendarCount) {
+					$bookingCalendarDayDate = new DateTimeImmutable($bookingCalendarDay, $bookingTimezone);
+					$bookingCalendarDayLabel = $bookingCalendarDayDate->format('j').' '.$langs->trans('Month'.$bookingCalendarDayDate->format('m')).' '.$bookingCalendarDayDate->format('Y');
+					$bookingCalendarDayLabel .= ' : '.($bookingCalendarCount > 0 ? $langs->trans('CDavBookingSlotCount', $bookingCalendarCount) : $langs->trans('CDavBookingUnavailableDay'));
+					if ($bookingCalendarDay === $bookingDate) $bookingCalendarDayLabel .= ' ; '.$langs->trans('CDavBookingSelectedDay');
+					?>
+					<td>
+						<?php if ($bookingCalendarCount > 0) { ?>
+						<a class="calendar-day<?php if ($bookingCalendarDay === $bookingDate) print ' selected'; ?>" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=<?php print rawurlencode($bookingLanguage); ?>&amp;month=<?php print $bookingCalendarMonth->format('Y-m'); ?>&amp;date=<?php print $bookingCalendarDay; ?>#booking-times" aria-label="<?php print dol_escape_htmltag($bookingCalendarDayLabel); ?>"<?php if ($bookingCalendarDay === $bookingToday) print ' aria-current="date"'; ?>>
+							<span><?php print (int) $bookingCalendarDayDate->format('j'); ?></span><small class="calendar-count" aria-hidden="true">✓ <?php print $bookingCalendarCount; ?></small>
+						</a>
+						<?php } else { ?>
+						<button type="button" disabled class="calendar-day unavailable<?php if ($bookingCalendarDay === $bookingDate) print ' selected'; ?>" aria-label="<?php print dol_escape_htmltag($bookingCalendarDayLabel); ?>"<?php if ($bookingCalendarDay === $bookingToday) print ' aria-current="date"'; ?>><?php print (int) $bookingCalendarDayDate->format('j'); ?><small class="calendar-count" aria-hidden="true">—</small></button>
+						<?php } ?>
+					</td>
+					<?php if (++$bookingCalendarColumn === 7) {
+						print '</tr>';
+						if ($bookingCalendarDay !== array_key_last($bookingCalendarDays)) print '<tr>';
+						$bookingCalendarColumn = 0;
+					}
+				}
+				if ($bookingCalendarColumn > 0) {
+					for (; $bookingCalendarColumn < 7; $bookingCalendarColumn++) print '<td></td>';
+					print '</tr>';
+				}
+				?>
+				</tbody>
+			</table>
+			<div class="calendar-legend"><span><span class="calendar-symbol" aria-hidden="true">✓</span><?php print dol_escape_htmltag($langs->trans('CDavBookingAvailableDay')); ?></span><span><span class="calendar-symbol unavailable" aria-hidden="true">—</span><?php print dol_escape_htmltag($langs->trans('CDavBookingUnavailableDay')); ?></span></div>
+			<?php if ($bookingDate !== '') { ?><p class="muted"><?php print dol_escape_htmltag($langs->trans('CDavBookingSelectedDay').' : '.$bookingDate); ?></p><?php } ?>
+			<?php if (array_sum($bookingCalendarDays) === 0) { ?><p class="notice"><?php print dol_escape_htmltag($langs->trans('CDavBookingNoMonthSlots')); ?></p><?php } ?>
+		</section>
+		<?php } ?>
 		<form method="get">
 			<input type="hidden" name="key" value="<?php print dol_escape_htmltag($bookingKey); ?>">
 			<input type="hidden" name="lang" value="<?php print dol_escape_htmltag($bookingLanguage); ?>">
@@ -104,7 +205,7 @@ $bookingLastDate = (new DateTimeImmutable('today', $bookingTimezone))
 			<input type="hidden" name="request" value="<?php print dol_escape_htmltag($bookingRequest); ?>">
 			<input type="hidden" name="lang" value="<?php print dol_escape_htmltag($bookingLanguage); ?>">
 			<input type="hidden" name="date" value="<?php print dol_escape_htmltag($bookingDate); ?>">
-			<fieldset>
+			<fieldset id="booking-times">
 				<legend><?php print dol_escape_htmltag($langs->trans('CDavBookingSlot')); ?></legend>
 				<div class="slots">
 				<?php foreach ($bookingSlots as $bookingIndex => $bookingSlot) { ?>

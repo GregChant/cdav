@@ -444,6 +444,33 @@ try {
 	$html = bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'date' => $date)));
 	bookingStatus($html, array(200), 'Public HTML form');
 	bookingAssert(strpos($html['body'], $sentinel) === false, 'Private data leaked in public HTML');
+	$monthly = bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'date' => $date,
+		'month' => $day->format('Y-m'), 'format' => 'json')));
+	bookingStatus($monthly, array(200), 'Public monthly availability');
+	$monthData = bookingJson($monthly);
+	bookingAssert(count($monthData['calendar']['days']) === (int) $day->format('t')
+		&& $monthData['calendar']['days'][$date] === count($form['data']['slots'])
+		&& $monthData['slots'] === $form['data']['slots'], 'Monthly availability must match actual native day slots');
+	bookingAssert(strpos(json_encode($monthData), $sentinel) === false
+		&& array_keys($monthData['calendar']) === array('month', 'previous', 'next', 'days'), 'Monthly JSON must expose anonymous availability only');
+	$sixMonthConfig = array_replace($config, array('horizon' => 6, 'horizon_unit' => 'months'));
+	$service->saveProfile($owner->id, $sixMonthConfig, true);
+	$farMonth = $day->modify('first day of this month')->modify('+5 months')->format('Y-m');
+	$farResponse = bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'month' => $farMonth, 'format' => 'json')));
+	bookingStatus($farResponse, array(200), 'Availability five months ahead');
+	$farData = bookingJson($farResponse);
+	bookingAssert(count($farData['slots']) > 0, 'A six-month profile must offer real slots beyond the old ninety-day limit');
+	$deadline = (new DateTimeImmutable('@'.\Dolibarr\CDav\BookingAvailability::horizonEnd($sixMonthConfig, time())))->setTimezone($zone);
+	$lastResponse = bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'month' => $deadline->format('Y-m'), 'format' => 'json')));
+	bookingStatus($lastResponse, array(200), 'Last bookable month');
+	bookingAssert(bookingJson($lastResponse)['calendar']['next'] === null, 'The public calendar must stop at the six-month deadline');
+	$outside = $deadline->modify('first day of next month')->format('Y-m');
+	bookingStatus(bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'month' => $outside, 'format' => 'json'))), array(422), 'Month beyond configured horizon');
+	foreach (array('2026-13', '2026-1', "2026-11\0") as $invalidMonth) {
+		bookingStatus(bookingHttp($bookingUrl.'?'.http_build_query(array('key' => $key, 'month' => $invalidMonth, 'format' => 'json'))), array(403, 422), 'Malformed monthly request');
+	}
+	$service->saveProfile($owner->id, $config, true);
+	bookingOk('monthly native availability, anonymous metadata and six-month horizon');
 	foreach (array('cache-control' => 'no-store', 'referrer-policy' => 'no-referrer', 'x-content-type-options' => 'nosniff') as $header => $value) {
 		bookingAssert(strpos(strtolower($html['headers'][$header] ?? ''), $value) !== false, 'Missing public privacy header '.$header);
 	}

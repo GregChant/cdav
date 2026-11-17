@@ -29,10 +29,14 @@ class BookingAvailability
 		if (!is_string($timezone) || !in_array($timezone, DateTimeZone::listIdentifiers(DateTimeZone::ALL_WITH_BC), true)) {
 			throw new \InvalidArgumentException('Invalid booking timezone');
 		}
-		$result = array('timezone' => $timezone);
+		$horizonUnit = $config['horizon_unit'] ?? 'days';
+		if (!in_array($horizonUnit, array('days', 'months'), true)) {
+			throw new \InvalidArgumentException('Invalid booking horizon unit');
+		}
+		$result = array('timezone' => $timezone, 'horizon_unit' => $horizonUnit);
 		foreach (array('duration' => array(30, 5, 480), 'step' => array(30, 5, 240),
 			'buffer_before' => array(0, 0, 240), 'buffer_after' => array(0, 0, 240),
-			'notice' => array(1440, 0, 43200), 'horizon' => array(60, 1, 90)) as $key => $rule) {
+			'notice' => array(1440, 0, 43200), 'horizon' => array($horizonUnit === 'months' ? 6 : 60, 1, $horizonUnit === 'months' ? 6 : 180)) as $key => $rule) {
 			$value = $config[$key] ?? $rule[0];
 			if ((!is_int($value) && (!is_string($value) || !preg_match('/^[0-9]{1,6}$/D', $value)))
 				|| (int) $value < $rule[1] || (int) $value > $rule[2]) {
@@ -76,6 +80,44 @@ class BookingAvailability
 			}
 		}
 		return $result;
+	}
+
+	/**
+	 * Check whether weekly hours can fit any start, before calendar or notice rules.
+	 *
+	 * @param array $config Profile settings
+	 * @return bool Whether a complete reservation fits the configured start grid
+	 */
+	public static function hasWeeklySlot(array $config): bool
+	{
+		$config = self::validateConfig($config);
+		$firstStart = intdiv($config['buffer_before'] + $config['step'] - 1, $config['step']) * $config['step'];
+		$required = $firstStart + $config['duration'] + $config['buffer_after'];
+		foreach ($config['weekly'] as $ranges) {
+			foreach ($ranges as $range) {
+				if (self::timeMinutes($range[1], true) - self::timeMinutes($range[0], false) >= $required) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Calculate the local booking deadline, clamping calendar months at month end.
+	 *
+	 * @param array $config Profile settings
+	 * @param int $now Current Unix timestamp, supplied explicitly for deterministic tests
+	 * @return int Exclusive booking deadline as a Unix timestamp
+	 */
+	public static function horizonEnd(array $config, int $now): int
+	{
+		$config = self::validateConfig($config);
+		$reference = (new DateTimeImmutable('@'.$now))->setTimezone(new DateTimeZone($config['timezone']));
+		if ($config['horizon_unit'] === 'days') return $reference->modify('+'.$config['horizon'].' days')->getTimestamp();
+		$target = $reference->setDate((int) $reference->format('Y'), (int) $reference->format('m'), 1)
+			->modify('+'.$config['horizon'].' months');
+		return $target->setDate((int) $target->format('Y'), (int) $target->format('m'),
+			min((int) $reference->format('d'), (int) $target->format('t')))
+			->setTime((int) $reference->format('H'), (int) $reference->format('i'), (int) $reference->format('s'))->getTimestamp();
 	}
 
 	/**
@@ -192,7 +234,7 @@ class BookingAvailability
 		$config = self::validateConfig($config);
 		$zone = new DateTimeZone($config['timezone']);
 		$cutoff = $now + $config['notice'] * 60;
-		$horizon = (new DateTimeImmutable('@'.$now))->setTimezone($zone)->modify('+'.$config['horizon'].' days')->getTimestamp();
+		$horizon = self::horizonEnd($config, $now);
 		$start = max($start, $cutoff);
 		$end = min($end, $horizon);
 		if ($start >= $end) return array();
