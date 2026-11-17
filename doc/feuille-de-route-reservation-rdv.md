@@ -486,8 +486,11 @@ Texte de référence pour l'objectif :
   les coordonnées professionnelles natives en respectant les masquages publics.
 - [x] Ajouter tests métier, rendu et HTTP réels ; exécuter les 48 parcours
   navigateur sur la matrice 23/24 × PHP 8.4/8.5 et contrôler le style natif.
-- [ ] Qualifier le ZIP 6.1 installé et mis à niveau, publier les commits et
-  retirer les instances jetables après conservation des preuves.
+- [x] Qualifier le ZIP 6.1 installé et mis à niveau : profils et liens conservés,
+  36 exécutions de suites rapides, douze suites HTTP, 48 parcours navigateur et
+  quatre validations DAV après correction du nettoyage des tiers de test.
+- [x] Publier les commits et retirer les instances jetables après conservation
+  des preuves.
 
 ## Références locales
 

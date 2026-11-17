@@ -353,6 +353,41 @@ Le cœur Dolibarr et le comportement de suppression de l'application restent
 inchangés. La preuve et les traces sans arguments sont dans
 `dist/qa/package-6.1-native-cascade-diagnostic.json`.
 
+Le candidat corrigé `e06b9ed` contient 92 fichiers et 109 entrées ; son SHA-256
+est `b9a2a8c6d84a8e590a14725af8ba1c7e7895be6fbe146a404680571cec7489a4`.
+L'installation native et la mise à niveau passent sur les quatre combinaisons.
+Les deux profils témoins au format 6.0 conservent leur configuration, leur état
+et leur clé ; les anciens liens répondent `200` après réactivation. Les neuf
+suites rapides, le lint et PHPCS natif ont été exécutés depuis l'extrait, et les
+14 scripts PHP de tests et d'aide renvoient `404` par HTTP.
+
+Les douze suites HTTP (DAV, réservation simple et réservation groupée sur chaque
+combinaison) et les 48 parcours navigateur passent depuis le premier extrait.
+Après le correctif du seul nettoyage DAV, les quatre suites DAV sont relancées
+depuis le nouveau ZIP et passent en parallèle. La comparaison des archives prouve
+que le code de production, les schémas, langues et parcours navigateur sont
+identiques entre ces deux candidats. Chaque base retrouve son administrateur
+initial, aucun événement, aucune ressource, aucun profil, reçu ou mapping, et
+aucun nouvel orphelin. Un passage supplémentaire a aussi prouvé qu'un orphelin
+antérieur est préservé, sans purge globale.
+
+Le rapport complet est `dist/qa/package-6.1-validation.json`, avec ses commandes
+dans `dist/qa/package-6.1-validation/README.md`. Les logs de l'instance PHP
+intégrée signalent quelques avertissements natifs de `main.inc.php` sur une
+clé `QUERY_STRING` absente dans des probes sans requête ; aucun diagnostic PHP
+du module extrait n'est relevé. Le cœur partagé n'a pas été modifié.
+
+L'archive finale 6.1 est reconstruite après clôture documentaire. Ses fichiers
+hors Markdown restent identiques au candidat corrigé exécuté. Le manifeste
+`dist/qa/booking-release-manifest.json` enregistre le commit final, l'empreinte,
+la reproductibilité et les références des preuves natives et CI.
+
+Les quatre serveurs et bases jetables ont été supprimés après qualification,
+ainsi que leurs configurations et secrets temporaires. L'instance préexistante,
+les cœurs partagés et le cache du navigateur sont conservés. Le contrôle final
+des ports et de l'absence des bases est enregistré dans
+`dist/qa/package-6.1-validation/teardown.json`.
+
 Les preuves locales sanitizées sont dans `dist/qa/` :
 
 - `package-validation.json` : installation, mise à niveau, identité des blobs,
