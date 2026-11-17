@@ -526,8 +526,11 @@ Texte de référence pour l'objectif :
   ordinaire dans l'en-tête et en repli si aucun logo carré n'est disponible.
 - [x] Compléter les régressions métier, rendu, HTTP et navigateur, dont le cas
   08:00–12:00 / 13:00–17:00 en unités de 240 minutes et le favicon distinct.
-- [ ] Qualifier et publier le ZIP 6.1.3 sur les branches autorisées, puis retirer
-  les instances jetables après sauvegarde des preuves.
+- [x] Qualifier le ZIP 6.1.3 : 40 suites rapides, 360 rendus, quatre suites HTTP
+  groupes et 60 parcours navigateur sur la matrice native, sans violation axe.
+- [x] Préparer la publication reproductible sur `master` et `23.0`, avec les
+  preuves conservées dans `dist/qa/selection-validation/` et le retrait ciblé
+  des quatre instances jetables après qualification.
 
 ## Références locales
 

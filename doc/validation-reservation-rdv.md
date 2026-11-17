@@ -511,6 +511,35 @@ périodes autorisées, les erreurs échappées et visibles, le logo carré disti
 ses priorités et replis, les chemins invalides et la confidentialité des profils
 indisponibles. Les preuves sont dans `dist/qa/selection-validation/`.
 
-Le passage natif de stabilisation sur 24/PHP 8.4 réussit : suite HTTP groupes et
-quinze parcours navigateur, sans violation axe. La qualification de l'archive
-et son empreinte sont consignées dans le manifeste de livraison avant publication.
+La revue indépendante finale n'identifie aucun défaut concret. Le passage natif
+de stabilisation sur 24/PHP 8.4 réussit, puis le candidat `ea0a401`, SHA-256
+`57a0c339d2a7e572a1c508b95cf08d1147b077e65b56ecda675fc6d585aebeb0`,
+est qualifié depuis son extrait sur les quatre combinaisons. Les 94 fichiers
+restent identiques à l'archive après essais : 40 suites rapides, 360 rendus,
+lint et PHPCS, quatre suites HTTP groupes et 60 parcours navigateur passent,
+sans violation axe. Les quinze scripts développeur renvoient `404` et un corps
+vide en GET et POST, soit 120 vérifications.
+
+Le navigateur vérifie le cas de la capture en FR et EN : erreur dans la zone
+visible après ajout, retrait qui rétablit le formulaire puis une réservation,
+et huit heures réparties en deux événements lorsque le profil l'autorise.
+Le test HTTP prouve aussi le rollback natif de la première partie si la seconde
+échoue. Le favicon carré et le logo rectangulaire d'en-tête sont distincts,
+servis avec les dimensions attendues par le point d'accès public natif.
+
+Les preuves sont dans `dist/qa/selection-validation/archive-summary.json`, les
+matrices, contrôles et captures associés. Les fixtures, constantes et images
+sont restaurées ; aucun événement résiduel ni orphelin n'est présent. Aucun
+diagnostic PHP du module n'est relevé. Les seize avertissements `QUERY_STRING`
+du serveur PHP de développement dans `main.inc.php` natif sont documentés
+séparément. La CI du candidat réussit également sur les quatre combinaisons.
+
+La clôture ajoute uniquement de la documentation Markdown au candidat exécuté.
+Le ZIP final correspond à son commit Git ; les fichiers hors Markdown restent
+identiques à l'extrait qualifié. Son empreinte reproductible et les références
+CI sont consignées dans `dist/qa/booking-release-manifest.json`.
+
+Les quatre serveurs, bases et configurations jetables sont supprimés après
+qualification. Le port 8023, les configurations des cœurs partagés et le cache
+Chromium sont préservés ; la preuve figure dans
+`dist/qa/selection-validation/teardown.json`.

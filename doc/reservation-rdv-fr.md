@@ -161,9 +161,10 @@ sont respectées.
 L'icône de l'onglet reprend en priorité la miniature du logo carré configuré
 dans Dolibarr, comme l'interface native, puis ses versions de plus grande taille.
 Le logo ordinaire reste utilisé dans l'en-tête et en repli si aucun logo carré
-n'est disponible. Les deux utilisent le point d'accès public natif `viewimage.php`.
-La photo utilise
-les fichiers natifs de l'utilisateur, avec préférence pour sa miniature, et est
+n'est disponible. Renseigner le **logo carré** dans la configuration de
+l'entreprise pour garantir le bon format dans l'onglet. Les deux utilisent le
+point d'accès public natif `viewimage.php`. La photo utilise les fichiers natifs
+de l'utilisateur, avec préférence pour sa miniature, et est
 intégrée à la page ; aucune activation de la carte virtuelle publique ni nouvelle
 copie de photo n'est nécessaire. Les photos PNG, JPEG, GIF et WebP jusqu'à 1 Mio
 sont prises en charge. Les SVG et fichiers trop volumineux sont omis.
