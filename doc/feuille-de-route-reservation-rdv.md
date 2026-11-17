@@ -1,8 +1,8 @@
 # Feuille de route — réservation de rendez-vous dans CDav
 
-Date : 17 novembre 2026. Statut : plan de réalisation ; développement de la
-réservation non commencé. Ce fichier servira de référence à un objectif créé
-ultérieurement.
+Date : 17 novembre 2026. Statut : objectif de réalisation demandé ; développement
+de la réservation non commencé. Ce fichier est la référence de l'objectif et de
+son suivi de validation.
 
 ## 1. Résultat attendu
 
@@ -19,6 +19,12 @@ refusée avec une proposition de rafraîchissement.
 La réalisation comprend le code, les tests, la revue de qualité, la documentation
 et un paquet installable localement. Chaque capacité annoncée doit avoir une
 preuve de validation. Un test indispensable non exécuté reste à faire.
+
+Contraintes confirmées : compatibilité Dolibarr 23 et 24 ; validation sous PHP
+8.4 et recherche de compatibilité PHP 8.5 sur les deux versions. Privilégier le
+code natif Dolibarr avant toute fonction ou tout stockage supplémentaire. La
+qualité du code et le respect des conventions Dolibarr font partie des critères
+de livraison, avec une revue indépendante.
 
 ## 2. Point de départ sauvegardé
 
@@ -144,6 +150,33 @@ Les noms ci-dessous sont indicatifs ; le lot L0 confirme le découpage utile.
 | `tests/booking.php`, `tests/booking_live.php` | Tests métier déterministes et tests HTTP/base réelle |
 | `README.md` et guide français | Installation, exploitation, limites et dépannage |
 
+### 4.5 Priorité au code natif et conformité Dolibarr
+
+Avant d'ajouter une fonction ou un stockage, rechercher l'équivalent dans les
+deux cœurs cibles et dans CDav. Consigner les API retenues et justifier les ajouts
+qui couvrent un manque réel. Éviter les duplications de règles métier et les
+surcouches qui ne font que réexposer une API existante.
+
+- Créer et modifier les objets métier via leurs classes natives, en conservant
+  validations, affectations, transactions et triggers. Aucun SQL direct de
+  remplacement pour écrire les événements ou les fiches clients.
+- Utiliser les droits natifs (`User::hasRight`) et les mécanismes d'entité
+  (`getEntity`) ; vérifier l'utilisateur actif, les dépendances et le périmètre
+  réellement autorisé à chaque action publique.
+- Réutiliser le chargement d'environnement, les entrées typées (`GETPOST`), les
+  formulaires, protections de soumission, échappements, traductions, constantes
+  de configuration et journaux natifs, adaptés au contexte public.
+- Utiliser l'abstraction de base Dolibarr et les bibliothèques fournies avec les
+  cœurs 23/24. Localiser, expliquer et tester toute adaptation liée à une
+  différence de version ; conserver le cœur et les dépendances sans modification.
+- Vérifier les métadonnées du module : `phpmin`, `need_dolibarr_version`, droits,
+  dépendances, activation et migrations. Maintenir le minimum PHP existant tant
+  qu'aucune nécessité technique justifiée n'impose de le relever.
+- Relire la structure, les responsabilités, la duplication, la gestion d'erreur
+  et les coûts des accès SQL ; corriger les avertissements applicatifs. Identifier
+  séparément les dépréciations du cœur ou des bibliothèques, sans masquer
+  globalement les erreurs pour obtenir un résultat favorable.
+
 ## 5. Lots de réalisation
 
 Avancer dans l'ordre des dépendances. Une case de lot se coche seulement lorsque
@@ -152,8 +185,11 @@ ses critères et les preuves correspondantes sont renseignés.
 ### L0 — cadrage technique et état de référence
 
 - [ ] Relever versions Dolibarr/PHP/SGBD, bibliothèques Sabre et environnement de
-  tests réellement disponibles ; fixer la matrice de compatibilité annoncée.
+  tests réellement disponibles ; préparer les quatre combinaisons 23/24 × PHP
+  8.4/8.5 et fixer la compatibilité effectivement vérifiable.
 - [ ] Rejouer les suites existantes et conserver leurs résultats avant modification.
+- [ ] Inventorier les API natives utiles dans les deux cœurs et justifier les
+  services/stockages CDav supplémentaires avant leur implémentation.
 - [ ] Fixer le stockage du profil, la reprise éventuelle des plages BookCal,
   l'acteur métier de la réservation et ses droits effectifs.
 - [ ] Définir le comportement des événements sans durée, des données invalides,
@@ -210,7 +246,8 @@ des événements internes, impossibilité de réserver avec un lien révoqué.
 - [ ] Vérifier installation, mise à niveau, activation rejouée et désactivation.
 - [ ] Mesurer charge, latence, mémoire, requêtes SQL et expansion des récurrences.
 - [ ] Faire une revue indépendante du code, des droits, des transactions, du
-  stockage et de la confidentialité ; corriger les défauts matériels relevés.
+  stockage, de la confidentialité et de la conformité native décrite en 4.5 ;
+  corriger les défauts matériels relevés.
 - [ ] Vérifier le nettoyage des tests et la restauration des configurations.
 
 Sortie : scénarios R01 à R04 réussis, limites d'exploitation mesurées et aucun
@@ -319,12 +356,28 @@ DOLIBARR_ROOT=/chemin/vers/dolibarr/htdocs php tests/contact_photos.php
 DOLIBARR_ROOT=/chemin/vers/dolibarr/htdocs php tests/attachments.php
 ```
 
-La matrice future comporte Dolibarr 23 et 24, leur version PHP minimale
-effectivement supportée et une version commune récente, PHP 8.4 servant déjà
-de point de référence local. Documenter les incompatibilités d'environnement
-avant de réduire une affirmation de compatibilité. Les dépréciations connues
-des dépendances sont identifiées séparément ; elles ne justifient pas de masquer
-les warnings du code applicatif.
+La matrice de réalisation ci-dessous distingue la qualité du module du bon
+fonctionnement dans une instance complète. Les résultats antérieurs de la
+section 2 ne valident pas encore la réservation.
+
+| Dolibarr | PHP | Lint et suites CDav | Démarrage Dolibarr | HTTP/base et concurrence | Statut de compatibilité |
+|---|---|---|---|---|---|
+| 23 | 8.4 | À faire | À faire | À faire | Validation requise |
+| 24 | 8.4 | À faire | À faire | À faire | Validation requise |
+| 23 | 8.5 | À faire | À faire | À faire | Compatibilité visée, à démontrer |
+| 24 | 8.5 | À faire | À faire | À faire | Compatibilité visée, à démontrer |
+
+Exécuter explicitement les scripts avec `php8.4` et `php8.5` lorsque ces binaires
+sont disponibles, et utiliser un serveur HTTP de la même version pour les tests
+live. Consigner les versions exactes du cœur et des dépendances. Le lint seul
+ne constitue pas une preuve de compatibilité.
+
+Pour PHP 8.5, rechercher et corriger les incompatibilités propres à CDav. Si le
+cœur ou une bibliothèque fournie empêche une combinaison, reproduire et décrire
+l'obstacle, les contrôles tentés et le périmètre non validé, sans annoncer un
+support complet. Les dépréciations connues des dépendances sont identifiées
+séparément ; elles ne justifient pas de masquer les warnings applicatifs. Vérifier
+aussi le minimum PHP annoncé par le module lorsque les modifications l'affectent.
 
 ### 7.2 Contrôles à ajouter
 
@@ -361,26 +414,34 @@ alertes pertinentes. La revue manuelle reste nécessaire pour les droits et les
 transactions. Une preuve navigateur, automatisée si l'outillage est disponible,
 complète les tests HTTP pour U01 à U03.
 
-## 8. Critères de fin de l'objectif futur
+## 8. Critères de fin de l'objectif
 
 - [ ] L0 à L5 terminés et décisions de périmètre appliquées.
 - [ ] A01–A07, B01–B06, S01–S06, U01–U03 et R01–R04 vérifiés ; chaque ligne a une
   preuve ou une justification de périmètre actée avant réalisation.
 - [ ] Tests rapides et live réussis sur la matrice annoncée ; aucune vérification
   indispensable remplacée par un test simulé ou une affirmation.
+- [ ] Dolibarr 23 et 24 validés sous PHP 8.4 ; combinaisons PHP 8.5 testées, avec
+  correction des incompatibilités CDav et preuve des éventuelles limites externes.
 - [ ] Concurrence réelle, idempotence et rollback démontrés sur le SGBD cible.
 - [ ] Revue indépendante terminée ; aucun défaut bloquant/majeur, fuite de données
   ou possibilité de double réservation publique connue laissée ouverte.
+- [ ] Conformité native de la section 4.5 revue, API réutilisées documentées et
+  ajouts CDav justifiés ; métadonnées et migrations cohérentes avec la compatibilité.
 - [ ] Documentation, paquet installable et procédure de désactivation vérifiés.
 - [ ] Preuves de validation, commits et limites réelles renseignés ci-dessous.
 
-Texte utilisable pour rattacher ultérieurement un objectif :
+Texte de référence pour l'objectif :
 
 > Réaliser la réservation publique CDav conformément à
 > `doc/feuille-de-route-reservation-rdv.md`, en suivant L0 à L5. Garder Dolibarr
 > comme source métier, compléter les tests et les preuves à chaque lot, puis
-> livrer le module documenté, testé et packagé localement. Ne déclarer l'objectif
-> atteint que lorsque les critères de fin du fichier sont satisfaits.
+> livrer le module documenté, testé et packagé localement. Valider Dolibarr 23 et
+> 24 sous PHP 8.4 et rechercher la compatibilité PHP 8.5 sur les deux versions,
+> en documentant toute limite du cœur ou des dépendances. Privilégier les API,
+> droits, classes métier et conventions natifs Dolibarr avant d'ajouter des
+> fonctions. Faire une revue qualité indépendante. Ne déclarer l'objectif atteint
+> que lorsque les critères de fin du fichier sont satisfaits.
 
 ## 9. Suivi et preuves
 
@@ -389,6 +450,7 @@ Texte utilisable pour rattacher ultérieurement un objectif :
 | Date | Lot | Décision et raison | Conséquence sur les tests |
 |---|---|---|---|
 | 2026-11-17 | Préparation | Plan de réservation publique CDav ; agenda principal dans Dolibarr ; objectif à créer ultérieurement | Tous les lots de réservation restent à réaliser |
+| 2026-11-17 | Contraintes de l'objectif | Demande de réalisation avec priorité au code natif, revue qualité et compatibilité Dolibarr 23/24, PHP 8.4 et si possible 8.5 | Matrice explicite de quatre combinaisons ; preuves séparées CDav et instance complète |
 
 ### Journal de validation à compléter pendant la réalisation
 
