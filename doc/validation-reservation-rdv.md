@@ -341,6 +341,18 @@ Preuves locales : `dist/qa/monthly-browser-matrix.json`, les quatre dossiers
 `dist/qa/release-6.1-*.log`. La qualification du ZIP et son empreinte sont
 consignées dans le manifeste de livraison.
 
+Le contrôle des résidus a aussi détecté une affectation Agenda orpheline après
+la suite DAV historique. Un reproducteur limité aux API natives a établi la
+cause : `Societe::delete()` crée un audit de suppression puis supprime ses
+`actioncomm` liés par cascade SQL, sans leurs ressources. Le nettoyage des tiers
+de fixture supprime désormais leurs événements récents via `ActionComm::delete()`
+avant la suppression du tiers, dont le déclencheur est désactivé pour ce seul
+nettoyage. La suite compare exactement les identifiants des ressources orphelines
+avant et après, pour préserver tout état antérieur et refuser tout résidu nouveau.
+Le cœur Dolibarr et le comportement de suppression de l'application restent
+inchangés. La preuve et les traces sans arguments sont dans
+`dist/qa/package-6.1-native-cascade-diagnostic.json`.
+
 Les preuves locales sanitizées sont dans `dist/qa/` :
 
 - `package-validation.json` : installation, mise à niveau, identité des blobs,

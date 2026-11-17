@@ -266,6 +266,9 @@ $constantSnapshots = array();
 $failure = null;
 $initialAgendaId = null;
 $initialAutoCount = null;
+$initialOrphanResources = array();
+$orphanResourceSql = 'SELECT ar.rowid FROM '.MAIN_DB_PREFIX.'actioncomm_resources ar LEFT JOIN '
+	.MAIN_DB_PREFIX.'actioncomm a ON a.id = ar.fk_actioncomm WHERE a.id IS NULL ORDER BY ar.rowid';
 $admin = null;
 $testUser = null;
 $limitedUser = null;
@@ -281,6 +284,9 @@ try {
 	$initialAgendaId = (int) liveRow($db, 'SELECT COALESCE(MAX(id),0) AS id FROM '.MAIN_DB_PREFIX.'actioncomm')->id;
 	$initialAutoCount = (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_action IN (SELECT id FROM '
 		.MAIN_DB_PREFIX.'c_actioncomm WHERE type = \'systemauto\')')->nb;
+	$orphanResources = $db->query($orphanResourceSql);
+	liveAssert((bool) $orphanResources, 'Unable to snapshot pre-existing orphan Agenda resources');
+	while ($row = $db->fetch_object($orphanResources)) $initialOrphanResources[] = (int) $row->rowid;
 	liveAssert(isModEnabled('cdav'), 'The CDav module is not enabled');
 	liveAssert(isModEnabled('agenda'), 'The native Dolibarr agenda module is not enabled');
 	foreach (array(
@@ -1445,7 +1451,20 @@ try {
 		foreach (array_reverse(array_unique(array_map('intval', $created['thirdparties']))) as $id) {
 			$thirdParty = new Societe($db);
 			if ($id > 0 && $thirdParty->fetch($id) > 0) {
-				$thirdParty->delete($id, $admin, 1);
+				// CONTACT_DELETE can create fresh automatic Agenda history linked to
+				// this fixture company. Societe's raw child cascade omits resources.
+				$companyEvents = $db->query('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_soc = '.$id.' AND id > '.((int) $initialAgendaId));
+				liveAssert((bool) $companyEvents, 'Unable to inspect fixture-company Agenda history');
+				$companyEventIds = array();
+				while ($row = $db->fetch_object($companyEvents)) $companyEventIds[] = (int) $row->id;
+				foreach ($companyEventIds as $eventId) {
+					$companyEvent = new ActionComm($db);
+					liveAssert($companyEvent->fetch($eventId) > 0 && $companyEvent->delete($admin) > 0,
+						'Unable to remove fixture-company Agenda history through its native API');
+				}
+				// Disable only the fixture company's deletion trigger, which could
+				// recreate linked history immediately before that native raw cascade.
+				liveAssert($thirdParty->delete($id, $admin, 0) > 0, 'Unable to remove the native fixture company');
 			}
 			$db->query('DELETE FROM '.MAIN_DB_PREFIX.'cdav_cardmap WHERE object_type = \'th\' AND fk_object = '.$id);
 		}
@@ -1515,6 +1534,12 @@ $orphanSync = liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_sy
 	.' THEN MOD(collection.collection_id, 100000) ELSE collection.collection_id END'
 	.' WHERE collection.entity = '.((int) $entity).' AND collection.scope IN (\'cal\', \'card\') AND owner.rowid IS NULL');
 liveAssert($orphanSync !== null && (int) $orphanSync->nb === 0, 'Orphan RFC 6578 collections remain after native user cleanup');
+$remainingOrphanResources = array();
+$orphanResources = $db->query($orphanResourceSql);
+liveAssert((bool) $orphanResources, 'Unable to inspect remaining orphan Agenda resources');
+while ($row = $db->fetch_object($orphanResources)) $remainingOrphanResources[] = (int) $row->rowid;
+liveAssert($remainingOrphanResources === $initialOrphanResources,
+	'Native fixture cleanup changed pre-existing or left new orphan Agenda resources');
 
 liveOk('isolated business records removed and local constants restored');
 fwrite(STDOUT, "All live CDav integration tests passed.\n");
