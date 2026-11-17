@@ -13,9 +13,11 @@ idempotents et actualiser le menu. Les événements restent dans l'Agenda natif 
 les tables de réservation contiennent les profils et les états techniques de
 publication, de rejouabilité et de limitation des demandes.
 
-La réservation est désactivée par défaut. La matrice cible est Dolibarr 23/24
-avec PHP 8.4/8.5 ; les résultats par combinaison et les éventuelles limites du
-cœur sont suivis dans la [feuille de route](feuille-de-route-reservation-rdv.md).
+La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
+24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
+transactionnelles. Les résultats et les dépréciations natives sont détaillés
+dans le [rapport de validation](validation-reservation-rdv.md). Les autres
+SGBD restent hors de cette matrice.
 Respecter également les prérequis de la version Dolibarr installée.
 
 ## Configurer un professionnel
@@ -103,8 +105,9 @@ Un événement occupé sans fin exploitable, une récurrence non prise en charge
 une erreur de lecture interrompt le calcul. La page indique alors une
 indisponibilité temporaire au lieu de proposer des heures incertaines. Les
 récurrences quotidiennes, hebdomadaires, mensuelles et annuelles sont traitées ;
-les anciennes règles `EXRULE`, les exceptions avec `RANGE` ou certaines formes
-de `RDATE` non représentables sont refusées explicitement. Corriger les données
+les anciennes règles `EXRULE` restent hors du périmètre validé. Les exceptions
+avec `RANGE` ou certaines formes de `RDATE` non représentables sont refusées
+explicitement. Corriger les données
 concernées dans l'Agenda ou dans le client qui les a créées.
 
 ## Ce qui se passe à la confirmation
@@ -188,7 +191,8 @@ limitation renvoie HTTP `429`. Attendre la fin de la fenêtre concernée avant d
 réessayer.
 
 Le calcul possède aussi des limites de volume et d'expansion : au maximum
-5 000 ressources d'agenda et 8 Mio de données calendaires pour une lecture.
+5 000 ressources d'agenda, 1 Mio par ressource et 8 Mio au total pour une lecture,
+avec des plafonds de 10 000 étapes par série et 50 000 étapes cumulées.
 Un dépassement ou une erreur de calcul entraîne une indisponibilité explicite.
 Les plafonds protègent le service ; ils ne doivent pas être relevés pour masquer
 des données anormales sans mesure de charge préalable.

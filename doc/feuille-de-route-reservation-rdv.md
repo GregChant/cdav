@@ -1,7 +1,7 @@
 # Feuille de route — réservation de rendez-vous dans CDav
 
-Date : 17 novembre 2026. Statut : objectif actif ; développement et validation
-de la réservation en cours. Ce fichier est la référence de l'objectif et de
+Date : 17 novembre 2026. Statut : réalisation et qualification terminées ; livraison locale
+CDav 6.0.0 validée. Ce fichier est la référence de l'objectif et de
 son suivi de validation.
 
 ## 1. Résultat attendu
@@ -257,14 +257,14 @@ défaut bloquant ou majeur ouvert.
 
 ### L5 — documentation et livraison locale
 
-- [ ] Documenter réglages, horaires/fuseau, lien public, révocation, confidentialité,
+- [x] Documenter réglages, horaires/fuseau, lien public, révocation, confidentialité,
   périmètre des occupations, concurrence et procédure de dépannage.
-- [ ] Consigner commandes, versions, résultats, mesures et éventuelles limites
+- [x] Consigner commandes, versions, résultats, mesures et éventuelles limites
   dans une preuve de validation versionnée, sans secrets ni données clients.
-- [ ] Produire un ZIP reproductible et vérifier installation/mise à niveau depuis
+- [x] Produire un ZIP reproductible et vérifier installation/mise à niveau depuis
   ce ZIP sur les environnements de test ; exclure configurations et données locales.
-- [ ] Créer des commits cohérents avec une description fidèle de leur validation.
-- [ ] Vérifier tous les critères de fin et renseigner le bilan de réalisation.
+- [x] Créer des commits cohérents avec une description fidèle de leur validation.
+- [x] Vérifier tous les critères de fin et renseigner le bilan de réalisation.
 
 Sortie : module installable et vérifiable localement, documentation à jour et
 preuves accessibles depuis cette feuille de route. La publication distante
@@ -418,20 +418,20 @@ complète les tests HTTP pour U01 à U03.
 
 ## 8. Critères de fin de l'objectif
 
-- [ ] L0 à L5 terminés et décisions de périmètre appliquées.
-- [ ] A01–A07, B01–B06, S01–S06, U01–U03 et R01–R04 vérifiés ; chaque ligne a une
+- [x] L0 à L5 terminés et décisions de périmètre appliquées.
+- [x] A01–A07, B01–B06, S01–S06, U01–U03 et R01–R04 vérifiés ; chaque ligne a une
   preuve ou une justification de périmètre actée avant réalisation.
-- [ ] Tests rapides et live réussis sur la matrice annoncée ; aucune vérification
+- [x] Tests rapides et live réussis sur la matrice annoncée ; aucune vérification
   indispensable remplacée par un test simulé ou une affirmation.
-- [ ] Dolibarr 23 et 24 validés sous PHP 8.4 ; combinaisons PHP 8.5 testées, avec
+- [x] Dolibarr 23 et 24 validés sous PHP 8.4 ; combinaisons PHP 8.5 testées, avec
   correction des incompatibilités CDav et preuve des éventuelles limites externes.
-- [ ] Concurrence réelle, idempotence et rollback démontrés sur le SGBD cible.
-- [ ] Revue indépendante terminée ; aucun défaut bloquant/majeur, fuite de données
+- [x] Concurrence réelle, idempotence et rollback démontrés sur le SGBD cible.
+- [x] Revue indépendante terminée ; aucun défaut bloquant/majeur, fuite de données
   ou possibilité de double réservation publique connue laissée ouverte.
-- [ ] Conformité native de la section 4.5 revue, API réutilisées documentées et
+- [x] Conformité native de la section 4.5 revue, API réutilisées documentées et
   ajouts CDav justifiés ; métadonnées et migrations cohérentes avec la compatibilité.
-- [ ] Documentation, paquet installable et procédure de désactivation vérifiés.
-- [ ] Preuves de validation, commits et limites réelles renseignés ci-dessous.
+- [x] Documentation, paquet installable et procédure de désactivation vérifiés.
+- [x] Preuves de validation, commits et limites réelles renseignés ci-dessous.
 
 Texte de référence pour l'objectif :
 
@@ -453,20 +453,21 @@ Texte de référence pour l'objectif :
 |---|---|---|---|
 | 2026-11-17 | Préparation | Plan de réservation publique CDav ; agenda principal dans Dolibarr ; objectif à créer ultérieurement | Tous les lots de réservation restent à réaliser |
 | 2026-11-17 | L0 | Cadrage natif, profil autonome, événements occupés, erreurs fermées, ticket 15 min et bornes techniques | [Décisions et preuves](validation-reservation-rdv.md) |
+| 2026-11-17 | L5 | Archive reproductible, installations et mises à niveau natives contrôlées sur les quatre combinaisons ; suites lancées depuis l’extrait | Qualification terminée et sources applicatives gelées au commit `df43a6d` |
 | 2026-11-17 | Contraintes de l'objectif | Demande de réalisation avec priorité au code natif, revue qualité et compatibilité Dolibarr 23/24, PHP 8.4 et si possible 8.5 | Matrice explicite de quatre combinaisons ; preuves séparées CDav et instance complète |
 
 ### Journal de validation à compléter pendant la réalisation
 
 | Date / commit | Lot / IDs | Environnement et commande ou procédure | Résultat et preuve | Limite / suite à donner |
 |---|---|---|---|---|
-| 2026-11-17 / travaux en cours | L0–L4 / A01–A07, B01–B06, S01–S06, U01–U03, R01–R04 | Quatre instances isolées 23/24 × PHP 8.4/8.5 ; tests rapides, HTTP, concurrence, navigateur et PHPCS | [Décisions et preuves](validation-reservation-rdv.md) | Installation depuis le paquet à vérifier en L5 |
+| 2026-11-17 / `df43a6d` | L0–L5 / les 26 scénarios | Dolibarr 23/24 × PHP 8.4/8.5 ; tests métier, HTTP, concurrence, navigateur, PHPCS et archive installée | [Décisions et preuves](validation-reservation-rdv.md) ; rapports JSON dans `dist/qa/` | Dépréciations natives et limites V1 documentées |
 
 ### Bilan final à compléter
 
-- Commit(s) de réalisation : à renseigner.
-- Preuve(s) de validation et chemin du paquet : à renseigner.
-- Matrice effectivement validée : à renseigner.
-- Limites restantes : à renseigner.
+- Commit de réalisation : `df43a6d` ; clôture documentaire dans l’historique Git.
+- Preuves : [rapport de validation](validation-reservation-rdv.md), `dist/qa/package-validation.json` et `dist/qa/booking-release-manifest.json`. Paquet : `dist/module_cdav-6.0.0.zip`.
+- Matrice validée : Dolibarr 23.0.4 et 24.0.0 × PHP 8.4.26 et 8.5.11, MariaDB 10.6.23 ; sept parcours navigateur par combinaison.
+- Limites : périmètre V1 de la section 3, routage natif nécessaire pour les autres entités, absence d’interdiction globale des chevauchements créés depuis l’Agenda/DAV, dépréciations du cœur/Sabre consignées.
 
 ## Références locales
 

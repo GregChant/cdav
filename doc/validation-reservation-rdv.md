@@ -1,7 +1,7 @@
 # Réservation CDav — décisions et preuves de validation
 
-Date : 17 novembre 2026. État : réalisation validée ; contrôles de distribution en cours.
-Les résultats ci-dessous distinguent le code validé et le paquet à vérifier.
+Date : 17 novembre 2026. État : qualification et livraison locale terminées, CDav 6.0.0.
+Les résultats ci-dessous distinguent les sources applicatives et leur distribution.
 
 Référence : [feuille de route](feuille-de-route-reservation-rdv.md).
 
@@ -134,8 +134,8 @@ existante conserve les vingt requêtes SQL représentatives octet pour octet.
 Les commentaires/formatages du nouveau test HTTP ont aussi été comparés par AST
 pour vérifier l'absence de changement exécutable pendant leur mise en conformité.
 
-Le paquet et ses références de commits restent à vérifier avant de terminer
-l'objectif ; les mesures et contrôles fonctionnels sont détaillés ci-dessous.
+Les sources applicatives sont enregistrées dans `df43a6d`. Les contrôles
+fonctionnels et la qualification de l’archive sont détaillés ci-dessous.
 
 ## Corrections issues des revues et tests
 
@@ -195,7 +195,8 @@ chargement ou création de fixtures. La commande commune `tests/qa.sh` exécute
 le lint, six suites rapides et, si activé, PHPCS natif et les suites HTTP.
 Les événements automatiques Agenda créés par les fixtures sont nettoyés via
 `ActionComm::delete()` en préservant l'historique antérieur de l'instance de test.
-Les contrôles depuis l'archive et leurs références restent à renseigner.
+Les contrôles depuis l’archive sont terminés ; leurs références figurent dans
+la section de livraison ci-dessous.
 
 ### Résidus et conservation de l'historique
 
@@ -218,3 +219,55 @@ des diagnostics du module ; aucun warning, fatal ou dépréciation provenant du
 code CDav final n'a été identifié dans les passages HTTP contrôlés. Le cœur et
 ses dépendances ne sont pas patchés et aucune certification générale du cœur
 sous PHP 8.5 n'est déduite de ces résultats.
+
+## Livraison et vérification de l'archive
+
+Sources applicatives : commit `df43a6d4f3bfed628dd2329f1ed931e056d8d053`.
+Le candidat correspondant comporte 83 fichiers et 98 entrées, tous identiques
+aux blobs Git ; deux constructions produisent le même SHA-256 :
+`d2db9efa064cb2dbcc8ec72cc3b4eb71ddc37ba9e3e568069aa6312ad79a2da4`.
+L'audit indépendant n'a identifié ni chemin traversant, doublon, symlink,
+configuration locale ou secret dans le paquet.
+
+| Combinaison | Contrôle natif depuis l'extrait | Résultat |
+|---|---|---|
+| Dolibarr 23 / PHP 8.4 | Installation des nouvelles tables, publication et HTTP local désactivés par défaut, activation rejouée | Réussi |
+| Dolibarr 24 / PHP 8.4 | Installation des nouvelles tables, publication et HTTP local désactivés par défaut, activation rejouée | Réussi |
+| Dolibarr 23 / PHP 8.5 | Mise à niveau conservant le profil témoin et sa clé publiée | Réussi |
+| Dolibarr 24 / PHP 8.5 | Mise à niveau conservant le profil témoin et sa clé publiée | Réussi |
+
+Les quatre serveurs ont été redémarrés après bascule sur l'extrait pour écarter
+un cache de chemins. La commande `tests/qa.sh` a ensuite été exécutée depuis
+cet extrait sur chaque combinaison : 24 suites rapides, PHPCS natif, quatre
+suites HTTP DAV et quatre suites HTTP réservation réussis. Les neuf scripts PHP
+de test renvoient `404` par HTTP. Contrôle final : administrateur initial seul,
+aucun événement, profil/reçu de réservation, ressource ou collection orpheline.
+Aucun diagnostic PHP issu du module extrait n'a été détecté.
+
+L'archive finale `dist/module_cdav-6.0.0.zip` est construite après la clôture
+**documentaire**. Ses fichiers applicatifs, schémas, langues et tests sont
+identiques à ceux du candidat exécuté ; seuls les fichiers Markdown de preuve
+et de guide sont actualisés. Le manifeste externe
+`dist/qa/booking-release-manifest.json` enregistre le commit final, le SHA-256,
+la reproductibilité et cette équivalence des sources. La reconstruction ne
+requiert aucun outil de paquetage supplémentaire :
+
+```sh
+git archive --format=zip --prefix=cdav/ \
+  --output=dist/module_cdav-6.0.0.zip HEAD
+```
+
+Les preuves locales sanitizées sont dans `dist/qa/` :
+
+- `package-validation.json` : installation, mise à niveau, identité des blobs,
+  suites depuis l'archive, protections HTTP des tests et résidus.
+- `package-validation/README.md` : commandes de reproduction sur instances isolées.
+- `booking-reference-environment.json`, `booking-quick-matrix.json`,
+  `booking-dav-matrix.json`, `booking-http-matrix.json` : versions et résultats.
+- `booking-native-benchmark.json`, `booking-residues.json`,
+  `booking-history-preservation.json` : charge et nettoyage natif.
+- `booking-ui-23-php84/`, `booking-ui-23-php85/`, `booking-ui-24-php84/` et
+  `booking-ui-24-php85/` : sept parcours navigateur par combinaison et captures.
+
+Ces artefacts locaux sont ignorés par Git. Les journaux web bruts et les
+identifiants temporaires ne font pas partie des livrables de validation.

@@ -97,7 +97,10 @@ native Agenda. Confirmation checks availability again under the calendar-owner
 lock, creates an `ActionComm` through the native API and deduplicates replayed
 requests. Publication is disabled by default. See the
 [French booking guide](doc/reservation-rdv-fr.md) for setup, operating limits and
-the quality checks.
+the quality checks. Booking, native HTTP and browser tests passed with Dolibarr
+23.0.4/24.0.0 and PHP 8.4/8.5 on MariaDB; see the
+[validation report](doc/validation-reservation-rdv.md) for the exact matrix and
+known core/vendor deprecations.
 
 Dolibarr remains the business source of truth. Contact, third-party, member,
 agenda, project-task and intervention writes use native business classes. A
