@@ -64,6 +64,7 @@ if (!$res) {
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
+require_once __DIR__.'/class/CDavFreeBusyFilter.php';
 
 // Load traductions files requiredby by page
 $langs->load("cdav@cdav");
@@ -229,17 +230,20 @@ foreach($arrEvents as $event)
 	}
 	foreach ($sourceCalendar->children() as $component) {
 		if ($component->name === 'VEVENT' || $component->name === 'VTODO') {
-			$component = clone $component;
 			if ($type === 'nolabel') {
-				$component->SUMMARY = $calendarLangs->transnoentitiesnoconv('Busy');
-				$component->DESCRIPTION = '.';
-				$component->LOCATION = '';
+				$component = \Dolibarr\CDav\FreeBusyFilter::calendarComponent(
+					$component, $calendarLangs->transnoentitiesnoconv('Busy'), (string) $id, CDAV_URI_KEY
+				);
+			} else {
+				$component = clone $component;
 			}
 			$calendar->add($component);
 		} elseif ($component->name === 'VTIMEZONE') {
 			$timezoneId = isset($component->TZID) ? (string) $component->TZID : md5($component->serialize());
 			if (!isset($timezones[$timezoneId])) {
-				$calendar->add(clone $component);
+				$calendar->add($type === 'nolabel'
+					? \Dolibarr\CDav\FreeBusyFilter::timezoneComponent($component)
+					: clone $component);
 				$timezones[$timezoneId] = true;
 			}
 		}

@@ -74,6 +74,140 @@ class ManagedAttachmentStore
 		return function_exists('dol_trunc') ? dol_trunc($filename, 180, 'middle', 'UTF-8', 1) : substr($filename, 0, 180);
 	}
 
+	/** Validate raw base64 before Sabre's permissive BINARY decoder normalizes it. */
+	public function validateInlineCalendarData($calendarData)
+	{
+		$unfolded = preg_replace('/\r?\n[ \t]/', '', (string) $calendarData);
+		$hasInline = false;
+		foreach (preg_split('/\r\n|\n|\r/', $unfolded) as $line) {
+			if (!preg_match('/^ATTACH[;:]/i', $line)) continue;
+			$tokens = array();
+			$start = 0;
+			$quoted = false;
+			$colon = false;
+			for ($i = 0, $length = strlen($line); $i < $length; $i++) {
+				if ($line[$i] === '"') $quoted = !$quoted;
+				if (!$quoted && ($line[$i] === ';' || $line[$i] === ':')) {
+					$tokens[] = substr($line, $start, $i - $start);
+					$start = $i + 1;
+					if ($line[$i] === ':') { $colon = $i; break; }
+				}
+			}
+			if ($colon === false) continue; // The normal iCalendar parser reports malformed properties.
+			$params = array();
+			foreach (array_slice($tokens, 1) as $token) {
+				$pair = explode('=', $token, 2);
+				if (count($pair) === 2) $params[strtoupper($pair[0])] = strtoupper(trim($pair[1], '"'));
+			}
+			if (($params['VALUE'] ?? '') !== 'BINARY' && ($params['ENCODING'] ?? '') !== 'BASE64') continue;
+			$hasInline = true;
+			if (($params['VALUE'] ?? '') !== 'BINARY' || ($params['ENCODING'] ?? '') !== 'BASE64' || isset($params['MANAGED-ID'])) {
+				throw new \Sabre\DAV\Exception\BadRequest('Inline attachments require VALUE=BINARY and ENCODING=BASE64');
+			}
+			$encoded = substr($line, $colon + 1);
+			if ($encoded === '' || strlen($encoded) > 4 * (int) ceil($this->maxBytes() / 3)
+				|| strlen($encoded) % 4 !== 0 || preg_match('/[^A-Za-z0-9+\/=]/', $encoded)) {
+				throw new \Sabre\DAV\Exception\BadRequest('Inline attachment base64 is invalid or exceeds the configured size');
+			}
+			$bytes = base64_decode($encoded, true);
+			if ($bytes === false || strlen($bytes) > $this->maxBytes() || base64_encode($bytes) !== $encoded) {
+				throw new \Sabre\DAV\Exception\BadRequest('Inline attachment base64 is invalid or exceeds the configured size');
+			}
+		}
+		if ($hasInline && !getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
+			throw new \Sabre\DAV\Exception\Forbidden('Enable managed attachments in CDav setup to upload appointment files');
+		}
+		return $hasInline;
+	}
+
+	/** Validate an inline RFC 5545 attachment before allocating native files. */
+	public function decodeInlineAttachment($attachment)
+	{
+		$valueType = strtoupper(trim((string) ($attachment['VALUE'] ?? '')));
+		$encoding = strtoupper(trim((string) ($attachment['ENCODING'] ?? '')));
+		if ($valueType !== 'BINARY' && $encoding !== 'BASE64') return null;
+		if ($valueType !== 'BINARY' || $encoding !== 'BASE64' || isset($attachment['MANAGED-ID'])) {
+			throw new \Sabre\DAV\Exception\BadRequest('Inline attachments require VALUE=BINARY and ENCODING=BASE64');
+		}
+		// The raw calendar must pass validateInlineCalendarData() first. Binary
+		// values from Sabre are already decoded; filename parameters may contain ':' .
+		$bytes = $attachment->getValue();
+		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > $this->maxBytes()) {
+			throw new \Sabre\DAV\Exception\BadRequest('Inline attachment is empty or exceeds the configured size');
+		}
+		$contentType = $this->normalizeContentType((string) ($attachment['FMTTYPE'] ?? 'application/octet-stream'));
+		$filename = $this->normalizeFilename((string) ($attachment['FILENAME'] ?? 'attachment.bin'));
+		return array('bytes' => $bytes, 'content_type' => $contentType, 'filename' => $filename);
+	}
+
+	/** Materialize inline bytes, reusing identical native documents on replayed PUTs. */
+	public function importInlineCalendarData($eventId, $calendarData, array &$createdRows)
+	{
+		if (!$this->validateInlineCalendarData($calendarData)) return (string) $calendarData;
+		if (!$this->isAvailable()) throw new \Sabre\DAV\Exception\Conflict('Re-enable CDav to install managed attachment metadata before uploading files');
+		$calendar = \Sabre\VObject\Reader::read((string) $calendarData);
+		$preservedIds = array();
+		$replacementIds = array();
+		foreach ($calendar->getComponents() as $component) {
+			if (!in_array($component->name, array('VEVENT', 'VTODO'), true)) continue;
+			foreach ($component->select('ATTACH') as $attachment) {
+				if (isset($attachment['MANAGED-ID'])) $preservedIds[(string) $attachment['MANAGED-ID']] = true;
+			}
+		}
+		foreach ($calendar->getComponents() as $component) {
+			if (!in_array($component->name, array('VEVENT', 'VTODO'), true)) continue;
+			foreach ($component->select('ATTACH') as $attachment) {
+				$inline = $this->decodeInlineAttachment($attachment);
+				if ($inline === null) continue;
+				if (!getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
+					throw new \Sabre\DAV\Exception\Forbidden('Enable managed attachments in CDav setup to upload appointment files');
+				}
+				$hash = hash('sha256', $inline['bytes']);
+				$result = $this->db->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
+					.' WHERE entity = '.$this->entity().' AND fk_actioncomm = '.((int) $eventId)
+					.' AND fk_user = '.((int) $this->user->id));
+				if (!$result) throw new \RuntimeException('Unable to inspect existing inline attachments');
+				$row = null;
+				$replacingId = '';
+				while ($candidate = $this->db->fetch_object($result)) {
+					$sameName = $this->originalFilename($candidate) === $inline['filename'];
+					if ($sameName && !isset($preservedIds[$candidate->managed_id]) && !isset($replacementIds[$candidate->managed_id])) {
+						$replacingId = (string) $candidate->managed_id;
+					}
+					if ($sameName && (string) $candidate->file_hash === $hash
+						&& (string) $candidate->content_type === $inline['content_type']
+						&& is_file($this->filePath($candidate))
+						&& hash_equals($hash, (string) hash_file('sha256', $this->filePath($candidate)))) {
+						$row = $candidate;
+						break;
+					}
+				}
+				if ($row === null) {
+					$row = $this->create((int) $eventId, $inline['bytes'], $inline['content_type'], $inline['filename'], $replacingId);
+					if ($replacingId !== '') $replacementIds[$replacingId] = true;
+					$createdRows[] = $row;
+				}
+				$preservedIds[(string) $row->managed_id] = true;
+				$component->remove($attachment);
+				$component->add('ATTACH', $this->attachmentUrl($row->managed_id), array(
+					'VALUE' => 'URI', 'MANAGED-ID' => (string) $row->managed_id,
+					'FILENAME' => $this->originalFilename($row), 'FMTTYPE' => (string) $row->content_type,
+					'SIZE' => (string) $row->file_size,
+				));
+			}
+		}
+		return $calendar->serialize();
+	}
+
+	/** Filesystem cleanup for an enclosing native transaction that rolled back. */
+	public function discardCreatedFiles(array $rows)
+	{
+		foreach ($rows as $row) {
+			$path = $this->filePath($row);
+			if (is_file($path)) dol_delete_file($path, 1, 1, 1, null, false, 1, 1);
+		}
+	}
+
 	/** Store bytes through dol_move(), including native filename and antivirus checks. */
 	public function create($eventId, $content, $contentType, $filename, $replacingManagedId = '')
 	{
@@ -106,6 +240,9 @@ class ManagedAttachmentStore
 
 		$directory = $this->agendaDirectory($eventId);
 		$tmpDirectory = dirname($directory).'/.cdav-upload';
+		if (is_link($directory) || is_link($tmpDirectory)) {
+			throw new \Sabre\DAV\Exception\Forbidden('Agenda upload directories must not be symbolic links');
+		}
 		if (dol_mkdir($tmpDirectory) < 0 || dol_mkdir($directory) < 0) {
 			throw new \RuntimeException('Unable to create the native Agenda document directory');
 		}
@@ -201,11 +338,11 @@ class ManagedAttachmentStore
 		return $this->agendaDirectory((int) $row->fk_actioncomm).'/'.$filename;
 	}
 
-	public function remove($managedId, $eventId = 0, $mustOwn = true)
+	public function remove($managedId, $eventId = 0, $mustOwn = true, $deleteBytes = true)
 	{
 		$row = $this->getById($managedId, $eventId, $mustOwn);
 		$path = $this->filePath($row);
-		if (is_file($path) && !dol_delete_file($path, 1, 1, 1, null, false, 1, 1)) {
+		if ($deleteBytes && is_file($path) && !dol_delete_file($path, 1, 1, 1, null, false, 1, 1)) {
 			throw new \RuntimeException('Unable to delete the native Agenda attachment');
 		}
 		if (!$this->db->query('DELETE FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE managed_id = \''
@@ -215,7 +352,7 @@ class ManagedAttachmentStore
 	}
 
 	/** Validate every MANAGED-ID and remove bytes no longer referenced after PUT. */
-	public function synchronizeCalendarData($eventId, $calendarData, $removeMissing = true)
+	public function synchronizeCalendarData($eventId, $calendarData, $removeMissing = true, $deferFileRemoval = false)
 	{
 		$calendar = \Sabre\VObject\Reader::read((string) $calendarData);
 		$referenced = array();
@@ -224,7 +361,9 @@ class ManagedAttachmentStore
 				foreach ($component->select('ATTACH') as $attachment) {
 					$id = isset($attachment['MANAGED-ID']) ? trim((string) $attachment['MANAGED-ID']) : '';
 					if ($id === '') continue;
-					$this->getById($id, (int) $eventId, true);
+					// An authorized editor may preserve another uploader's references;
+					// removal and byte replacement still require upload ownership.
+					$this->getById($id, (int) $eventId, false);
 					if (!hash_equals($this->attachmentUrl($id), trim((string) $attachment))) {
 						throw new \Sabre\DAV\Exception\Conflict('Managed attachment URL does not match its MANAGED-ID');
 					}
@@ -232,13 +371,18 @@ class ManagedAttachmentStore
 				}
 			}
 		}
-		if (!$removeMissing || !$this->isAvailable()) return;
+		if (!$removeMissing || !$this->isAvailable()) return array();
 		$result = $this->db->query('SELECT managed_id FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
 			.' WHERE entity = '.$this->entity().' AND fk_actioncomm = '.((int) $eventId).' AND fk_user = '.((int) $this->user->id));
 		if (!$result) throw new \RuntimeException('Unable to inspect managed attachment references');
 		$remove = array();
 		while ($row = $this->db->fetch_object($result)) if (!isset($referenced[$row->managed_id])) $remove[] = (string) $row->managed_id;
-		foreach ($remove as $id) $this->remove($id, (int) $eventId, true);
+		$deferredRows = array();
+		foreach ($remove as $id) {
+			if ($deferFileRemoval) $deferredRows[] = $this->getById($id, (int) $eventId, true);
+			$this->remove($id, (int) $eventId, true, !$deferFileRemoval);
+		}
+		return $deferredRows;
 	}
 
 	public function removeAllForEvent($eventId)
@@ -270,7 +414,10 @@ class ManagedAttachmentStore
 		$row->owner_principal = 'principals/'.((string) ($event->login ?: $this->user->login));
 		$row->reader_principal = 'principals/'.(string) $this->user->login;
 		$path = $this->filePath($row);
-		if (!is_file($path)) throw new \Sabre\DAV\Exception\Gone('Managed attachment data is no longer available');
+		if (!is_file($path) || is_link($path) || is_link(dirname($path))) throw new \Sabre\DAV\Exception\Gone('Managed attachment data is no longer available');
+		$row->file_size = filesize($path);
+		$row->file_hash = hash_file('sha256', $path);
+		$row->tms = gmdate('Y-m-d H:i:s', filemtime($path));
 		return $row;
 	}
 }

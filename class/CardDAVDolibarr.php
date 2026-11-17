@@ -18,7 +18,7 @@ use Sabre\DAV\Exception\Forbidden;
  */
 class Dolibarr extends AbstractBackend implements SyncSupport {
 	/** Change this value whenever the generated CardDAV representation changes. */
-	private const CARD_SERIALIZATION_VERSION = '2026-09-native-sync-v3';
+	private const CARD_SERIALIZATION_VERSION = '2026-11-native-photos-v4';
 	private const MAX_CARD_URI_LENGTH = 1024;
 	private const MAX_CARD_UID_LENGTH = 1024;
 	private const MAX_VCARD_PHOTO_BYTES = 8 * 1024 * 1024;
@@ -269,7 +269,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			return;
 		}
 		try {
-			if (\dol_mkdir($directory) < 0 || !@imagejpeg($image, $directory.'/'.$filename)) {
+			if ($directory === '' || \dol_mkdir($directory) < 0 || !@imagejpeg($image, $directory.'/'.$filename)) {
 				throw new \Sabre\DAV\Exception('Unable to save the Dolibarr photo');
 			}
 			$object->addThumbs($directory.'/'.$filename);
@@ -281,10 +281,17 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/** Export a bounded, verified raster file as a folded vCard PHOTO property. */
-	private function _photoToVCard($path)
+	private function _photoToVCard($path, $root = '')
 	{
-		if (!is_file($path)) {
+		if ($path === '' || !is_file($path) || !is_readable($path) || is_link($path)) {
 			return '';
+		}
+		if ($root !== '') {
+			$realRoot = realpath($root);
+			$realPath = realpath($path);
+			if ($realRoot === false || $realPath === false || strpos($realPath, rtrim($realRoot, '/').'/') !== 0) {
+				return '';
+			}
 		}
 		$size = @filesize($path);
 		if ($size === false || $size <= 0 || $size > self::MAX_VCARD_PHOTO_BYTES) {
@@ -298,9 +305,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			'image/bmp' => 'BMP',
 			'image/x-ms-bmp' => 'BMP',
 			'image/tiff' => 'TIFF',
+			'image/webp' => 'WEBP',
 		);
 		$type = is_array($info) ? ($types[strtolower((string) ($info['mime'] ?? ''))] ?? '') : '';
-		if ($type === '') {
+		$width = is_array($info) ? (int) ($info[0] ?? 0) : 0;
+		$height = is_array($info) ? (int) ($info[1] ?? 0) : 0;
+		if ($type === '' || $width <= 0 || $height <= 0
+			|| $width > self::MAX_VCARD_PHOTO_DIMENSION || $height > self::MAX_VCARD_PHOTO_DIMENSION
+			|| $width > intdiv(self::MAX_VCARD_PHOTO_PIXELS, $height)) {
 			return '';
 		}
 		$binary = @file_get_contents($path);
@@ -312,34 +324,77 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/** Return the entity-aware native Dolibarr output directory. */
-	private function _outputDirectory($module)
+	private function _outputDirectory($module, $entity = null)
 	{
 		global $conf;
 		$config = $conf->{$module} ?? null;
 		if (!is_object($config)) {
 			return '';
 		}
-		if (!empty($config->multidir_output[$this->entity])) {
-			return rtrim((string) $config->multidir_output[$this->entity], '/');
+		$entity = $entity === null ? $this->entity : max(1, (int) $entity);
+		if (!empty($config->multidir_output[$entity])) {
+			return rtrim((string) $config->multidir_output[$entity], '/');
 		}
-		return rtrim((string) ($config->dir_output ?? ''), '/');
+		return $entity === $this->entity ? rtrim((string) ($config->dir_output ?? ''), '/') : '';
 	}
 
 	/** Build a contact/member photo directory in Dolibarr's native document tree. */
-	private function _photoDirectory($objectType, $objectId)
+	private function _photoDirectory($objectType, $objectId, $entity = null)
 	{
 		$module = $objectType === 'member' ? 'adherent' : 'societe';
 		$segment = $objectType === 'member' ? 'member' : 'contact';
-		$root = $this->_outputDirectory($module);
+		$root = $this->_outputDirectory($module, $entity);
 		return $root === '' ? '' : $root.'/'.$segment.'/'.((int) $objectId).'/photos';
 	}
 
 	/** Build a sanitized native photo path. */
-	private function _photoFilePath($objectType, $objectId, $filename)
+	private function _photoFilePath($objectType, $objectId, $filename, $entity = null)
 	{
-		$directory = $this->_photoDirectory($objectType, $objectId);
+		$directory = $this->_photoDirectory($objectType, $objectId, $entity);
 		$filename = \dol_sanitizeFileName(basename((string) $filename));
 		return $directory === '' || $filename === '' ? '' : $directory.'/'.$filename;
+	}
+
+	/** Export the native image for an already authorized address-book row. */
+	private function _photoPropertyForRow($type, $row)
+	{
+		if ($type === 'contact' || $type === 'member') {
+			$module = $type === 'member' ? 'adherent' : 'societe';
+			$photo = empty($row->photo) ? '' : $this->_photoToVCard(
+				$this->_photoFilePath($type, $row->rowid, $row->photo, $row->entity ?? null),
+				$this->_outputDirectory($module, $row->entity ?? null)
+			);
+			if ($photo !== '' || $type === 'member') {
+				return $photo;
+			}
+		}
+		// A company logo is also the contact's image when the personal photo
+		// is absent, missing or unusable. Never fetch remote PHOTO URLs.
+		$id = $type === 'contact' ? ($row->fk_soc ?? 0) : ($row->rowid ?? 0);
+		$entity = $type === 'contact' ? ($row->soc_entity ?? null) : ($row->entity ?? null);
+		$root = $this->_outputDirectory('societe', $entity);
+		$filename = \dol_sanitizeFileName(basename((string) ($row->logo ?? '')));
+		if ($root === '' || $filename === '' || (int) $id <= 0) {
+			return '';
+		}
+		return $this->_photoToVCard($root.'/'.((int) $id).'/logos/'.$filename, $root);
+	}
+
+	/** Keep a logo inherited when a client echoes it while editing the contact. */
+	private function _contactPhotoForImport($contact, $binary, $existingCardData)
+	{
+		if ($binary === false || $binary === '') {
+			return false;
+		}
+		$entity = $contact->entity ?? null;
+		if (!empty($contact->photo) && $this->_photoToVCard(
+			$this->_photoFilePath('contact', $contact->id, $contact->photo, $entity),
+			$this->_outputDirectory('societe', $entity)
+		) !== '') {
+			return $binary;
+		}
+		$exported = VObject\Reader::read($existingCardData);
+		return isset($exported->PHOTO) && hash_equals((string) $exported->PHOTO, $binary) ? false : $binary;
 	}
 
 	/** Remove a replaced native photo and its Dolibarr-generated thumbnails. */
@@ -446,7 +501,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if ($result) {
 			while ($row = $this->db->fetch_object($result)) {
 				$tokens[] = ((int) $row->rowid).':'.((string) $row->lastupd).':'.((string) $row->category_ids)
-					.':'.((string) $row->ref_ext).':'.((string) $row->cdav_uuidext).':'.((string) $row->cdav_sourceuid);
+					.':'.((string) $row->ref_ext).':'.((string) $row->cdav_uuidext).':'.((string) $row->cdav_sourceuid)
+					.':'.hash('sha256', $this->_photoPropertyForRow($type, $row));
 			}
 		}
 		sort($tokens, SORT_STRING);
@@ -1102,7 +1158,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					s.email soc_email, s.url soc_url, s.client soc_client, s.fournisseur soc_fournisseur, s.note_private soc_note_private, s.note_public soc_note_public,
 					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label,
 					GROUP_CONCAT(DISTINCT cc.fk_categorie ORDER BY cc.fk_categorie ASC SEPARATOR \',\') category_ids,
-					s.logo'.$mappingSelect.'
+					s.logo, s.entity AS soc_entity'.$mappingSelect.'
 				FROM '.MAIN_DB_PREFIX.'socpeople as p
 				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = p.fk_pays
@@ -1303,19 +1359,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$carddata.="BDAY:".str_replace(';','\;',$obj->birthday)."\n";
 		if($notePublic !== '')
 			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
-		if(!empty($obj->photo))
-		{
-			$photofile = $this->_photoFilePath('contact', $obj->rowid, $obj->photo);
-			if(!file_exists($photofile) && !empty($obj->logo) && !empty($obj->fk_soc))
-			{
-				// fallback image search thirdparty if possible
-				$societeOutput = $this->_outputDirectory('societe');
-				$photofile = $societeOutput === '' ? '' : $societeOutput.'/'.((int) $obj->fk_soc).'/logos/'
-					.getImageFileNameForSize($obj->logo, '');
-			}
-
-			$carddata .= $this->_photoToVCard($photofile);
-		}
+		$carddata .= $this->_photoPropertyForRow('contact', $obj);
    		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
 		return $this->vcardStore->merge('ct', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
@@ -1415,11 +1459,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$carddata.="BDAY;VALUE=DATE:".str_replace(';','\;',date('Ymd',strtotime($obj->birth)))."\n";
 		if($notePublic !== '')
 			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
-		if(!empty($obj->photo))
-		{
-			$photofile = $this->_photoFilePath('member', $obj->rowid, $obj->photo);
-			$carddata .= $this->_photoToVCard($photofile);
-		}
+		$carddata .= $this->_photoPropertyForRow('member', $obj);
 		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
 		return $this->vcardStore->merge('mb', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
@@ -1507,6 +1547,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if($notePublic !== '')
 			$noteParts[] = $notePublic;
 		$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText(implode("\n", $noteParts))."\n";
+		$carddata .= $this->_photoPropertyForRow('thirdparty', $obj);
 		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 		$carddata.="END:VCARD\n";
 
@@ -2433,18 +2474,17 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			}
 				$contactid = (int) $existing['id'];
 
-			$gdim = $this->_decodeVCardPhoto($rdata['_photo_bin']);
-			if ($gdim !== false) {
-				$rdata['photo'] = 'cdavimage.jpg';
-			}
-
 				require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 				$contact = new \Contact($this->db);
 				if ($contact->fetch($contactid, $this->user) <= 0) {
 					throw new \Sabre\DAV\Exception\NotFound('Contact not found');
 				}
+				$gdim = $this->_decodeVCardPhoto($this->_contactPhotoForImport($contact, $rdata['_photo_bin'], $existing['carddata']));
+				if ($gdim !== false) {
+					$rdata['photo'] = 'cdavimage.jpg';
+				}
 				if ($gdim === false && !empty($contact->photo)) {
-					$obsoletePhoto = array($this->_photoFilePath('contact', $contactid, $contact->photo), $contact);
+					$obsoletePhoto = array($this->_photoFilePath('contact', $contactid, $contact->photo, $contact->entity ?? null), $contact);
 				}
 				$this->_assertCardUidAvailable('ct', $rdata['_uid'], $contactid);
 				$rdata['socialnetworks'] = json_encode(
@@ -2467,7 +2507,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				$this->_syncCategories('contact', $contactid, $rdata['_category_labels'] ?? array());
 
 			// save photo with jpeg format
-			$this->_saveVCardPhoto($gdim, $this->_photoDirectory('contact', $contactid), $rdata['photo'], $contact);
+			$this->_saveVCardPhoto($gdim, $this->_photoDirectory('contact', $contactid, $contact->entity ?? null), $rdata['photo'], $contact);
 		}
 
 		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))

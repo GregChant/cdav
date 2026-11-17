@@ -79,6 +79,15 @@ Version 5.0.1 prevents warning storms in Dolibarr 23's native agenda and
 intervention iCalendar exports by supplying safe defaults for optional event
 URLs and assigned users before the legacy xcal serializer runs.
 
+Version 5.1.0 embeds native contact photos and falls back to the linked company's
+logo when no usable personal photo exists. Image-only changes invalidate address
+book change tags. Native Agenda documents have authenticated CalDAV download
+URLs, and inline calendar attachments become real native Agenda files when
+managed attachments are enabled. See the [French configuration guide](doc/disponibilites-documents-photos-fr.md)
+for availability sharing, permissions and client limitations. Free/busy ICS
+subscriptions retain timing and recurrence while removing participants,
+attachments, alarms and private metadata.
+
 Dolibarr remains the business source of truth. Contact, third-party, member,
 agenda, project-task and intervention writes use native business classes. A
 CardDAV DELETE only deactivates a contact, third party or member; permanent

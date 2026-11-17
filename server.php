@@ -238,6 +238,7 @@ require DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
 require __DIR__.'/class/CDavSyncStore.php';
 require __DIR__.'/class/CDavVCardStore.php';
 require __DIR__.'/class/CDavManagedAttachmentStore.php';
+require __DIR__.'/class/CDavAgendaDocumentStore.php';
 require __DIR__.'/class/PrincipalsDolibarr.php';
 require __DIR__.'/class/CardDAVDolibarr.php';
 require __DIR__.'/class/CalDAVDolibarr.php';
@@ -263,7 +264,7 @@ if (!empty($user->lang)) {
 }
 $langs->load("cdav@cdav");
 
-$cdavLib = new CdavLib($user, $db, $langs);
+$cdavLib = new CdavLib($user, $db, $langs, true);
 
 // Authentication
 $authBackend = new DAV\Auth\Backend\BasicCallBack(function ($username, $password)
@@ -334,12 +335,13 @@ $nodes = array(
 	new \Sabre\CardDAV\AddressBookRoot($principalBackend, $carddavBackend),
 	// /calendars
 	new \Sabre\CalDAV\CalendarRoot($principalBackend, $caldavBackend),
+	new \Dolibarr\CDav\AgendaDocumentCollection(new \Dolibarr\CDav\AgendaDocumentStore($db, $user), $user),
 );
-if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS') && $managedAttachmentStore->isAvailable()) {
+if ($managedAttachmentStore->isAvailable()) {
 	$nodes[] = new \Dolibarr\CDav\ManagedAttachmentCollection($managedAttachmentStore, $user);
 }
 
-// Files are deliberately not exposed from this calendar/contact endpoint.
+// Only scoped appointment documents are exposed from this endpoint.
 // A raw DAV\FS\Directory on DOL_DATA_ROOT bypasses Dolibarr's document
 // permissions and can reveal unrelated backups, temporary files or private
 // business documents. Install and configure Dolibarr's native DAV module for
@@ -375,6 +377,7 @@ $server->addPlugin(new \Dolibarr\CDav\RequestGuardPlugin(
 ));
 $server->addPlugin(new \Sabre\DAV\Locks\Plugin($lockBackend));
 $server->addPlugin(new \Sabre\DAV\Sync\Plugin());
+$server->addPlugin(new \Dolibarr\CDav\AgendaDocumentPlugin());
 $server->addPlugin(new \Sabre\DAV\Browser\Plugin());
 $server->addPlugin(new \Dolibarr\CDav\CardDAVPlugin($maxRequestBytes));
 // llx_cdav_scheduling.calendardata is MEDIUMTEXT (2^24 - 1 bytes).

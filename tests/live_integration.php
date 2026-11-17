@@ -252,6 +252,7 @@ $created = array(
 	'events' => array(),
 	'document_dirs' => array(),
 	'photo_dirs' => array(),
+	'logo_dirs' => array(),
 );
 $constantSnapshots = array();
 $failure = null;
@@ -500,6 +501,47 @@ try {
 	liveHttpStatus($contactReverse, array(200), 'Native-to-CardDAV contact read-back');
 	liveAssert(str_contains($contactReverse['body'], 'Alice Dolibarr') && str_contains($contactReverse['body'], 'reverse-'.$token.'@example.test'), 'Native Dolibarr contact changes did not return through CardDAV');
 
+	// A native company logo must supply PHOTO for a contact without a personal
+	// image, and replacing only the file bytes must invalidate DAV caches.
+	$logoDirectory = rtrim($societeOutputRoot, '/').'/'.$linkCompanyId.'/logos';
+	liveAssert(dol_mkdir($logoDirectory) >= 0, 'Unable to create the isolated native logo directory');
+	$created['logo_dirs'][] = $logoDirectory;
+	$logoFilename = 'company-'.$token.'.png';
+	$logoFile = $logoDirectory.'/'.$logoFilename;
+	liveAssert(file_put_contents($logoFile, base64_decode($tinyPngBase64, true)) !== false, 'Unable to create the native company logo');
+	$linkCompany->logo = $logoFilename;
+	liveAssert($linkCompany->update($linkCompanyId, $testUser) > 0, 'Native company logo update failed: '.$linkCompany->error);
+	$nativeContact->socid = $linkCompanyId;
+	$nativeContact->fk_soc = $linkCompanyId;
+	liveAssert($nativeContact->update($contactId, $testUser) > 0, 'Unable to restore the native contact company link');
+	$contactWithLogo = liveHttp($davBaseUrl, $login, $password, 'GET', $contactPath);
+	liveHttpStatus($contactWithLogo, array(200), 'Contact without personal photo using company logo');
+	$logoCard = Sabre\VObject\Reader::read($contactWithLogo['body']);
+	liveAssert(isset($logoCard->PHOTO) && (string) $logoCard->PHOTO === file_get_contents($logoFile),
+		'The contact without a personal photo did not receive its company logo bytes');
+	$logoRoundTrip = liveHttp($davBaseUrl, $login, $password, 'PUT', $contactPath,
+		str_replace('Alice Dolibarr', 'Alice Dolibarr Logo', $contactWithLogo['body']), array('Content-Type: text/vcard'));
+	liveHttpStatus($logoRoundTrip, array(200, 204), 'Contact edit retaining inherited company logo');
+	$contactAfterLogoRoundTrip = liveRow($db, 'SELECT photo FROM '.MAIN_DB_PREFIX.'socpeople WHERE rowid = '.$contactId);
+	liveAssert($contactAfterLogoRoundTrip !== null && (string) $contactAfterLogoRoundTrip->photo === '',
+		'Resending an inherited logo incorrectly stored it as the personal contact photo');
+	$contactWithLogo = liveHttp($davBaseUrl, $login, $password, 'GET', $contactPath);
+	$logoCollectionBefore = liveHttp($davBaseUrl, $login, $password, 'PROPFIND', $addressBookPath, $propfindBody, array('Depth: 0', 'Content-Type: application/xml'));
+	$logoImage = imagecreatetruecolor(1, 1);
+	imagesetpixel($logoImage, 0, 0, imagecolorallocate($logoImage, 255, 0, 0));
+	liveAssert(imagepng($logoImage, $logoFile), 'Unable to replace the native company logo bytes');
+	imagedestroy($logoImage);
+	$contactWithNewLogo = liveHttp($davBaseUrl, $login, $password, 'GET', $contactPath);
+	liveHttpStatus($contactWithNewLogo, array(200), 'Contact company logo replacement');
+	$newLogoCard = Sabre\VObject\Reader::read($contactWithNewLogo['body']);
+	liveAssert((string) $newLogoCard->PHOTO === file_get_contents($logoFile)
+		&& $contactWithNewLogo['headers']['etag'] !== $contactWithLogo['headers']['etag'],
+		'Replacing company logo bytes did not update the contact PHOTO and ETag');
+	$logoCollectionAfter = liveHttp($davBaseUrl, $login, $password, 'PROPFIND', $addressBookPath, $propfindBody, array('Depth: 0', 'Content-Type: application/xml'));
+	liveAssert(liveCollectionTag($logoCollectionAfter['body']) !== liveCollectionTag($logoCollectionBefore['body']),
+		'Replacing company logo bytes did not update the contact collection tag');
+	liveOk('native company logo fallback, embedded PHOTO bytes and image-only ETag/ctag changes');
+
 	$addressBookAfter = liveHttp($davBaseUrl, $login, $password, 'PROPFIND', $addressBookPath, $propfindBody, array('Depth: 0', 'Content-Type: application/xml; charset=utf-8'));
 	liveHttpStatus($addressBookAfter, array(207), 'Updated contact address-book discovery');
 	liveAssert(liveCollectionTag($addressBookAfter['body']) !== $ctagBefore, 'Contact collection tag did not change');
@@ -640,10 +682,23 @@ try {
 		}
 	}
 	liveAssert(!$missingEventParts, 'Appointment read-back lost: '.implode(', ', $missingEventParts));
-	liveAssert(str_contains($unfoldedEvent, $attachmentUrl) && str_contains($unfoldedEvent, 'SGVsbG8='), 'External or inline appointment ATTACH did not round-trip');
+	liveAssert(str_contains($unfoldedEvent, $attachmentUrl), 'External appointment ATTACH did not round-trip');
+	$inlineDocument = liveRow($db, 'SELECT managed_id, filename FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
+		.' WHERE fk_actioncomm = '.$eventId." AND content_type = 'text/plain'");
+	liveAssert($inlineDocument !== null, 'Inline ATTACH did not become a native appointment document');
+	liveAssert(is_file($agendaOutputRoot.'/'.$eventId.'/'.$inlineDocument->filename)
+		&& file_get_contents($agendaOutputRoot.'/'.$eventId.'/'.$inlineDocument->filename) === 'Hello',
+		'Inline attachment bytes were not materialized in the Agenda document directory');
+	$inlinePath = liveDavPath(array('attachments', $inlineDocument->managed_id));
+	$inlineGet = liveHttp($davBaseUrl, $login, $password, 'GET', $inlinePath);
+	liveHttpStatus($inlineGet, array(200), 'Inline attachment authenticated download');
+	liveAssert($inlineGet['body'] === 'Hello' && str_contains($unfoldedEvent, 'MANAGED-ID='.$inlineDocument->managed_id),
+		'Inline attachment did not become a downloadable managed ATTACH');
 	$eventReplay = liveHttp($davBaseUrl, $login, $password, 'PUT', $eventPath, $eventCard, array('Content-Type: text/calendar; charset=utf-8'));
 	liveHttpStatus($eventReplay, array(200, 204), 'Idempotent CalDAV retry');
 	liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->nb === 1, 'A retried CalDAV PUT duplicated the appointment');
+	liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE fk_actioncomm = '.$eventId)->nb === 1,
+		'A retried inline ATTACH duplicated the native document');
 	$duplicateEventUri = $prefix.'-duplicate-event.ics';
 	$duplicateEvent = liveHttp($davBaseUrl, $login, $password, 'PUT', $calendarPath.rawurlencode($duplicateEventUri), $eventCard, array('Content-Type: text/calendar; charset=utf-8'));
 	liveAssert($duplicateEvent['status'] === 409, 'The same iCalendar UID was accepted under a second resource name');
@@ -685,6 +740,17 @@ try {
 	}
 	liveAssert(str_contains($renderedWithDocument, 'https://dolibarr.example.test/document.php?modulepart=actions')
 		&& str_contains($renderedWithDocument, $physicalFilename), 'A physical native Dolibarr appointment document was not exported through document.php as ATTACH');
+	$nativeDocumentPath = liveDavPath(array('agenda-documents', (string) $eventId, $physicalFilename));
+	$nativeDocumentGet = liveHttp($davBaseUrl, $login, $password, 'GET', $nativeDocumentPath);
+	liveHttpStatus($nativeDocumentGet, array(200), 'Native appointment document Basic download');
+	liveAssert($nativeDocumentGet['body'] === file_get_contents($physicalFile), 'Native appointment document bytes changed in the DAV download');
+	liveAssert(str_contains((string) ($nativeDocumentGet['headers']['content-disposition'] ?? ''), $physicalFilename),
+		'Native document download lost its filename');
+	$foreignNativeDocumentGet = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'GET', $nativeDocumentPath);
+	liveAssert(in_array($foreignNativeDocumentGet['status'], array(403, 404), true), 'A user without appointment access downloaded its native document');
+	$nativeDocumentPut = liveHttp($davBaseUrl, $login, $password, 'PUT', $nativeDocumentPath, 'overwrite');
+	liveAssert(in_array($nativeDocumentPut['status'], array(403, 405), true)
+		&& file_get_contents($physicalFile) === $nativeDocumentGet['body'], 'Direct DAV PUT overwrote a native appointment document');
 
 	$nativeEvent = new ActionComm($db);
 	liveAssert($nativeEvent->fetch($eventId) > 0, 'Unable to load appointment through ActionComm');
@@ -698,6 +764,33 @@ try {
 	liveAssert(str_contains($eventReverse['body'], $prefix.' Dolibarr appointment') && str_contains($eventReverse['body'], 'Meeting room B'), 'Native appointment changes did not return through CalDAV');
 	liveAssert(str_contains($eventReverse['body'], 'RRULE:') && str_contains($eventReverse['body'], 'BEGIN:VALARM'), 'Native appointment update lost external scheduling metadata');
 	liveAssert(str_contains(liveUnfold($eventReverse['body']), $manualAttachmentUrl), 'A native Dolibarr appointment link was not exported as CalDAV ATTACH');
+	liveAssert(str_contains(liveUnfold($eventReverse['body']), 'agenda-documents/'.$eventId.'/'.rawurlencode($physicalFilename)),
+		'CalDAV did not export an authenticated DAV URL for the native appointment document');
+	$nativeDocumentRoundTrip = liveHttp($davBaseUrl, $login, $password, 'PUT', $eventPath, $eventReverse['body'], array('Content-Type: text/calendar'));
+	liveHttpStatus($nativeDocumentRoundTrip, array(200, 204), 'Appointment edit retaining native document URL');
+	liveAssert(unlink($physicalFile), 'Unable to remove the isolated native document');
+	$afterNativeDocumentRemoval = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
+	liveHttpStatus($afterNativeDocumentRemoval, array(200), 'Appointment after native document removal');
+	liveAssert(!str_contains(liveUnfold($afterNativeDocumentRemoval['body']), $physicalFilename),
+		'A deleted native document remained as a stale ATTACH after a calendar round trip');
+	liveAssert(file_put_contents($physicalFile, $nativeDocumentGet['body']) !== false, 'Unable to restore the isolated native document');
+
+	// Partner-facing subscriptions must retain occupancy and recurrence while
+	// stripping documents, participants and all private business metadata.
+	$icsPayload = $userId.'+ø+nolabel';
+	$icsToken = rtrim(strtr(base64_encode($icsPayload.'.'.hash_hmac('sha256', $icsPayload, getDolGlobalString('CDAV_URI_KEY'), true)), '+/', '-_'), '=');
+	$busyUrl = preg_replace('#server\.php/$#', 'ics.php?token='.rawurlencode($icsToken), $davBaseUrl);
+	$busyGet = liveHttp($busyUrl, $login, $password, 'GET', '');
+	liveHttpStatus($busyGet, array(200), 'Partner free-busy ICS subscription');
+	$busyData = liveUnfold($busyGet['body']);
+	liveAssert(str_contains($busyData, 'DTSTART') && str_contains($busyData, 'RRULE:'), 'Free-busy subscription lost event timing or recurrence');
+	foreach (array('ATTACH', 'ATTENDEE', 'ORGANIZER', 'VALARM', 'URL', 'CONTACT') as $privateProperty) {
+		liveAssert(!preg_match('/(?:^|\r?\n)(?:BEGIN:)?'.preg_quote($privateProperty, '/').'[;:]/i', $busyData),
+			'Free-busy subscription exposed '.$privateProperty);
+	}
+	liveAssert(!str_contains($busyData, $attendeeEmail) && !str_contains($busyData, $physicalFilename)
+		&& !str_contains($busyData, 'Meeting room B') && !str_contains($busyData, $attachmentUrl),
+		'Free-busy subscription exposed private appointment details');
 
 	$updatedStart = $start + 7200;
 	$updatedEnd = $updatedStart + 3600;
@@ -790,6 +883,33 @@ try {
 	liveAssert(liveHttp($davBaseUrl, $login, $password, 'GET', $managedPath2)['status'] === 404
 		&& liveRow($db, 'SELECT managed_id FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE managed_id = \''.$db->escape($managedId2).'\'') === null,
 		'Managed attachment removal left reachable bytes or metadata');
+	try {
+		liveAssert(dolibarr_set_const($db, 'CDAV_MANAGED_ATTACHMENTS', '0', 'chaine', 0, '', $entity) > 0, 'Unable to disable managed uploads for the opt-in test');
+		$disabledInline = liveHttp($davBaseUrl, $login, $password, 'PUT', $eventPath, $eventCard, array('Content-Type: text/calendar'));
+		liveAssert($disabledInline['status'] === 403, 'Inline upload succeeded while managed uploads were disabled');
+		$existingInline = liveHttp($davBaseUrl, $login, $password, 'GET', $inlinePath);
+		liveHttpStatus($existingInline, array(200), 'Existing managed download with uploads disabled');
+		liveAssert($existingInline['body'] === 'Hello', 'Disabling uploads prevented reading existing appointment bytes');
+		$existingNative = liveHttp($davBaseUrl, $login, $password, 'GET', $nativeDocumentPath);
+		liveHttpStatus($existingNative, array(200), 'Native document download with uploads disabled');
+	} finally {
+		liveAssert(dolibarr_set_const($db, 'CDAV_MANAGED_ATTACHMENTS', '1', 'chaine', 0, '', $entity) > 0, 'Unable to restore managed upload setup');
+	}
+	try {
+		liveAssert(dolibarr_set_const($db, 'CDAV_MANAGED_ATTACHMENT_MAX_COUNT', '1', 'chaine', 0, '', $entity) > 0, 'Unable to configure the inline replacement quota');
+		$replacementInlineBody = str_replace('SGVsbG8=', base64_encode('Hello changed'), $eventReplacement);
+		$replacementInline = liveHttp($davBaseUrl, $login, $password, 'PUT', $eventPath, $replacementInlineBody, array('Content-Type: text/calendar'));
+		liveHttpStatus($replacementInline, array(200, 204), 'Inline file replacement at the maximum document count');
+		$replacementInlineRow = liveRow($db, 'SELECT managed_id, filename FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE fk_actioncomm = '.$eventId);
+		liveAssert($replacementInlineRow !== null && $replacementInlineRow->managed_id !== $inlineDocument->managed_id
+			&& file_get_contents($agendaOutputRoot.'/'.$eventId.'/'.$replacementInlineRow->filename) === 'Hello changed',
+			'Replacing an inline document at quota lost its new bytes');
+		liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE fk_actioncomm = '.$eventId)->nb === 1
+			&& liveHttp($davBaseUrl, $login, $password, 'GET', $inlinePath)['status'] === 404,
+			'Inline replacement left duplicate metadata or reachable previous bytes');
+	} finally {
+		liveAssert(dolibarr_set_const($db, 'CDAV_MANAGED_ATTACHMENT_MAX_COUNT', '3', 'chaine', 0, '', $entity) > 0, 'Unable to restore the document count limit');
+	}
 	liveOk('RFC 8607 add/read/update/remove, ETag concurrency, immutable byte URLs, ACL and active-content rejection');
 
 	// A local iTIP attendee gets a persistent inbox object; no iMIP transport is installed.
@@ -1129,7 +1249,9 @@ try {
 	liveAssert(in_array($foreignPut['status'], array(403, 404), true), 'Restricted user updated another user calendar object');
 	$foreignDelete = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'DELETE', $eventPath);
 	liveAssert(in_array($foreignDelete['status'], array(403, 404), true), 'Restricted user deleted another user calendar object');
-	$guessedAttach = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'PUT', $limitedCalendarPath.rawurlencode($eventUri), $eventFresh['body'], array('Content-Type: text/calendar'));
+	// Use a valid client upload rather than server-issued MANAGED-ID values,
+	// which are rejected independently when creating a new DAV resource.
+	$guessedAttach = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'PUT', $limitedCalendarPath.rawurlencode($eventUri), $eventCard, array('Content-Type: text/calendar'));
 	liveAssert(in_array($guessedAttach['status'], array(403, 404), true), 'Restricted user attached a guessed foreign object URI to their calendar');
 	$eventStillOwned = liveRow($db, 'SELECT a.label, COUNT(ar.rowid) AS assignments FROM '.MAIN_DB_PREFIX.'actioncomm a
 		LEFT JOIN '.MAIN_DB_PREFIX.'actioncomm_resources ar ON ar.fk_actioncomm = a.id AND ar.element_type = \'user\'
@@ -1145,6 +1267,12 @@ try {
 	liveAssert($limitedEventMap !== null, 'Restricted own appointment was not mapped');
 	$limitedEventId = (int) $limitedEventMap->fk_object;
 	$created['events'][] = $limitedEventId;
+	$limitedInlineDocument = liveRow($db, 'SELECT managed_id, filename FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
+		.' WHERE fk_actioncomm = '.$limitedEventId." AND content_type = 'text/plain'");
+	liveAssert($limitedInlineDocument !== null, 'An authorized non-admin could not attach a file to their own appointment');
+	$limitedInlineGet = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'GET', liveDavPath(array('attachments', $limitedInlineDocument->managed_id)));
+	liveHttpStatus($limitedInlineGet, array(200), 'Non-admin own appointment attachment download');
+	liveAssert($limitedInlineGet['body'] === 'Hello', 'The non-admin own appointment attachment lost its bytes');
 	$delegatedRead = liveHttp($davBaseUrl, $login, $password, 'GET', $limitedEventPath);
 	liveHttpStatus($delegatedRead, array(200), 'Native all-agenda delegated read');
 	$delegatedUpdateBody = str_replace('Limited own appointment', 'Delegated Dolibarr update', $delegatedRead['body']);
@@ -1317,6 +1445,15 @@ try {
 		foreach (array_unique($created['photo_dirs']) as $directory) {
 			if ($societeOutputRoot !== '' && is_string($directory)
 				&& str_starts_with($directory, rtrim($societeOutputRoot, '/').'/contact/')) {
+				$deletedCount = 0;
+				dol_delete_dir_recursive($directory, 0, 1, 0, $deletedCount, 1, 1);
+			}
+		}
+		foreach (array_unique($created['logo_dirs']) as $directory) {
+			$allowedDirectories = array_map(static function ($id) use ($societeOutputRoot) {
+				return rtrim($societeOutputRoot, '/').'/'.((int) $id).'/logos';
+			}, $created['thirdparties']);
+			if ($societeOutputRoot !== '' && in_array($directory, $allowedDirectories, true)) {
 				$deletedCount = 0;
 				dol_delete_dir_recursive($directory, 0, 1, 0, $deletedCount, 1, 1);
 			}

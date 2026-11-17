@@ -446,6 +446,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			throw new Forbidden('Not allowed to create objects in this calendar');
 		}
 		$origCalendarData = $calendarData;
+		$this->managedAttachmentStore->validateInlineCalendarData($origCalendarData);
 		$calendarData = $this->_parseData($calendarData, $calendarId);
 		if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS') && $this->_containsManagedAttachment($origCalendarData)) {
 			throw new \Sabre\DAV\Exception\Conflict('Managed attachments must first be created through RFC 8607 POST');
@@ -460,6 +461,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->db->begin()) {
 			throw new \Sabre\DAV\Exception('Unable to start the CalDAV transaction');
 		}
+		$createdAttachments = array();
 		try {
 			$this->_lockCalendarOwner((int) $calendarId);
 			// One occurrence is stored. Recurrence rules remain attached to that DAV object.
@@ -572,6 +574,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					(int) $calendarData['transparency'],
 					(string) $calendarData['answer_status']
 				);
+				$origCalendarData = $this->managedAttachmentStore->importInlineCalendarData((int) $oid, $origCalendarData, $createdAttachments);
 				$this->_storeCalendarMetadata((int) $oid, $origCalendarData);
 				$this->_syncActionCommAttachmentLinks((int) $oid, $calendarData['attachment_links']);
 			}
@@ -607,6 +610,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			}
 		} catch (\Throwable $e) {
 			$this->db->rollback();
+			$this->managedAttachmentStore->discardCreatedFiles($createdAttachments);
 			throw $e;
 		}
 
@@ -644,6 +648,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 
 		$origCalendarData = $calendarData;
+		$this->managedAttachmentStore->validateInlineCalendarData($origCalendarData);
 		$calendarData = $this->_parseData($calendarData, $calendarId);
 
 		if (! $calendarData || empty($calendarData))
@@ -653,6 +658,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->db->begin()) {
 			throw new \Sabre\DAV\Exception('Unable to start the CalDAV transaction');
 		}
+		$createdAttachments = array();
+		$removedAttachments = array();
 		try {
 		$this->_lockCalendarOwner((int) $calendarId);
 		$resolvedObject = $this->_resolveCalendarObject($calendarId, $objectUri);
@@ -751,9 +758,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				(string) $objectUri,
 				(string) $calendarData['uid']
 			);
+			$origCalendarData = $this->managedAttachmentStore->importInlineCalendarData((int) $calendarData['id'], $origCalendarData, $createdAttachments);
 			$this->_storeCalendarMetadata((int) $calendarData['id'], $origCalendarData);
 			if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
-				$this->managedAttachmentStore->synchronizeCalendarData((int) $calendarData['id'], $origCalendarData, true);
+				$removedAttachments = $this->managedAttachmentStore->synchronizeCalendarData((int) $calendarData['id'], $origCalendarData, true, true);
 			}
 			$this->_syncActionCommAttachmentLinks((int) $calendarData['id'], $calendarData['attachment_links']);
 			$this->_removeAdditionalSeriesObjects(
@@ -767,8 +775,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 		} catch (\Throwable $e) {
 			$this->db->rollback();
+			$this->managedAttachmentStore->discardCreatedFiles($createdAttachments);
 			throw $e;
 		}
+		// SQL metadata rolls back with the event; remove old bytes only once its
+		// replacement and all native link updates have committed successfully.
+		$this->managedAttachmentStore->discardCreatedFiles($removedAttachments);
 
 		return;
 	}
@@ -1573,6 +1585,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	{
 		if (!function_exists('dol_buildpath')) {
 			return false;
+		}
+		$davBase = rtrim(\dol_buildpath('/cdav/server.php/agenda-documents/', 3), '/').'/';
+		if (str_starts_with((string) $url, $davBase)) {
+			return (bool) preg_match('#^\d+/[^/]+$#D', substr((string) $url, strlen($davBase)));
 		}
 		$document = parse_url(\dol_buildpath('document.php', 3));
 		$candidate = parse_url((string) $url);

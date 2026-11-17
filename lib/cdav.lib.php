@@ -11,7 +11,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-09-native-sync-v3';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-native-attachments-v4';
 
 	private $db;
 
@@ -19,17 +19,21 @@ class CdavLib
 
 	private $langs;
 
+	/** Use DAV Basic authentication for document downloads from DAV clients. */
+	private $davDocumentUrls;
+
 	/** @var bool|null Whether the optional iCalendar metadata table exists. */
 	private $hasSchedulingTable = null;
 
 	/** @var bool|null Whether CalDAV recurrence projection metadata exists. */
 	private $hasRecurrenceTable = null;
 
-	function __construct($user, $db, $langs)
+	function __construct($user, $db, $langs, $davDocumentUrls = false)
 	{
 		$this->user 	= $user;
 		$this->db 		= $db;
 		$this->langs 	= $langs;
+		$this->davDocumentUrls = (bool) $davDocumentUrls;
 	}
 
 	/**
@@ -338,9 +342,9 @@ class CdavLib
 	/**
 	 * Add native Dolibarr appointment documents to the iCalendar master item.
 	 *
-	 * External links use the Link API. Physical files are exposed through
-	 * Dolibarr document.php so its native access checks still run; no storage
-	 * path is ever disclosed. Existing ATTACH values are kept and deduplicated.
+	 * External links use the Link API. Physical files use the protected DAV
+	 * download endpoint for CalDAV, or native document.php for ICS consumers.
+	 * Existing ATTACH values are kept and deduplicated.
 	 */
 	private function addActionCommAttachments($eventId, $calendarData)
 	{
@@ -361,6 +365,40 @@ class CdavLib
 
 			$seen = array();
 			foreach ($component->select('ATTACH') as $attachment) {
+				$nativeDavPrefix = rtrim(dol_buildpath('/cdav/server.php/agenda-documents/'.rawurlencode((string) $eventId), 3), '/').'/';
+				if (!isset($attachment['MANAGED-ID']) && str_starts_with(trim((string) $attachment), $nativeDavPrefix)) {
+					// Native documents are reconstructed below. A client may echo this
+					// URI back into stored metadata before the native file is deleted.
+					$component->remove($attachment);
+					continue;
+				}
+				if (isset($attachment['MANAGED-ID']) && preg_match('/^[a-f0-9]{64}$/D', (string) $attachment['MANAGED-ID'])
+					&& $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_managed_attachment')) {
+					$result = $this->db->query('SELECT filename FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
+						." WHERE managed_id = '".$this->db->escape((string) $attachment['MANAGED-ID'])."'"
+						.' AND entity = '.((int) $conf->entity).' AND fk_actioncomm = '.((int) $eventId));
+					$managed = $result ? $this->db->fetch_object($result) : null;
+					$root = $conf->agenda->multidir_output[(int) $conf->entity] ?? ($conf->agenda->dir_output ?? '');
+					$managedPath = $managed && basename($managed->filename) === $managed->filename
+						? $root.'/'.dol_sanitizeFileName((string) $eventId).'/'.$managed->filename : '';
+					if ($managedPath === '' || !is_file($managedPath) || is_link($managedPath) || is_link(dirname($managedPath))) {
+						$component->remove($attachment);
+						continue;
+					}
+					$attachment['SIZE'] = (string) filesize($managedPath);
+					$attachment['X-CDAV-CONTENT-HASH'] = hash_file('sha256', $managedPath);
+				}
+				if ($this->davDocumentUrls && !isset($attachment['MANAGED-ID'])) {
+					$urlParts = parse_url(trim((string) $attachment));
+					$nativeParts = parse_url(dol_buildpath('document.php', 3));
+					if (is_array($urlParts) && is_array($nativeParts)
+						&& ($urlParts['host'] ?? '') === ($nativeParts['host'] ?? '')
+						&& ($urlParts['path'] ?? '') === ($nativeParts['path'] ?? '')) {
+						parse_str($urlParts['query'] ?? '', $query);
+						if (($query['modulepart'] ?? '') === 'actions' && is_string($query['file'] ?? null)
+							&& str_starts_with($query['file'], $eventId.'/')) $component->remove($attachment);
+					}
+				}
 				$seen[trim((string) $attachment)] = true;
 			}
 
@@ -395,7 +433,7 @@ class CdavLib
 				? $conf->agenda->multidir_output[(int) $conf->entity]
 				: ($conf->agenda->dir_output ?? '');
 			$documentBase = dol_buildpath('document.php', 3);
-			if ($agendaOutput !== '' && str_starts_with(strtolower($documentBase), 'https://')) {
+			if ($agendaOutput !== '' && ($this->davDocumentUrls || str_starts_with(strtolower($documentBase), 'https://'))) {
 				$directory = $agendaOutput.'/'.dol_sanitizeFileName((string) $eventId);
 				$managedFiles = array();
 				if ($this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_managed_attachment')) {
@@ -406,8 +444,11 @@ class CdavLib
 				foreach (dol_dir_list($directory, 'files', 0, '', '(\.meta|_preview.*\.png)$') as $file) {
 					$filename = basename((string) $file['name']);
 					if (isset($managedFiles[$filename])) continue;
-					$url = $documentBase.'?modulepart=actions&attachment=1&file='
-						.urlencode($eventId.'/'.$filename).'&entity='.((int) $conf->entity);
+					if ($filename === '' || $filename[0] === '.' || is_link($directory) || is_link($directory.'/'.$filename)) continue;
+					$url = $this->davDocumentUrls
+						? dol_buildpath('/cdav/server.php/agenda-documents/'.rawurlencode((string) $eventId).'/'.rawurlencode($filename), 3)
+						: $documentBase.'?modulepart=actions&attachment=1&file='
+							.urlencode($eventId.'/'.$filename).'&entity='.((int) $conf->entity);
 					if (isset($seen[$url])) {
 						continue;
 					}
@@ -415,6 +456,8 @@ class CdavLib
 						'VALUE' => 'URI',
 						'FILENAME' => $filename,
 						'FMTTYPE' => dol_mimetype($filename),
+						'SIZE' => (string) filesize($directory.'/'.$filename),
+						'X-CDAV-CONTENT-HASH' => hash_file('sha256', $directory.'/'.$filename),
 					));
 					$seen[$url] = true;
 				}
@@ -447,7 +490,9 @@ class CdavLib
 		if ($agendaOutput !== '') {
 			$directory = $agendaOutput.'/'.dol_sanitizeFileName((string) $eventId);
 			foreach (dol_dir_list($directory, 'files', 0, '', '(\.meta|_preview.*\.png)$') as $file) {
-				$tokens[] = 'file:'.basename((string) $file['name']).':'.((int) ($file['size'] ?? 0)).':'.((int) ($file['date'] ?? 0));
+				$path = $directory.'/'.basename((string) $file['name']);
+				if (!is_file($path) || is_link($path) || is_link($directory)) continue;
+				$tokens[] = 'file:'.basename((string) $file['name']).':'.hash_file('sha256', $path);
 			}
 		}
 		if ($this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_reminder')) {
