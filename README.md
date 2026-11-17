@@ -11,6 +11,7 @@ You can :
  * Read and edit intervention cards through CalDAV
  * Read and edit address books through CardDAV
  * Read calendars through ICS Full version or only Free/Busy (hide details)
+ * Let clients book available appointments through a public link backed by the native Dolibarr Agenda
  * Reuse Dolibarr's native DAV module for controlled WebDAV document access
  * Generate project tasks from documents like proposals and/or orders
 
@@ -88,6 +89,16 @@ for availability sharing, permissions and client limitations. Free/busy ICS
 subscriptions retain timing and recurrence while removing participants,
 attachments, alarms and private metadata.
 
+Version 6.0.0 adds public appointment booking from **Agenda > Online
+appointments**. An administrator configures a professional's working hours,
+duration, buffers, notice and time zone, then generates a revocable public link.
+Existing busy events, recurrences and exceptions are read directly from the
+native Agenda. Confirmation checks availability again under the calendar-owner
+lock, creates an `ActionComm` through the native API and deduplicates replayed
+requests. Publication is disabled by default. See the
+[French booking guide](doc/reservation-rdv-fr.md) for setup, operating limits and
+the quality checks.
+
 Dolibarr remains the business source of truth. Contact, third-party, member,
 agenda, project-task and intervention writes use native business classes. A
 CardDAV DELETE only deactivates a contact, third party or member; permanent
@@ -131,8 +142,10 @@ If you find the module is useful and want to finance improvements, consider to p
 
 ## How to install
 
-PHP 8.0+ and Dolibarr 23.0+ are required. Version 5.0.0 is integration-tested
-against local Dolibarr 23.0 and 24.0 installations.
+The module declares PHP 8.0+ and Dolibarr 23.0+; the selected Dolibarr core's own
+requirements also apply. Public booking targets Dolibarr 23 and 24 with PHP 8.4
+and 8.5. The validation matrix and evidence are tracked in the
+[booking roadmap](doc/feuille-de-route-reservation-rdv.md).
 
 Dolibarr native calendar module must be activated *before* installing CDav module.
 
@@ -157,6 +170,9 @@ Dolibarr's module loader applies the idempotent schemas and migrations. The
 stable resource mappings, lossless vCard/iCalendar data, native-link/reminder
 provenance, RFC 6578 journals, scheduling queues and managed-attachment
 metadata. Foreign keys bind event/user metadata to the native lifecycle.
+Version 6.0.0 also installs the public-booking profiles, idempotency receipts and
+bounded request counters. Booking remains disabled until an administrator
+enables it and publishes a professional's profile.
 
 ## Security-sensitive options
 
@@ -173,6 +189,10 @@ and must be enabled deliberately in the module setup page:
 * `CDAV_MANAGED_ATTACHMENTS`: enables protected RFC 8607 uploads with native
   Dolibarr filename/antivirus checks, size/count/user quotas and active-content
   rejection.
+* `CDAV_BOOKING_ENABLED`: enables public booking only for explicitly published,
+  enabled profiles. Configure these in **Agenda > Online appointments**.
+* `CDAV_BOOKING_ALLOW_LOCAL_HTTP`: permits loopback HTTP only for isolated
+  booking tests. Its default is `0`; production booking requires HTTPS.
 
 Keep `CDAV_ALLOW_INSECURE_HTTP` disabled outside an isolated test system. Set
 `CDAV_TRUSTED_PROXY_IPS` only to exact reverse-proxy connection addresses. See
@@ -182,6 +202,19 @@ RFC 6764 discovery configuration.
 The lightweight regression suite can be run without a Dolibarr database:
 
     DOLIBARR_ROOT=/path/to/dolibarr/htdocs php tests/run.php
+
+The common QA entry point also checks PHP syntax, calendar availability,
+recurrences, booking form rendering and the existing photos/documents/Free-Busy
+regressions:
+
+    DOLIBARR_ROOT=/path/to/dolibarr/htdocs \
+    CDAV_PHP_BIN=php8.4 \
+    CDAV_PHPCS_STANDARD=/path/to/dolibarr/dev/setup/codesniffer/ruleset.xml \
+    bash tests/qa.sh
+
+Repeat with the other target core and `CDAV_PHP_BIN=php8.5`. The optional
+`CDAV_PHPCS_STANDARD` uses Dolibarr's native code-style rules when PHP_CodeSniffer
+is installed.
 
 The opt-in live suite exercises Basic authentication and real HTTP
 CardDAV/CalDAV requests against an explicitly named test database. It creates
@@ -200,6 +233,23 @@ vCard/iCalendar losslessness, recurrence/reminders, links and managed files,
 scheduling/delegation, RFC 6578 initial/delta/deletion sync, UID conflicts,
 conditional requests, locks, collection mutation attempts, multi-user ACLs,
 malformed/hostile XML, traversal attempts and request/attachment limits.
+
+Public booking has its own opt-in HTTP/native-database suite, including real
+multi-worker races, stale availability, idempotency, rollback and public access
+controls. `CDAV_BOOKING_TEST_FIXTURES=1` explicitly identifies a disposable test
+tree; the suite temporarily installs a native fault-injection trigger there and
+removes it during cleanup:
+
+    CDAV_LIVE_TEST=1 \
+    CDAV_BOOKING_TEST_FIXTURES=1 \
+    DOLIBARR_ROOT=/path/to/isolated-test/htdocs \
+    CDAV_BOOKING_LIVE_URL=http://127.0.0.1:9124/custom/cdav/public/booking.php \
+    php8.4 tests/booking_live.php
+
+The [booking guide](doc/reservation-rdv-fr.md#contrôles-de-qualité) also documents
+the optional Playwright/axe browser runner. It verifies French/English, keyboard
+booking, mobile layout, accessible errors and the native administration page,
+using temporary native fixtures and restoring the test configuration afterward.
 
 
 ## DAV URLs

@@ -275,7 +275,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$object->addThumbs($directory.'/'.$filename);
 		} finally {
 			if (is_resource($image) || $image instanceof \GdImage) {
-				imagedestroy($image);
+				unset($image);
 			}
 		}
 	}

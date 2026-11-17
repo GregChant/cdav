@@ -11,7 +11,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-native-attachments-v4';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-native-recurrence-v5';
 
 	private $db;
 
@@ -144,17 +144,29 @@ class CdavLib
 		return $this->hasRecurrenceTable;
 	}
 
-	/** Make native ActionComm recurrence edits visible to DAV clients. */
-	private function applyNativeRecurrence($eventId, $calendarData)
+	/**
+	 * Make native ActionComm recurrence edits visible to DAV clients.
+	 *
+	 * @param int $eventId Native event identifier
+	 * @param string $calendarData Generated calendar data
+	 * @param object|null $bookingRow Preloaded native booking row, enabling strict errors
+	 * @return string Calendar with authoritative native recurrence fields
+	 */
+	private function applyNativeRecurrence($eventId, $calendarData, $bookingRow = null)
 	{
-		$result = $this->db->query('SELECT recurid, recurrule, recurdateend FROM '.MAIN_DB_PREFIX.'actioncomm'
-			.' WHERE id = '.((int) $eventId).' AND entity IN ('.getEntity('agenda').')');
-		$row = $result ? $this->db->fetch_object($result) : null;
-		$projectionOwned = false;
-		if ($this->recurrenceTableAvailable()) {
-			$tracking = $this->db->query('SELECT fk_actioncomm FROM '.MAIN_DB_PREFIX.'cdav_recurrence'
-				.' WHERE fk_actioncomm = '.((int) $eventId));
-			$projectionOwned = $tracking && (bool) $this->db->fetch_object($tracking);
+		if ($bookingRow !== null) {
+			$row = $bookingRow;
+			$projectionOwned = !empty($row->booking_recurrence_projected);
+		} else {
+			$result = $this->db->query('SELECT recurid, recurrule, recurdateend FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.((int) $eventId).' AND entity IN ('.getEntity('agenda').')');
+			$row = $result ? $this->db->fetch_object($result) : null;
+			$projectionOwned = false;
+			if ($this->recurrenceTableAvailable()) {
+				// NULL hashes belong to sidecar-only RFC rules, not native projections.
+				$tracking = $this->db->query('SELECT rfc_rrule_hash FROM '.MAIN_DB_PREFIX.'cdav_recurrence WHERE fk_actioncomm = '.((int) $eventId));
+				$projection = $tracking ? $this->db->fetch_object($tracking) : null;
+				$projectionOwned = $projection && (string) ($projection->rfc_rrule_hash ?? '') !== '';
+			}
 		}
 		if (!$row || (!$projectionOwned && empty($row->recurrule))) {
 			return $calendarData;
@@ -174,7 +186,7 @@ class CdavLib
 			}
 			$rule = (string) ($row->recurrule ?? '');
 			$until = empty($row->recurdateend) ? 0 : strtotime((string) $row->recurdateend);
-			if ($rule === '' || $until <= 0) return $calendar->serialize();
+			if ($rule === '' || ($until <= 0 && $bookingRow === null)) return $calendar->serialize();
 			$rfcRule = '';
 			if ($rule === 'FREQ=DAILY') {
 				$rfcRule = 'FREQ=DAILY';
@@ -189,10 +201,13 @@ class CdavLib
 			}
 			if ($rfcRule !== '') {
 				if (!$projectionOwned) $component->remove('RRULE');
-				$component->add('RRULE', $rfcRule.';UNTIL='.gmdate('Ymd\THis\Z', $until));
+				$component->add('RRULE', $rfcRule.($until > 0 ? ';UNTIL='.gmdate('Ymd\THis\Z', $until) : ''));
+			} elseif ($bookingRow !== null) {
+				throw new \RuntimeException('Unsupported native booking recurrence');
 			}
 			return $calendar->serialize();
 		} catch (\Throwable $e) {
+			if ($bookingRow !== null) throw $e;
 			dol_syslog(__METHOD__.': unable to export native recurrence: '.$e->getMessage(), LOG_ERR);
 			return $calendarData;
 		}
@@ -257,16 +272,26 @@ class CdavLib
 	/**
 	 * Reapply RFC properties that have no native ActionComm field.  Dolibarr
 	 * remains authoritative for the title, dates, notes and free/busy value.
+	 *
+	 * @param int $eventId Native event identifier
+	 * @param string $calendarData Generated calendar data
+	 * @param object|null $bookingRow Preloaded native booking row, enabling strict errors
+	 * @return string Calendar with preserved iCalendar metadata
 	 */
-	private function mergeCalendarMetadata($eventId, $calendarData)
+	private function mergeCalendarMetadata($eventId, $calendarData, $bookingRow = null)
 	{
 		if (!$this->schedulingTableAvailable()) {
 			return $calendarData;
 		}
-		$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling
-			WHERE fk_actioncomm = '.((int) $eventId));
-		if (!$result || !($row = $this->db->fetch_object($result)) || empty($row->calendardata)) {
-			return $calendarData;
+		if ($bookingRow !== null) {
+			if (empty($bookingRow->booking_calendardata)) return $calendarData;
+			$row = (object) array('calendardata' => $bookingRow->booking_calendardata);
+		} else {
+			$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling
+				WHERE fk_actioncomm = '.((int) $eventId));
+			if (!$result || !($row = $this->db->fetch_object($result)) || empty($row->calendardata)) {
+				return $calendarData;
+			}
 		}
 
 		try {
@@ -287,6 +312,7 @@ class CdavLib
 				}
 			}
 			if ($target === null || $source === null) {
+				if ($bookingRow !== null) throw new \RuntimeException('Invalid booking calendar metadata');
 				return $calendarData;
 			}
 
@@ -332,6 +358,7 @@ class CdavLib
 
 			return $generated->serialize();
 		} catch (\Throwable $e) {
+			if ($bookingRow !== null) throw $e;
 			if (function_exists('debug_log')) {
 				debug_log('Unable to restore CalDAV metadata for event '.$eventId.': '.$e->getMessage());
 			}
@@ -520,19 +547,31 @@ class CdavLib
 	/**
 	 * Base sql request for calendar events
 	 *
-	 * @param int calendar user id
-	 * @param int actioncomm object id
-	 * @return string
+	 * @param int $calid Calendar user id
+	 * @param int|false $oid Optional ActionComm id
+	 * @param string|false $ouri Optional external resource name
+	 * @param array|null $bookingRange Explicit timestamp range for strict booking reads
+	 * @return string Native calendar selection SQL
 	 */
-	public function getSqlCalEvents($calid, $oid=false, $ouri=false)
+	public function getSqlCalEvents($calid, $oid = false, $ouri = false, ?array $bookingRange = null)
 	{
 		// TODO : replace GROUP_CONCAT by
 		$hasSchedulingMetadata = $this->schedulingTableAvailable();
 		$lastUpdatedSql = $hasSchedulingMetadata ? 'GREATEST(a.tms, COALESCE(cds.tms, a.tms))' : 'a.tms';
+		$bookingFields = '';
+		if ($bookingRange !== null) {
+			if (count($bookingRange) !== 2 || !is_int($bookingRange[0]) || !is_int($bookingRange[1])
+				|| $bookingRange[0] <= 0 || $bookingRange[1] <= $bookingRange[0] || $bookingRange[1] - $bookingRange[0] > 93 * 86400) {
+				throw new \InvalidArgumentException('Invalid booking calendar range');
+			}
+			$bookingFields = ($hasSchedulingMetadata ? 'cds.calendardata' : 'NULL').' AS booking_calendardata, '
+				.($this->recurrenceTableAvailable() ? '(SELECT 1 FROM '.MAIN_DB_PREFIX.'cdav_recurrence bcr WHERE bcr.fk_actioncomm = a.id AND COALESCE(bcr.rfc_rrule_hash,\'\') <> \'\')' : 'NULL')
+				.' AS booking_recurrence_projected, ';
+		}
 		$sql = 'SELECT
 					"ev" elem_source,
 					'.$lastUpdatedSql.' AS lastupd,
-					a.*,
+						a.*, '.$bookingFields.'
 					sp.firstname,
 					sp.lastname,
 					sp.address,
@@ -563,6 +602,19 @@ class CdavLib
 						LEFT OUTER JOIN '.MAIN_DB_PREFIX.'user AS u ON (u.rowid=fk_element)
 						WHERE ar.element_type=\'user\' AND fk_actioncomm=a.id) AS other_users
 				FROM '.MAIN_DB_PREFIX.'actioncomm AS a';
+		if ($bookingRange !== null) {
+			// Reuse the native joins and authorization predicates below, but never
+			// buffer unrelated notes, project descriptions or contact/company data.
+			$sql = 'SELECT "ev" AS elem_source, '.$lastUpdatedSql.' AS lastupd, a.id, a.entity, a.datec, a.datep, a.datep2, a.percent, a.fulldayevent, a.recurid, a.recurrule, a.recurdateend, a.transparency, ';
+			$sql .= $bookingFields.'ac.sourceuid, arcal.transparency AS calendar_transparency, ';
+			$sql .= 'NULL AS uuidext, 0 AS uuidext_count, NULL AS calendar_answer_status, ';
+			$sql .= 'NULL AS label, NULL AS location, NULL AS note, 0 AS priority, ';
+			$sql .= 'NULL AS firstname, NULL AS lastname, NULL AS address, NULL AS zip, NULL AS town, ';
+			$sql .= 'NULL AS country_label, NULL AS phone, NULL AS phone_perso, NULL AS phone_mobile, ';
+			$sql .= 'NULL AS soc_nom, NULL AS soc_address, NULL AS soc_zip, NULL AS soc_town, ';
+			$sql .= 'NULL AS soc_country_label, NULL AS soc_phone, NULL AS proj_ref, NULL AS proj_title, ';
+			$sql .= 'NULL AS proj_desc, NULL AS other_users FROM '.MAIN_DB_PREFIX.'actioncomm AS a';
+		}
 		if (!$this->hasRight('societe', 'client', 'voir'))
 		{
 			$sql.=' LEFT OUTER JOIN '.MAIN_DB_PREFIX.'societe_commerciaux AS sc ON (a.fk_soc = sc.fk_soc AND sc.fk_user='.$this->user->id.')
@@ -587,7 +639,18 @@ class CdavLib
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				WHERE 	a.code IN (SELECT cac.code FROM '.MAIN_DB_PREFIX.'c_actioncomm cac WHERE cac.type<>\'systemauto\')
 						AND a.entity IN ('.getEntity('agenda').')';
-		if($oid!==false) {
+		if ($bookingRange !== null) {
+			$range = '(COALESCE(a.datep2,a.datep) >= \''.$this->db->idate($bookingRange[0]).'\' AND a.datep < \''.$this->db->idate($bookingRange[1]).'\')';
+			$range = '('.$range.' OR COALESCE(a.recurrule,\'\') <> \'\'';
+			$occupation = 'arcal.transparency > 0';
+			if ($hasSchedulingMetadata) {
+				$range .= ' OR UPPER(cds.calendardata) LIKE \'%RRULE:%\' OR UPPER(cds.calendardata) LIKE \'%RDATE%\' OR UPPER(cds.calendardata) LIKE \'%RECURRENCE-ID%\'';
+				// A transparent master can contain an opaque exception, and an
+				// exception may move into the range from a master outside it.
+				$occupation .= ' OR UPPER(cds.calendardata) LIKE \'%RECURRENCE-ID%\'';
+			}
+			$sql .= ' AND '.$range.') AND a.percent = -1 AND ('.$occupation.')';
+		} elseif ($oid !== false) {
 			if($ouri===false)
 			{
 				$sql.=' AND a.id = '.intval($oid);
@@ -613,6 +676,47 @@ class CdavLib
 
 		return $sql;
 
+	}
+
+	/**
+	 * Booking reads the same native/calendar metadata as DAV, with a bounded
+	 * explicit range and no document/reminder I/O or tolerant parser fallback.
+	 *
+	 * @param int $calendarId Owner user id
+	 * @param int $start Requested start timestamp
+	 * @param int $end Requested exclusive end timestamp
+	 * @return string[] Native iCalendar resources for availability calculation
+	 */
+	public function getBookingCalendarData($calendarId, $start, $end)
+	{
+		if (!$this->hasRight('agenda', 'myactions', 'read')
+			|| ((int) $calendarId !== (int) $this->user->id && !$this->hasRight('agenda', 'allactions', 'read'))) {
+			throw new \RuntimeException('Booking calendar is not readable');
+		}
+		$sql = $this->getSqlCalEvents((int) $calendarId, false, false, array((int) $start, (int) $end));
+		// Bound every variable payload before mysqli buffers the selected rows.
+		// All remaining projected columns are fixed-size dates/numbers or NULL.
+		// The native joins are shared with DAV, but descriptive columns are omitted.
+		// This read happens after the booking service acquires the owner lock.
+		$inspectionSql = 'SELECT COUNT(*) AS nb, COALESCE(SUM(OCTET_LENGTH(COALESCE(booking_calendardata,\'\')) + OCTET_LENGTH(COALESCE(sourceuid,\'\'))';
+		$inspectionSql .= ' + OCTET_LENGTH(COALESCE(recurid,\'\')) + OCTET_LENGTH(COALESCE(recurrule,\'\'))),0) AS bytes FROM ('.$sql.') booking_scope';
+		$inspection = $this->db->query($inspectionSql);
+		$size = $inspection ? $this->db->fetch_object($inspection) : null;
+		if (!$size) throw new \RuntimeException('Unable to inspect booking calendar size');
+		if ((int) $size->nb > 5000 || (int) $size->bytes > 8388608) throw new \RuntimeException('Booking calendar size limit exceeded');
+		$result = $this->db->query($sql.$this->db->plimit(5001));
+		if (!$result) throw new \RuntimeException('Unable to read booking calendar');
+		$calendars = array();
+		while ($row = $this->db->fetch_object($result)) {
+			if (count($calendars) >= 5000) throw new \RuntimeException('Booking calendar event limit exceeded');
+			$eventStart = empty($row->datep) ? false : strtotime((string) $row->datep);
+			$eventEnd = empty($row->datep2) ? false : strtotime((string) $row->datep2);
+			if ($eventStart === false || (empty($row->fulldayevent) && ($eventEnd === false || $eventEnd <= $eventStart))) {
+				throw new \RuntimeException('Occupied booking event has invalid dates');
+			}
+			$calendars[] = $this->toVCalendar((int) $calendarId, $row, true, true);
+		}
+		return $calendars;
 	}
 
 	/**
@@ -790,7 +894,16 @@ class CdavLib
 	 * @param row object
 	 * @return string
 	 */
-	public function toVCalendar($calid, $obj, $bHeader)
+	/**
+	 * Export a native calendar row using the existing DAV recurrence metadata.
+	 *
+	 * @param int $calid Calendar owner identifier
+	 * @param object $obj Selected native event/task/intervention row
+	 * @param bool $bHeader Whether to generate a complete VCALENDAR resource
+	 * @param bool $booking Whether to require strict anonymous time-only export
+	 * @return string Serialized iCalendar data
+	 */
+	public function toVCalendar($calid, $obj, $bHeader, $booking = false)
 	{
 	   $obj = $this->normalizeDatabaseRow($obj);
 	   if($obj->elem_source=='ev')		// Calendar Event
@@ -933,10 +1046,12 @@ class CdavLib
 			$caldata.="END:".$type."\n";
 			if($bHeader) {
 				$caldata.="END:VCALENDAR\n";
-					$caldata = $this->mergeCalendarMetadata((int) $obj->id, $caldata);
-					$caldata = $this->applyNativeRecurrence((int) $obj->id, $caldata);
+				$caldata = $this->mergeCalendarMetadata((int) $obj->id, $caldata, $booking ? $obj : null);
+				$caldata = $this->applyNativeRecurrence((int) $obj->id, $caldata, $booking ? $obj : null);
+				if (!$booking) {
 					$caldata = $this->addNativeReminders((int) $obj->id, (int) $calid, $caldata);
 					$caldata = $this->addActionCommAttachments((int) $obj->id, $caldata);
+				}
 			}
 		}
 	   elseif(substr($obj->elem_source,0,1)=='p')		// Project Task  pe/pt
@@ -1115,8 +1230,25 @@ class CdavLib
 		if ($bHeader && $caldata !== '') {
 			try {
 				// Let Sabre normalize CRLF, escape properties and fold long lines.
-				$caldata = \Sabre\VObject\Reader::read($caldata)->serialize();
+				$calendar = \Sabre\VObject\Reader::read($caldata);
+				if ($booking) {
+					require_once dirname(__DIR__).'/class/CDavFreeBusyFilter.php';
+					$times = new \Sabre\VObject\Component\VCalendar();
+					foreach ($calendar->getComponents() as $component) {
+						if ($component->name === 'VTIMEZONE') {
+							$times->add(\Dolibarr\CDav\FreeBusyFilter::timezoneComponent($component));
+						} elseif ($component->name === 'VEVENT') {
+							$times->add(\Dolibarr\CDav\FreeBusyFilter::calendarComponent($component, 'Busy', (string) $calid, CDAV_URI_KEY));
+						}
+					}
+					$caldata = $times->serialize();
+					$times->destroy();
+					$calendar->destroy();
+				} else {
+					$caldata = $calendar->serialize();
+				}
 			} catch (\Throwable $e) {
+				if ($booking) throw $e;
 				dol_syslog(__METHOD__.': invalid generated calendar: '.$e->getMessage(), LOG_ERR);
 			}
 		}

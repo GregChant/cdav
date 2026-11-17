@@ -1,5 +1,11 @@
 <?php
 
+// Developer suites are never public HTTP endpoints.
+if (PHP_SAPI !== 'cli') {
+	http_response_code(404);
+	exit;
+}
+
 /** Lightweight parser regression tests; no Dolibarr database is required. */
 
 date_default_timezone_set('UTC');
@@ -155,7 +161,7 @@ sameValue($tinyPng, $photoContact['_photo_bin'], 'An RFC 6350 data-URI photo mus
 if (function_exists('imagecreatefromstring')) {
 	$decodedPhoto = invokeParser($cardBackend, '_decodeVCardPhoto', array($photoContact['_photo_bin']));
 	truthy($decodedPhoto !== false, 'A bounded valid vCard photo must be accepted');
-	imagedestroy($decodedPhoto);
+	unset($decodedPhoto);
 }
 
 // A tiny compressed header must never be allowed to reserve an enormous GD bitmap.

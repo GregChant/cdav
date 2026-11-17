@@ -1,11 +1,19 @@
 <?php
 
+// Developer suites are never public HTTP endpoints.
+if (PHP_SAPI !== 'cli') {
+	http_response_code(404);
+	exit;
+}
+
 /**
  * Destructive, opt-in integration test against a real local Dolibarr database.
  *
  * The script creates records with a unique prefix, exercises the DAV HTTP
  * endpoint, checks the native Dolibarr objects/database, then removes all test
  * records through Dolibarr business APIs. It must never be aimed at production.
+ * Use an exclusively owned test instance: new automatic fixture history is
+ * removed through ActionComm while pre-existing history is preserved.
  */
 
 if (getenv('CDAV_LIVE_TEST') !== '1') {
@@ -116,11 +124,11 @@ function liveHttp($baseUrl, $login, $password, $method, $path, $body = null, arr
 	$responseBody = curl_exec($handle);
 	if ($responseBody === false) {
 		$error = curl_error($handle);
-		curl_close($handle);
+		unset($handle);
 		throw new RuntimeException('DAV HTTP transport failed: '.$error);
 	}
 	$status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-	curl_close($handle);
+	unset($handle);
 	return array('status' => $status, 'headers' => $responseHeaders, 'body' => $responseBody);
 }
 
@@ -161,9 +169,9 @@ function liveHttpConcurrent($baseUrl, $login, $password, array $requests)
 			'body' => curl_multi_getcontent($handle),
 		);
 		curl_multi_remove_handle($multi, $handle);
-		curl_close($handle);
+		unset($handle);
 	}
-	curl_multi_close($multi);
+	unset($multi);
 	return $responses;
 }
 
@@ -256,6 +264,8 @@ $created = array(
 );
 $constantSnapshots = array();
 $failure = null;
+$initialAgendaId = null;
+$initialAutoCount = null;
 $admin = null;
 $testUser = null;
 $limitedUser = null;
@@ -268,6 +278,9 @@ $societeOutputRoot = !empty($conf->societe->multidir_output[$entity])
 
 try {
 	liveAssert(str_contains(strtolower((string) $dolibarr_main_db_name), 'test'), 'The configured database name is not explicitly a test database');
+	$initialAgendaId = (int) liveRow($db, 'SELECT COALESCE(MAX(id),0) AS id FROM '.MAIN_DB_PREFIX.'actioncomm')->id;
+	$initialAutoCount = (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_action IN (SELECT id FROM '
+		.MAIN_DB_PREFIX.'c_actioncomm WHERE type = \'systemauto\')')->nb;
 	liveAssert(isModEnabled('cdav'), 'The CDav module is not enabled');
 	liveAssert(isModEnabled('agenda'), 'The native Dolibarr agenda module is not enabled');
 	foreach (array(
@@ -530,7 +543,7 @@ try {
 	$logoImage = imagecreatetruecolor(1, 1);
 	imagesetpixel($logoImage, 0, 0, imagecolorallocate($logoImage, 255, 0, 0));
 	liveAssert(imagepng($logoImage, $logoFile), 'Unable to replace the native company logo bytes');
-	imagedestroy($logoImage);
+	unset($logoImage);
 	$contactWithNewLogo = liveHttp($davBaseUrl, $login, $password, 'GET', $contactPath);
 	liveHttpStatus($contactWithNewLogo, array(200), 'Contact company logo replacement');
 	$newLogoCard = Sabre\VObject\Reader::read($contactWithNewLogo['body']);
@@ -1469,6 +1482,20 @@ try {
 			}
 		}
 		(new \Dolibarr\CDav\SyncStore($db, $entity))->pruneOrphanCollections();
+		// Fixture lifecycle triggers may write history under the administrator.
+		// Remove only new automatic events in this exclusively owned test instance.
+		if ($admin && $initialAgendaId !== null) {
+			$autoEvents = $db->query('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id > '.$initialAgendaId
+				.' AND fk_action IN (SELECT id FROM '.MAIN_DB_PREFIX.'c_actioncomm WHERE type = \'systemauto\')');
+			liveAssert((bool) $autoEvents, 'Unable to inspect native automatic fixture history');
+			while ($row = $db->fetch_object($autoEvents)) {
+				$autoEvent = new ActionComm($db);
+				if ($autoEvent->fetch((int) $row->id) > 0) liveAssert($autoEvent->delete($admin) > 0, 'Unable to remove native automatic fixture history');
+			}
+			liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_action IN (SELECT id FROM '
+				.MAIN_DB_PREFIX.'c_actioncomm WHERE type = \'systemauto\')')->nb === $initialAutoCount,
+				'Native automatic history differs from its initial snapshot');
+		}
 	} catch (Throwable $cleanupFailure) {
 		if ($failure === null) {
 			$failure = $cleanupFailure;

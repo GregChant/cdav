@@ -1,5 +1,11 @@
 <?php
 
+// Developer suites are never public HTTP endpoints.
+if (PHP_SAPI !== 'cli') {
+	http_response_code(404);
+	exit;
+}
+
 /** Attachment parser and native download regressions without a Dolibarr DB. */
 error_reporting(E_ALL & ~E_DEPRECATED);
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';

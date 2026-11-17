@@ -113,35 +113,7 @@ require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 if(!isModEnabled('cdav'))
 	die('module CDav not enabled !');
 
-/** Plain HTTP is acceptable only on the machine-local test transport. */
-function cdav_is_loopback_address($address)
-{
-	$address = strtolower(trim((string) $address));
-	if ($address === '::1' || $address === '0:0:0:0:0:0:0:1') {
-		return true;
-	}
-	if (str_starts_with($address, '::ffff:')) {
-		$address = substr($address, 7);
-	}
-	return filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
-		&& str_starts_with($address, '127.');
-}
-
-/** Accept forwarded HTTPS only from an explicitly configured proxy address. */
-function cdav_is_secure_transport()
-{
-	if (isset($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) === 'on') {
-		return true;
-	}
-	$trusted = preg_split('/[\s,;]+/', getDolGlobalString('CDAV_TRUSTED_PROXY_IPS'), -1, PREG_SPLIT_NO_EMPTY);
-	$remoteAddress = function_exists('getUserRemoteIP') ? getUserRemoteIP(1) : ($_SERVER['REMOTE_ADDR'] ?? '');
-	if (!$trusted || !in_array($remoteAddress, $trusted, true)) {
-		return false;
-	}
-	$forwardedProto = strtolower(trim(explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''))[0]));
-	$forwardedSsl = strtolower(trim((string) ($_SERVER['HTTP_X_FORWARDED_SSL'] ?? '')));
-	return $forwardedProto === 'https' || $forwardedSsl === 'on';
-}
+require_once __DIR__.'/lib/cdav_transport.lib.php';
 
 // RFC 4918 forbids offering Basic authentication over an insecure transport.
 // Keep loopback available for the destructive, isolated local integration suite.

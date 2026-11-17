@@ -1,5 +1,11 @@
 <?php
 
+// Developer suites are never public HTTP endpoints.
+if (PHP_SAPI !== 'cli') {
+	http_response_code(404);
+	exit;
+}
+
 /** Availability feed privacy and recurrence regressions; no database required. */
 date_default_timezone_set('UTC');
 error_reporting(E_ALL & ~E_DEPRECATED);

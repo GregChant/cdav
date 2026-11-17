@@ -1,7 +1,7 @@
 # Feuille de route — réservation de rendez-vous dans CDav
 
-Date : 17 novembre 2026. Statut : objectif de réalisation demandé ; développement
-de la réservation non commencé. Ce fichier est la référence de l'objectif et de
+Date : 17 novembre 2026. Statut : objectif actif ; développement et validation
+de la réservation en cours. Ce fichier est la référence de l'objectif et de
 son suivi de validation.
 
 ## 1. Résultat attendu
@@ -93,7 +93,9 @@ ou un plafond d'expansion atteint rend le calcul indisponible ; il ne transforme
 pas une période incertaine en créneau libre.
 
 Les intervalles suivent la convention `[début, fin)` : deux RDV peuvent se suivre
-exactement si aucune marge n'est demandée. Le statut numérique Dolibarr ne doit
+exactement si aucune marge n'est demandée. Les marges entourent le candidat et
+chaque occupation ; la séparation minimale vaut avant + après, indépendamment
+de l'ordre de création des rendez-vous. Le statut numérique Dolibarr ne doit
 pas être assimilé sans vérification à une annulation ou à une occupation.
 
 ### 4.2 Interface publique
@@ -184,17 +186,17 @@ ses critères et les preuves correspondantes sont renseignés.
 
 ### L0 — cadrage technique et état de référence
 
-- [ ] Relever versions Dolibarr/PHP/SGBD, bibliothèques Sabre et environnement de
+- [x] Relever versions Dolibarr/PHP/SGBD, bibliothèques Sabre et environnement de
   tests réellement disponibles ; préparer les quatre combinaisons 23/24 × PHP
   8.4/8.5 et fixer la compatibilité effectivement vérifiable.
-- [ ] Rejouer les suites existantes et conserver leurs résultats avant modification.
-- [ ] Inventorier les API natives utiles dans les deux cœurs et justifier les
+- [x] Rejouer les suites existantes et conserver leurs résultats avant modification.
+- [x] Inventorier les API natives utiles dans les deux cœurs et justifier les
   services/stockages CDav supplémentaires avant leur implémentation.
-- [ ] Fixer le stockage du profil, la reprise éventuelle des plages BookCal,
+- [x] Fixer le stockage du profil, la reprise éventuelle des plages BookCal,
   l'acteur métier de la réservation et ses droits effectifs.
-- [ ] Définir le comportement des événements sans durée, des données invalides,
+- [x] Définir le comportement des événements sans durée, des données invalides,
   des tâches, des annulations et de la révocation pendant une demande.
-- [ ] Fixer les bornes : horizon, durée/pas, expansion des récurrences, taille des
+- [x] Fixer les bornes : horizon, durée/pas, expansion des récurrences, taille des
   requêtes, fréquence des demandes, validité des formulaires, fenêtre de reprise
   et conservation des états techniques.
 
@@ -203,52 +205,52 @@ mesuré. Aucun résultat nouveau attribué aux seuls tests du point de départ.
 
 ### L1 — disponibilités et règles horaires
 
-- [ ] Implémenter la lecture par utilisateur/entité/période, y compris anciennes
+- [x] Implémenter la lecture par utilisateur/entité/période, y compris anciennes
   séries et récurrences natives ou CDav.
-- [ ] Normaliser les fuseaux et occurrences, fusionner les occupations, appliquer
+- [x] Normaliser les fuseaux et occurrences, fusionner les occupations, appliquer
   les marges puis soustraire les intervalles aux plages proposées.
-- [ ] Valider les horaires, pauses, pas, préavis et horizon côté serveur.
-- [ ] Couvrir les cas métier A01 à A07 avec une horloge de test fixe.
+- [x] Valider les horaires, pauses, pas, préavis et horizon côté serveur.
+- [x] Couvrir les cas métier A01 à A07 avec une horloge de test fixe.
 
 Sortie : calcul déterministe ; aucune date proposée en cas d'incertitude ; tests
 métier réussis sur les bibliothèques des deux versions Dolibarr cibles.
 
 ### L2 — réservation native, transaction et rejouabilité
 
-- [ ] Créer les événements par API native avec affectation, durée, occupation,
+- [x] Créer les événements par API native avec affectation, durée, occupation,
   coordonnées et provenance correctes ; vérifier les droits avant l'appel.
-- [ ] Implémenter verrou, relecture fraîche, contrôle final et rollback complet.
-- [ ] Ajouter une clé de demande pour l'idempotence, liée au profil et au contenu,
+- [x] Implémenter verrou, relecture fraîche, contrôle final et rollback complet.
+- [x] Ajouter une clé de demande pour l'idempotence, liée au profil et au contenu,
   avec contrainte d'unicité et durée de conservation documentées.
-- [ ] Exposer un point d'entrée HTTP minimal de confirmation, contrôlé par
+- [x] Exposer un point d'entrée HTTP minimal de confirmation, contrôlé par
   activation, jeton et droits, pour tester le service avant l'ajout du formulaire.
-- [ ] Exécuter les scénarios B01 à B06 avec plusieurs workers HTTP et connexions DB.
+- [x] Exécuter les scénarios B01 à B06 avec plusieurs workers HTTP et connexions DB.
 
 Sortie : un seul événement pour les demandes concurrentes ou rejouées, refus
 compréhensible d'un créneau devenu occupé, aucune écriture partielle.
 
 ### L3 — publication, administration et parcours client
 
-- [ ] Ajouter les réglages, leur validation, le lien public et sa révocation.
-- [ ] Ajouter la page et compléter le point d'entrée HTTP de L2 ; utiliser une
+- [x] Ajouter les réglages, leur validation, le lien public et sa révocation.
+- [x] Ajouter la page et compléter le point d'entrée HTTP de L2 ; utiliser une
   validation serveur commune à l'affichage et à la confirmation.
-- [ ] Implémenter jetons aléatoires dédiés, contrôle des requêtes publiques,
+- [x] Implémenter jetons aléatoires dédiés, contrôle des requêtes publiques,
   protection contre les soumissions forcées et limitations des abus.
-- [ ] Vérifier français/anglais, mobile, clavier, erreurs et confirmation à l'écran.
-- [ ] Passer les scénarios S01 à S06 et U01 à U03.
+- [x] Vérifier français/anglais, mobile, clavier, erreurs et confirmation à l'écran.
+- [x] Passer les scénarios S01 à S06 et U01 à U03.
 
 Sortie : parcours public complet utilisable sans compte Dolibarr, aucune fuite
 des événements internes, impossibilité de réserver avec un lien révoqué.
 
 ### L4 — compatibilité, régressions et exploitation
 
-- [ ] Passer la matrice Dolibarr/PHP et les suites DAV existantes, dont la suite live.
-- [ ] Vérifier installation, mise à niveau, activation rejouée et désactivation.
-- [ ] Mesurer charge, latence, mémoire, requêtes SQL et expansion des récurrences.
-- [ ] Faire une revue indépendante du code, des droits, des transactions, du
+- [x] Passer la matrice Dolibarr/PHP et les suites DAV existantes, dont la suite live.
+- [x] Vérifier installation, mise à niveau, activation rejouée et désactivation.
+- [x] Mesurer charge, latence, mémoire, requêtes SQL et expansion des récurrences.
+- [x] Faire une revue indépendante du code, des droits, des transactions, du
   stockage, de la confidentialité et de la conformité native décrite en 4.5 ;
   corriger les défauts matériels relevés.
-- [ ] Vérifier le nettoyage des tests et la restauration des configurations.
+- [x] Vérifier le nettoyage des tests et la restauration des configurations.
 
 Sortie : scénarios R01 à R04 réussis, limites d'exploitation mesurées et aucun
 défaut bloquant ou majeur ouvert.
@@ -362,10 +364,10 @@ section 2 ne valident pas encore la réservation.
 
 | Dolibarr | PHP | Lint et suites CDav | Démarrage Dolibarr | HTTP/base et concurrence | Statut de compatibilité |
 |---|---|---|---|---|---|
-| 23 | 8.4 | À faire | À faire | À faire | Validation requise |
-| 24 | 8.4 | À faire | À faire | À faire | Validation requise |
-| 23 | 8.5 | À faire | À faire | À faire | Compatibilité visée, à démontrer |
-| 24 | 8.5 | À faire | À faire | À faire | Compatibilité visée, à démontrer |
+| 23 | 8.4 | Réussi | Réussi | Réussi | Module validé ; voir les preuves |
+| 24 | 8.4 | Réussi | Réussi | Réussi | Module validé ; voir les preuves |
+| 23 | 8.5 | Réussi | Réussi | Réussi | Module validé ; dépréciations natives consignées |
+| 24 | 8.5 | Réussi | Réussi | Réussi | Module validé ; dépréciations natives consignées |
 
 Exécuter explicitement les scripts avec `php8.4` et `php8.5` lorsque ces binaires
 sont disponibles, et utiliser un serveur HTTP de la même version pour les tests
@@ -386,7 +388,7 @@ correspondants ; ces fichiers n'existent pas encore au stade de ce plan :
 
 ```sh
 DOLIBARR_ROOT=/chemin/vers/dolibarr/htdocs php tests/booking.php
-CDAV_LIVE_TEST=1 \
+CDAV_LIVE_TEST=1 CDAV_BOOKING_TEST_FIXTURES=1 \
   DOLIBARR_ROOT=/chemin/vers/instance-test/htdocs \
   CDAV_BOOKING_LIVE_URL=http://127.0.0.1/custom/cdav/public/booking.php \
   php tests/booking_live.php
@@ -450,13 +452,14 @@ Texte de référence pour l'objectif :
 | Date | Lot | Décision et raison | Conséquence sur les tests |
 |---|---|---|---|
 | 2026-11-17 | Préparation | Plan de réservation publique CDav ; agenda principal dans Dolibarr ; objectif à créer ultérieurement | Tous les lots de réservation restent à réaliser |
+| 2026-11-17 | L0 | Cadrage natif, profil autonome, événements occupés, erreurs fermées, ticket 15 min et bornes techniques | [Décisions et preuves](validation-reservation-rdv.md) |
 | 2026-11-17 | Contraintes de l'objectif | Demande de réalisation avec priorité au code natif, revue qualité et compatibilité Dolibarr 23/24, PHP 8.4 et si possible 8.5 | Matrice explicite de quatre combinaisons ; preuves séparées CDav et instance complète |
 
 ### Journal de validation à compléter pendant la réalisation
 
 | Date / commit | Lot / IDs | Environnement et commande ou procédure | Résultat et preuve | Limite / suite à donner |
 |---|---|---|---|---|
-| À renseigner | — | — | Aucune validation de réservation à ce stade | — |
+| 2026-11-17 / travaux en cours | L0–L4 / A01–A07, B01–B06, S01–S06, U01–U03, R01–R04 | Quatre instances isolées 23/24 × PHP 8.4/8.5 ; tests rapides, HTTP, concurrence, navigateur et PHPCS | [Décisions et preuves](validation-reservation-rdv.md) | Installation depuis le paquet à vérifier en L5 |
 
 ### Bilan final à compléter
 

@@ -4,6 +4,12 @@
 
 Deux usages sont à distinguer dans Dolibarr 23 et 24.
 
+Depuis CDav 6.0.0, une page publique permet aussi la réservation directe à partir
+des occupations de l'Agenda. Un administrateur règle les horaires du
+professionnel et génère le lien depuis **Agenda > Rendez-vous en ligne**,
+entrée CDav. Voir le [guide de réservation](reservation-rdv-fr.md) pour
+l'activation, les droits et les limites de concurrence.
+
 ### Consulter les périodes occupées
 
 Dans **Agenda > URL ICS**, copier le lien **Disponibilités uniquement /
@@ -45,12 +51,13 @@ vérification complète du créneau au moment de l'enregistrement. Le paramètre
 d'entrée publics examinés ; ce lien ne constitue donc pas un accès réservé à
 des partenaires désignés.
 
-Pour répondre complètement au besoin « mes créneaux réellement libres, puis une
-demande à confirmer », la base recommandée est **BookCal + Agenda natifs**, avec
-un complément qui recoupe les occupations, contrôle les conflits au dépôt et
-gère l'acceptation de la demande. Ce complément n'est pas implémenté par cette
-version de CDav. Le module natif Ressources permet de rattacher une salle à un
-événement, mais ne suffit pas à automatiser le contrôle de sa disponibilité.
+CDav 6.0.0 fournit sa propre page de réservation, avec recoupement des
+occupations de l'Agenda, contrôle final des conflits et confirmation immédiate.
+Elle utilise des horaires CDav autonomes et un lien distinct de celui de
+BookCal. Le [guide de réservation](reservation-rdv-fr.md) décrit ce parcours ;
+la validation manuelle d'une demande reste hors de cette première version.
+Le module natif Ressources permet de rattacher une salle à un événement, mais
+ne suffit pas à automatiser le contrôle de sa disponibilité.
 
 Références du code natif : [BookCal](https://github.com/Dolibarr/dolibarr/blob/23.0/htdocs/bookcal/README.md),
 [calcul des créneaux en v24](https://github.com/Dolibarr/dolibarr/blob/24.0/htdocs/public/bookcal/bookcalAjax.php),

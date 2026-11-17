@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '5.1.0';
+		$this->version = '6.0.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -94,7 +94,7 @@ class modCDav extends DolibarrModules
 		$this->dirs = array('/cdav');
 
 		// Config pages. Put here list of php page, stored into mymodule/admin directory, to use to setup module.
-		$this->config_page_url = array('setup.php@cdav');
+		$this->config_page_url = array('setup.php@cdav', 'booking.php@cdav');
 
 		// Dependencies
 		$this->hidden = false;			// A condition to hide module
@@ -146,6 +146,8 @@ class modCDav extends DolibarrModules
 			32 => array('CDAV_MANAGED_ATTACHMENT_MAX_MB', 'chaine', '8', 'Maximum managed attachment size',0,'current',0),
 			33 => array('CDAV_MANAGED_ATTACHMENT_MAX_COUNT', 'chaine', '10', 'Maximum managed attachments per event',0,'current',0),
 			34 => array('CDAV_MANAGED_ATTACHMENT_QUOTA_MB', 'chaine', '256', 'Managed attachment quota per user',0,'current',0),
+			35 => array('CDAV_BOOKING_ENABLED', 'chaine', '0', 'Enable public appointment booking after explicit configuration',0,'current',0),
+			36 => array('CDAV_BOOKING_ALLOW_LOCAL_HTTP', 'chaine', '0', 'Allow loopback HTTP only for isolated public-booking tests',0,'current',0),
 		);
 
 		// Array to add new pages in new tabs
@@ -252,6 +254,19 @@ class modCDav extends DolibarrModules
 									'perms'=>'$user->hasRight("agenda", "myactions", "read")',
 									'target'=>'',
 									'user'=>0);
+		$this->menu[$r++] = array(
+			'fk_menu' => 'fk_mainmenu=agenda',
+			'type' => 'left',
+			'titre' => 'CDavBooking',
+			'mainmenu' => 'agenda',
+			'url' => '/cdav/admin/booking.php?mainmenu=agenda',
+			'langs' => 'cdav@cdav',
+			'position' => 195,
+			'enabled' => 'isModEnabled("cdav") && isModEnabled("agenda")',
+			'perms' => '$user->admin && empty($user->socid)',
+			'target' => '',
+			'user' => 0,
+		);
 		// Add here entries to declare new menus
 		//
 		// Example to declare a new Top Menu entry and its Left menu entry:
