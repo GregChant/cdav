@@ -99,7 +99,8 @@ if (!$adminRow || $admin->fetch($adminRow->rowid) <= 0 || $admin->loadRights() <
 $GLOBALS['user'] = $admin;
 $settingSnapshots = array();
 foreach (array('CDAV_BOOKING_ENABLED', 'CDAV_BOOKING_ALLOW_LOCAL_HTTP',
-	'MAIN_INFO_SOCIETE_NOM', 'MAIN_INFO_SOCIETE_LOGO', 'MAIN_INFO_SOCIETE_LOGO_SMALL') as $setting) {
+	'MAIN_INFO_SOCIETE_NOM', 'MAIN_INFO_SOCIETE_LOGO', 'MAIN_INFO_SOCIETE_LOGO_SMALL',
+	'MAIN_INFO_SOCIETE_LOGO_SQUARRED', 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_SMALL', 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_MINI') as $setting) {
 	$settingSnapshots[$setting] = $db->fetch_object(bookingBrowserQuery('SELECT * FROM '.MAIN_DB_PREFIX.'const'
 		." WHERE name = '".$db->escape($setting)."' AND entity = ".$entity));
 }
@@ -141,11 +142,17 @@ try {
 	$owner->email = 'booking-professional@example.test';
 	if ($owner->update($admin) <= 0) throw new RuntimeException('Unable to save the native professional identity');
 	$companyName = 'CDav Booking Browser Company';
+	$widePng = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAIAAADwyuo0AAAAEElEQVR4nGPQCFgARwzIHABuGgjB/DGEGgAAAABJRU5ErkJggg==', true);
+	$squarePng = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGOQmxYFRAwQCgAcpgQ5XmV20AAAAABJRU5ErkJggg==', true);
 	$logoName = 'cdav-browser-logo-'.bin2hex(random_bytes(8)).'.png';
-	bookingBrowserImage($conf->mycompany->dir_output.'/logos/'.$logoName, $png);
-	bookingBrowserImage($conf->mycompany->dir_output.'/logos/thumbs/'.$logoName, $png);
+	$squareName = 'cdav-browser-square-'.bin2hex(random_bytes(8)).'.png';
+	bookingBrowserImage($conf->mycompany->dir_output.'/logos/'.$logoName, $widePng);
+	bookingBrowserImage($conf->mycompany->dir_output.'/logos/thumbs/'.$logoName, $widePng);
+	bookingBrowserImage($conf->mycompany->dir_output.'/logos/'.$squareName, $squarePng);
+	bookingBrowserImage($conf->mycompany->dir_output.'/logos/thumbs/'.$squareName, $squarePng);
 	foreach (array('MAIN_INFO_SOCIETE_NOM' => $companyName, 'MAIN_INFO_SOCIETE_LOGO' => $logoName,
-		'MAIN_INFO_SOCIETE_LOGO_SMALL' => $logoName) as $setting => $value) {
+		'MAIN_INFO_SOCIETE_LOGO_SMALL' => $logoName, 'MAIN_INFO_SOCIETE_LOGO_SQUARRED' => $squareName,
+		'MAIN_INFO_SOCIETE_LOGO_SQUARRED_SMALL' => $squareName, 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_MINI' => $squareName) as $setting => $value) {
 		if (dolibarr_set_const($db, $setting, $value, 'chaine', 0, '', $entity) <= 0) {
 			throw new RuntimeException('Unable to configure the isolated native company identity');
 		}
@@ -160,6 +167,8 @@ try {
 	$contiguousDay = $openDay->modify('+5 days');
 	$splitDay = $openDay->modify('+7 days');
 	$otherSplitDay = $openDay->modify('+8 days');
+	$longDay = $openDay->modify('+10 days');
+	$longSplitDay = $openDay->modify('+11 days');
 	$today = new DateTimeImmutable('today', new DateTimeZone('Europe/Zurich'));
 	$limitMonth = $today->setDate((int) $today->format('Y'), (int) $today->format('m'), 1)->modify('+6 months');
 	$limitDay = $limitMonth->setDate((int) $limitMonth->format('Y'), (int) $limitMonth->format('m'),
@@ -199,7 +208,8 @@ try {
 	if (!mkdir($temporaryDirectory, 0700)) throw new RuntimeException('Unable to create the private fixture directory');
 	$origin = $parsed['scheme'].'://'.$parsed['host'].(isset($parsed['port']) ? ':'.$parsed['port'] : '');
 	$appointmentSubjects = array('single' => 'Entretien de chaudière — visite', 'lost' => 'Dépannage d’urgence',
-		'continuous' => 'Révision annuelle continue', 'split' => 'Visite technique fractionnée');
+		'continuous' => 'Révision annuelle continue', 'split' => 'Visite technique fractionnée',
+		'recovery' => 'Intervention matinale après retrait', 'longsplit' => 'Intervention matin et après-midi');
 	$clientAddress = "Rue de l’Église 12\n1000 Lausanne";
 	$fixture = array('isolated' => true, 'booking_url' => $bookingUrl,
 		'home_url' => $origin.DOL_URL_ROOT.'/index.php',
@@ -211,8 +221,12 @@ try {
 		'split_date' => $splitDay->format('Y-m-d'), 'other_split_date' => $otherSplitDay->format('Y-m-d'),
 		'split_starts' => array($splitDay->setTime(9, 0)->getTimestamp(), $splitDay->setTime(13, 0)->getTimestamp(),
 			$otherSplitDay->setTime(9, 0)->getTimestamp()),
+		'long_date' => $longDay->format('Y-m-d'), 'long_split_date' => $longSplitDay->format('Y-m-d'),
+		'long_starts' => array($longDay->setTime(8, 0)->getTimestamp(), $longDay->setTime(13, 0)->getTimestamp()),
+		'long_split_starts' => array($longSplitDay->setTime(8, 0)->getTimestamp(), $longSplitDay->setTime(13, 0)->getTimestamp()),
 		'calendar_month' => $today->format('Y-m'), 'six_month_limit' => $limitDay->format('Y-m-d'),
 		'company_name' => $companyName, 'professional_name' => $owner->getFullName($langs),
+		'company_favicon_file' => 'logos/thumbs/'.$squareName,
 		'professional_email' => $owner->email, 'professional_phone_href' => 'tel:+41215550101',
 		'professional_mobile_href' => 'tel:+41795550102',
 		'appointment_subjects' => $appointmentSubjects, 'client_address' => $clientAddress,
@@ -229,22 +243,26 @@ try {
 	fclose($pipes[0]);
 	$exitCode = proc_close($process);
 	if ($exitCode !== 0) throw new RuntimeException('Browser checks failed with exit code '.$exitCode);
-	// One absence, two legacy bookings, one continuous and three split segments.
+	// One absence, two single bookings and seven grouped/recovered segments.
 	$eventCount = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX
 		.'actioncomm WHERE fk_user_action = '.$ownerId.' AND entity = '.$entity));
-	if (!$eventCount || (int) $eventCount->nb !== 7) throw new RuntimeException('Browser bookings duplicated or lost a native segment');
-	$groupCounts = array('CDav Browser Continuous' => 0, 'CDav Browser Split' => 0);
-	foreach (array_keys($groupCounts) as $name) {
-		$subject = $appointmentSubjects[$name === 'CDav Browser Continuous' ? 'continuous' : 'split'];
-		$expectedStarts = $name === 'CDav Browser Continuous' ? array($contiguousDay->setTime(9, 0)->getTimestamp())
-			: array($splitDay->setTime(9, 0)->getTimestamp(), $splitDay->setTime(13, 0)->getTimestamp(), $otherSplitDay->setTime(9, 0)->getTimestamp());
+	if (!$eventCount || (int) $eventCount->nb !== 10) throw new RuntimeException('Browser bookings duplicated or lost a native segment');
+	$expectedGroups = array(
+		'continuous' => array('starts' => array($contiguousDay->setTime(9, 0)->getTimestamp()), 'duration' => 3600),
+		'split' => array('starts' => array($splitDay->setTime(9, 0)->getTimestamp(), $splitDay->setTime(13, 0)->getTimestamp(),
+			$otherSplitDay->setTime(9, 0)->getTimestamp()), 'duration' => 1800),
+		'recovery' => array('starts' => array($longDay->setTime(8, 0)->getTimestamp()), 'duration' => 14400),
+		'longsplit' => array('starts' => array($longSplitDay->setTime(8, 0)->getTimestamp(), $longSplitDay->setTime(13, 0)->getTimestamp()), 'duration' => 14400)
+	);
+	foreach ($expectedGroups as $kind => $expectedGroup) {
+		$subject = $appointmentSubjects[$kind];
+		$expectedStarts = $expectedGroup['starts'];
 		$seenStarts = array();
 		$events = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId
 			.' AND entity = '.$entity." AND label = '".$db->escape($subject)."' ORDER BY id");
 		while ($row = $db->fetch_object($events)) {
 			$event = new ActionComm($db);
-			$duration = $name === 'CDav Browser Continuous' ? 3600 : 1800;
-			if ($event->fetch((int) $row->id) <= 0 || $event->datef - $event->datep !== $duration) {
+			if ($event->fetch((int) $row->id) <= 0 || $event->datef - $event->datep !== $expectedGroup['duration']) {
 				throw new RuntimeException('Browser selection has an incorrect native duration');
 			}
 			if ($event->label !== $subject || $event->location !== $clientAddress
@@ -252,14 +270,10 @@ try {
 				throw new RuntimeException('Browser selection lost or truncated its native subject/client address');
 			}
 			$seenStarts[] = (int) $event->datep;
-			$groupCounts[$name]++;
 		}
 		sort($seenStarts);
 		sort($expectedStarts);
 		if ($seenStarts !== $expectedStarts) throw new RuntimeException('Browser selection has incorrect native segment dates');
-	}
-	if ($groupCounts !== array('CDav Browser Continuous' => 1, 'CDav Browser Split' => 3)) {
-		throw new RuntimeException('Browser grouped booking segment count mismatch');
 	}
 	foreach (array('single', 'lost') as $kind) {
 		$rows = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId
@@ -276,8 +290,8 @@ try {
 		.' GROUP BY r.request_hash ORDER BY nb');
 	$receiptCounts = array();
 	while ($row = $db->fetch_object($receiptGroups)) $receiptCounts[] = (int) $row->nb;
-	if ($receiptCounts !== array(1, 1, 1, 3)) throw new RuntimeException('Browser grouped booking receipts do not match their native segments');
-	fwrite(STDOUT, "Native browser selections: one continuous 60-minute event and three split 30-minute events; shared receipts verified.\n");
+	if ($receiptCounts !== array(1, 1, 1, 1, 2, 3)) throw new RuntimeException('Browser grouped booking receipts do not match their native segments');
+	fwrite(STDOUT, "Native browser selections: adjacent units, three short split segments, recovered four-hour event and two four-hour lunch segments; shared receipts verified.\n");
 } catch (Throwable $exception) {
 	$failure = $exception;
 	fwrite(STDERR, 'Browser checks failed: '.get_class($exception).PHP_EOL);

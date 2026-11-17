@@ -51,6 +51,8 @@ try {
 		'The native professional photo is embedded as bounded image bytes');
 	identityCheck($identity['company_logo'] === '/dolibarr/viewimage.php?modulepart=mycompany&entity=2&file=logos%2Fcompany%20logo.png',
 		'Company logos reuse the public native endpoint and installation prefix');
+	identityCheck($identity['company_favicon'] === $identity['company_logo'],
+		'A company without a square logo falls back to its regular logo for the tab icon');
 	identityCheck($identity['email_href'] === 'mailto:pro%2Bbooking%40example.test'
 		&& $identity['phone_href'] === 'tel:+41225550101' && $identity['mobile_href'] === 'tel:+41795550102',
 		'Public contact links use only safe mail and telephone schemes');
@@ -60,6 +62,39 @@ try {
 	$files[] = $temporary.'/company/logos/thumbs/small.png';
 	identityCheck(strpos(\Dolibarr\CDav\BookingIdentity::build($professional, $company, $conf)['company_logo'], 'logos%2Fthumbs%2Fsmall.png') !== false,
 		'Native company thumbnails take priority when available');
+	$regularLogo = \Dolibarr\CDav\BookingIdentity::build($professional, $company, $conf)['company_logo'];
+	$squareCompany = clone $company;
+	$squareCompany->logo_squarred = 'square company.png';
+	$squareCompany->logo_squarred_small = 'square small.png';
+	$squareCompany->logo_squarred_mini = 'square mini.png';
+	foreach (array('logos/square company.png', 'logos/thumbs/square small.png', 'logos/thumbs/square mini.png') as $squarePath) {
+		file_put_contents($temporary.'/company/'.$squarePath, $png);
+		$files[] = $temporary.'/company/'.$squarePath;
+		$squareIdentity = \Dolibarr\CDav\BookingIdentity::build($professional, $squareCompany, $conf);
+		identityCheck($squareIdentity['company_logo'] === $regularLogo
+			&& $squareIdentity['company_favicon'] === '/dolibarr/viewimage.php?modulepart=mycompany&entity=2&file='.rawurlencode($squarePath),
+			'The most specific available square logo is used for the tab without changing the rectangular header logo');
+	}
+	foreach (array('logo_squarred_mini', 'logo_squarred_small', 'logo_squarred') as $squareField) {
+		$invalidCompany = clone $company;
+		foreach (array('../portrait.png', '..', '/square.png', 'nested/photo.png', 'a\\b.png', "square.png\0", 'missing.png') as $invalidLogo) {
+			$invalidCompany->{$squareField} = $invalidLogo;
+			identityCheck(\Dolibarr\CDav\BookingIdentity::build($professional, $invalidCompany, $conf)['company_favicon'] === $regularLogo,
+				'An invalid or missing square filename falls back without escaping the native logo directory');
+		}
+	}
+	$squareCompany->logo_squarred_mini = 'missing.png';
+	identityCheck(\Dolibarr\CDav\BookingIdentity::build($professional, $squareCompany, $conf)['company_favicon']
+		=== '/dolibarr/viewimage.php?modulepart=mycompany&entity=2&file=logos%2Fthumbs%2Fsquare%20small.png',
+		'A missing mini square thumbnail falls back to the readable small square thumbnail');
+	$squareCompany->logo_squarred_small = '../small.png';
+	identityCheck(\Dolibarr\CDav\BookingIdentity::build($professional, $squareCompany, $conf)['company_favicon']
+		=== '/dolibarr/viewimage.php?modulepart=mycompany&entity=2&file=logos%2Fsquare%20company.png',
+		'Invalid square thumbnails fall back to the original square logo');
+	$squareOnly = (object) array('logo_squarred' => 'square company.png');
+	$squareOnlyIdentity = \Dolibarr\CDav\BookingIdentity::build(array(), $squareOnly, $conf);
+	identityCheck($squareOnlyIdentity['company_logo'] === '' && strpos($squareOnlyIdentity['company_favicon'], 'entity=2&file=logos%2Fsquare%20company.png') !== false,
+		'A native square logo remains available without publishing a nonexistent rectangular logo');
 	$thumbnail = $temporary.'/users/17/photos/'.getImageFileNameForSize('portrait.png', '_small');
 	file_put_contents($thumbnail, $gif);
 	$files[] = $thumbnail;
@@ -108,7 +143,7 @@ try {
 	identityCheck($invalid['email_href'] === '' && $invalid['phone_href'] === '' && $invalid['mobile'] === '',
 		'Contact values cannot create injected mail headers, HTML or executable links');
 	$empty = \Dolibarr\CDav\BookingIdentity::build(array(), null, (object) array('entity' => 1));
-	identityCheck($empty['professional_photo'] === '' && $empty['company_logo'] === '' && $empty['email'] === '',
+	identityCheck($empty['professional_photo'] === '' && $empty['company_logo'] === '' && $empty['company_favicon'] === '' && $empty['email'] === '',
 		'Missing native identity fields degrade to plain booking controls');
 } finally {
 	foreach ($links as $link) unlink($link);

@@ -27,6 +27,7 @@ class BookingService
 	private $entity;
 	public const REQUEST_TTL = 900;
 	private const RECEIPT_RETENTION = 86400;
+	private const SELECTION_ERROR_KEYS = array('CDavBookingSelectionContiguousDisabled', 'CDavBookingSelectionSplitDisabled');
 
 	/**
 	 * Bind technical state to the current native entity.
@@ -369,7 +370,7 @@ class BookingService
 		} catch (\OutOfBoundsException $e) {
 			throw new BookingException('CDavBookingConflict', 409);
 		} catch (\InvalidArgumentException $e) {
-			throw new BookingException('CDavBookingInvalid', 422);
+			throw new BookingException(in_array($e->getMessage(), self::SELECTION_ERROR_KEYS, true) ? $e->getMessage() : 'CDavBookingInvalid', 422);
 		}
 		$owner = $this->owner($profile['owner_id']);
 		$reader = new BookingCalendarReader($this->db, $owner, $langs);
@@ -390,7 +391,7 @@ class BookingService
 		} catch (\OutOfBoundsException $e) {
 			throw new BookingException('CDavBookingConflict', 409);
 		} catch (\InvalidArgumentException $e) {
-			throw new BookingException('CDavBookingInvalid', 422);
+			throw new BookingException(in_array($e->getMessage(), self::SELECTION_ERROR_KEYS, true) ? $e->getMessage() : 'CDavBookingInvalid', 422);
 		}
 	}
 
@@ -488,7 +489,7 @@ class BookingService
 		}
 		$clean = $details['contact'];
 		try { $selection = BookingAvailability::planSelection($initial['config'], $starts); } catch (\InvalidArgumentException $e) {
-			throw new BookingException('CDavBookingInvalid', 422);
+			throw new BookingException(in_array($e->getMessage(), self::SELECTION_ERROR_KEYS, true) ? $e->getMessage() : 'CDavBookingInvalid', 422);
 		}
 		$starts = $selection['starts'];
 		// A legacy replay retains its historical contact shape and hash; new

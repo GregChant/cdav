@@ -35,6 +35,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/user/class/user.class.php';
 require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
 require_once dirname(__DIR__).'/class/CDavBookingService.php';
+$langs->load('cdav@cdav');
 
 /**
  * Reject a failed native or HTTP assertion.
@@ -123,7 +124,8 @@ function multiLiveForm(string $key, string $date): array
 	$cookie = tempnam($temporaryDirectory, 'cookie-');
 	$response = multiLiveHttp(array('key' => $key, 'date' => $date, 'format' => 'json'), $cookie);
 	multiLiveCheck($response['status'] === 200 && !empty($response['json']['request']) && !empty($response['json']['token']), 'Cannot get public multi-booking form');
-	return array('key' => $key, 'date' => $date, 'cookie' => $cookie, 'ticket' => $response['json']['request'], 'token' => $response['json']['token']);
+	return array('key' => $key, 'date' => $date, 'cookie' => $cookie, 'ticket' => $response['json']['request'],
+		'token' => $response['json']['token'], 'slots' => $response['json']['slots']);
 }
 
 /**
@@ -323,14 +325,51 @@ try {
 	$config['allow_split'] = false;
 	$service->saveProfile($ownerId, $config, true);
 	$offForm = multiLiveForm($key, $day->modify('+4 days')->format('Y-m-d'));
-	multiLiveCheck(multiLivePost($offForm, array($at(4, 9, 30), $at(4, 10)))['status'] === 422, 'Forged continuous selection must obey the profile switch');
-	multiLiveCheck(multiLivePost($offForm, array($at(4, 9, 30), $at(4, 13, 30)))['status'] === 422, 'Forged split selection must obey the profile switch');
+	$contiguousOff = multiLivePost($offForm, array($at(4, 9, 30), $at(4, 10)));
+	multiLiveCheck($contiguousOff['status'] === 422 && $contiguousOff['json']['error'] === $langs->transnoentitiesnoconv('CDavBookingSelectionContiguousDisabled'),
+		'Forged continuous selection must return its stable profile-permission error');
+	$splitOff = multiLivePost($offForm, array($at(4, 9, 30), $at(4, 13, 30)));
+	multiLiveCheck($splitOff['status'] === 422 && $splitOff['json']['error'] === $langs->transnoentitiesnoconv('CDavBookingSelectionSplitDisabled'),
+		'Forged split selection must return its stable profile-permission error');
 	$config['allow_contiguous'] = $config['allow_split'] = true;
 	$service->saveProfile($ownerId, $config, true);
 	$proof['checks'][] = 'both disabled profile permissions enforced by public POST';
 
+	$longConfig = array_replace($config, array('duration' => 240, 'step' => 240, 'buffer_before' => 0, 'buffer_after' => 0,
+		'allow_contiguous' => true, 'allow_split' => false,
+		'weekly' => array_fill(1, 7, array(array('08:00', '12:00'), array('13:00', '17:00')))));
+	$service->saveProfile($ownerId, $longConfig, true);
+	$longForm = multiLiveForm($key, $day->modify('+4 days')->format('Y-m-d'));
+	$longStarts = array($at(4, 8), $at(4, 13));
+	multiLiveCheck(array_column($longForm['slots'], 'start') === $longStarts, 'Both four-hour periods must be individually bookable');
+	$before = (int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId)->nb;
+	$beforeReceipts = (int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request')->nb;
+	$longRefused = multiLivePost($longForm, $longStarts);
+	multiLiveCheck($longRefused['status'] === 422 && $longRefused['json']['error'] === $langs->transnoentitiesnoconv('CDavBookingSelectionSplitDisabled')
+		&& (int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId)->nb === $before
+		&& (int) multiLiveRow('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request')->nb === $beforeReceipts,
+		'Lunch prevents a continuous four-hour group and creates neither event nor receipt');
+	$longConfig['allow_split'] = true;
+	$service->saveProfile($ownerId, $longConfig, true);
+	$longForm = multiLiveForm($key, $day->modify('+4 days')->format('Y-m-d'));
+	$longAccepted = multiLivePost($longForm, $longStarts);
+	multiLiveCheck($longAccepted['status'] === 201 && count($longAccepted['json']['segments']) === 2
+		&& $longAccepted['json']['duration_minutes'] === 480, 'Enabling separate periods permits exactly two four-hour events and a 480-minute receipt');
+	$longRows = multiLiveQuery('SELECT a.id FROM '.MAIN_DB_PREFIX.'actioncomm a INNER JOIN '.MAIN_DB_PREFIX
+		.'cdav_booking_request_event m ON m.fk_actioncomm=a.id INNER JOIN '.MAIN_DB_PREFIX
+		."cdav_booking_request r ON r.request_hash=m.request_hash WHERE r.reference='".$db->escape($longAccepted['json']['reference'])."' ORDER BY m.segment_no");
+	$nativeStarts = array();
+	while ($row = $db->fetch_object($longRows)) {
+		$event = new ActionComm($db);
+		multiLiveCheck($event->fetch((int) $row->id) > 0 && $event->datef - $event->datep === 14400,
+			'Each native lunch-separated event must last exactly four hours');
+		$nativeStarts[] = (int) $event->datep;
+	}
+	multiLiveCheck($nativeStarts === $longStarts, 'Native four-hour events retain their distinct morning and afternoon starts');
+	$proof['checks'][] = 'four-hour lunch periods rejected without mutation, then accepted as 480 minutes and two native events';
+
 	$rollbackForm = multiLiveForm($key, $day->modify('+5 days')->format('Y-m-d'));
-	$rollbackStarts = array($at(5, 9, 30), $at(5, 13, 30));
+	$rollbackStarts = array($at(5, 8), $at(5, 13));
 	$rollbackName = $prefix.' rollback';
 	$rollbackSubject = $prefix.' rollback subject';
 	$marker = $temporaryDirectory.'/trigger-count';
@@ -357,7 +396,8 @@ try {
 	unlink($triggerPath);
 	$triggerPath = '';
 	multiLiveCheck(multiLivePost($rollbackForm, $rollbackStarts, array('name' => $rollbackName, 'subject' => $rollbackSubject))['status'] === 201, 'The same group ticket may succeed after a complete rollback');
-	$proof['checks'][] = 'second native trigger failure rolls back every segment and permits retry';
+	$proof['checks'][] = 'second four-hour native trigger failure rolls back every segment and permits retry';
+	$service->saveProfile($ownerId, $config, true);
 
 	$raceDate = $day->modify('+6 days')->format('Y-m-d');
 	$forms = array(multiLiveForm($key, $raceDate), multiLiveForm($key, $raceDate));

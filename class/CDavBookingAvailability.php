@@ -342,14 +342,14 @@ class BookingAvailability
 			$last = count($segments) - 1;
 			if ($last >= 0 && $start < $segments[$last]['end']) throw new \InvalidArgumentException('Booking selections overlap');
 			if ($last >= 0 && $start === $segments[$last]['end'] && $day === $lastDay) {
-				if (!$config['allow_contiguous']) throw new \InvalidArgumentException('Continuous booking is disabled');
+				if (!$config['allow_contiguous']) throw new \InvalidArgumentException('CDavBookingSelectionContiguousDisabled');
 				$segments[$last]['end'] = $start + $duration;
 			} else {
 				$segments[] = array('start' => $start, 'end' => $start + $duration);
 			}
 			$lastDay = $day;
 		}
-		if (count($segments) > 1 && !$config['allow_split']) throw new \InvalidArgumentException('Split booking is disabled');
+		if (count($segments) > 1 && !$config['allow_split']) throw new \InvalidArgumentException('CDavBookingSelectionSplitDisabled');
 		return array('starts' => $starts, 'segments' => $segments, 'duration_minutes' => count($starts) * $config['duration']);
 	}
 

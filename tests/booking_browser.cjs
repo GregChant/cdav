@@ -43,14 +43,14 @@ async function follow(page, action, expected = 200) {
   return response;
 }
 
-async function checkBasket(page, starts) {
+async function checkBasket(page, starts, valid = true) {
   check(!new URL(page.url()).searchParams.has('subject') && !new URL(page.url()).searchParams.has('address'),
     'Appointment subject and client address never enter calendar or basket URLs');
   const displayed = await page.locator('#booking-selection li[data-start]').evaluateAll(items => items.map(item => Number(item.dataset.start)));
   check(selectionCsv(displayed) === selectionCsv(starts), 'The basket preserves exactly the chosen units');
   const confirmation = page.locator('#booking-confirm-selection');
-  check(await confirmation.count() === (starts.length ? 1 : 0), 'One contact form exists only for a nonempty valid selection');
-  if (starts.length) {
+  check(await confirmation.count() === (starts.length && valid ? 1 : 0), 'One contact form exists only for a nonempty valid selection');
+  if (starts.length && valid) {
     check(await confirmation.locator('input[name=selection]').inputValue() === selectionCsv(starts), 'The single POST preserves the canonical selection');
     check(await confirmation.locator('input[name=start]').count() === 0, 'Grouped confirmation uses selection instead of a legacy start');
     check(await confirmation.locator('#booking-name').count() === 1 && await confirmation.locator('#booking-email').count() === 1,
@@ -117,6 +117,25 @@ async function checkBranding(page) {
   const imageResponse = await page.request.get(logoUrl.href);
   check(imageResponse.status() === 200 && (imageResponse.headers()['content-type'] || '').startsWith('image/'),
     'The native company logo is served as a public image');
+  const favicon = page.locator('link[rel=icon]');
+  check(await favicon.count() === 1, 'The public page declares one tab icon');
+  const faviconUrl = new URL(await favicon.getAttribute('href'), page.url());
+  check(faviconUrl.origin === logoUrl.origin && faviconUrl.pathname.endsWith('/viewimage.php')
+    && faviconUrl.searchParams.get('modulepart') === 'mycompany'
+    && faviconUrl.searchParams.get('file') === fixture.company_favicon_file && faviconUrl.href !== logoUrl.href,
+    'The tab icon prefers the native square thumbnail independently of the header logo');
+  const faviconResponse = await page.request.get(faviconUrl.href);
+  check(faviconResponse.status() === 200 && (faviconResponse.headers()['content-type'] || '').startsWith('image/'),
+    'The native square tab icon is served as a public image');
+  const dimensions = await page.evaluate(url => new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve([image.naturalWidth, image.naturalHeight]);
+    image.onerror = () => reject(new Error('The native tab icon could not be decoded'));
+    image.src = url;
+  }), faviconUrl.href);
+  check(dimensions[0] === 2 && dimensions[1] === 2
+    && await logo.evaluate(image => image.naturalWidth === 4 && image.naturalHeight === 2),
+    'The favicon is genuinely square while the independent native header logo is rectangular');
   check((await photo.getAttribute('src')).startsWith('data:image/png;base64,'), 'The bounded native professional photo needs no separate public-card key');
   const professional = page.locator('#booking-professional');
   check(await professional.locator('a[href^="mailto:"]').getAttribute('href') === 'mailto:' + encodeURIComponent(fixture.professional_email),
@@ -152,7 +171,7 @@ async function checkBranding(page) {
     let axe = await new AxeBuilder({page}).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
     check(axe.violations.length === 0, 'Public accessibility: ' + axe.violations.map(v => v.id).join(','));
     results.push({case: 'U01/U02 desktop French', http: response.status(), axeViolations: axe.violations.length,
-      nativeCompanyLogoLoaded: true, nativeProfessionalPhotoLoaded: true, professionalContactLinks: true});
+      nativeCompanyLogoLoaded: true, nativeProfessionalPhotoLoaded: true, professionalContactLinks: true, nativeSquareFaviconLoaded: true});
     await capture(page, 'booking-ui-desktop-slots.png');
 
     // Chromium may expose several keyboard segments inside a native date input.
@@ -304,10 +323,18 @@ async function checkBranding(page) {
     await capture(admin, 'booking-ui-admin-profile.png');
     results.push({case: 'Native admin browser', http: response.status(), profileLoaded: true});
 
-    async function saveSelectionPolicy(contiguous, split) {
+    async function saveSelectionPolicy(contiguous, split, settings = {}) {
+      const duration = settings.duration || 30;
+      const step = settings.step || 30;
+      const morningStart = settings.morningStart || '09:00';
       await admin.goto(fixture.admin_url + '?owner_id=' + fixture.owner_id);
       await admin.locator('select[name=allow_contiguous]').selectOption(contiguous ? '1' : '0');
       await admin.locator('select[name=allow_split]').selectOption(split ? '1' : '0');
+      await admin.locator('input[name=duration]').fill(String(duration));
+      await admin.locator('input[name=step]').fill(String(step));
+      for (let day = 1; day <= 7; day++) {
+        await admin.locator('input[name=weekly_' + day + '_0_start]').fill(morningStart);
+      }
       await admin.locator('input[name=horizon]').fill('6');
       await admin.locator('select[name=horizon_unit]').selectOption('months');
       const form = admin.locator('form:has(input[name=action][value=save_profile])');
@@ -318,8 +345,10 @@ async function checkBranding(page) {
         && await admin.locator('select[name=allow_split]').inputValue() === (split ? '1' : '0'), 'Native admin persists each independent booking permission');
       check(await admin.locator('input[name=horizon]').inputValue() === '6'
         && await admin.locator('select[name=horizon_unit]').inputValue() === 'months', 'Six calendar months persist through the native form');
+      check(await admin.locator('input[name=duration]').inputValue() === String(duration)
+        && await admin.locator('input[name=step]').inputValue() === String(step), 'Native duration and step persist through the profile form');
       for (let day = 1; day <= 7; day++) {
-        for (const [range, start, end] of [[0, '09:00', '12:00'], [1, '13:00', '17:00']]) {
+        for (const [range, start, end] of [[0, morningStart, '12:00'], [1, '13:00', '17:00']]) {
           check(await admin.locator('input[name=weekly_' + day + '_' + range + '_start]').inputValue() === start
             && await admin.locator('input[name=weekly_' + day + '_' + range + '_end]').inputValue() === end,
           'Changing the booking permissions preserves native weekly hours');
@@ -419,6 +448,71 @@ async function checkBranding(page) {
     const splitAxe = await checkAccessible(phone, 'Split confirmation accessibility');
     await capture(phone, 'booking-ui-mobile-split-confirmation.png');
     results.push({case: 'Split multi-day booking', http: response.status(), units: 3, segments: 3, days: 2, axeViolations: splitAxe});
+
+    const fourHourSettings = {duration: 240, step: 240, morningStart: '08:00'};
+    await saveSelectionPolicy(true, false, fourHourSettings);
+    for (const [language, client] of [['fr', page], ['en', phone]]) {
+      response = await client.goto(publicUrl(fixture.long_date, language));
+      check(response.status() === 200, 'Four-hour continuous-only profile GET');
+      check((await client.locator('p.notice').allTextContents()).some(text => text.includes(language === 'fr' ? 'sans pause' : 'no break')),
+        'Continuous-only guidance explicitly excludes a break in both languages');
+      const offered = await client.locator('#booking-add-selection input[name="add[]"]').evaluateAll(items => items.map(item => Number(item.value)));
+      check(selectionCsv(offered) === selectionCsv(fixture.long_starts), 'The actual calendar offers exactly 08:00–12:00 and 13:00–17:00');
+      const addForm = client.locator('#booking-add-selection');
+      check(new URL(await addForm.getAttribute('action'), client.url()).hash === '#booking-selection', 'Adding units targets the basket fragment');
+      for (const start of fixture.long_starts) await addForm.locator('input[name="add[]"][value="' + start + '"]').check();
+      response = await follow(client, () => addForm.locator('button[type=submit]').click(), 422);
+      await checkBasket(client, fixture.long_starts, false);
+      check(new URL(client.url()).hash === '#booking-selection', 'The rejected addition scrolls to its basket');
+      const localError = client.locator('#booking-selection #booking-selection-error[role=alert]');
+      check(await localError.count() === 1, 'The rejected lunch break has one local accessible explanation');
+      check((await localError.textContent()).includes(language === 'fr' ? 'séparés par une pause' : 'separated by a break')
+        && (await localError.textContent()).includes(language === 'fr' ? 'Retirez les créneaux séparés' : 'Remove the separate slots'),
+        'The local error explains the profile restriction and its recovery in the chosen language');
+      await client.waitForFunction(() => {
+        const bounds = document.querySelector('#booking-selection-error').getBoundingClientRect();
+        return bounds.top >= 0 && bounds.bottom <= innerHeight;
+      });
+      check(await client.locator('#booking-selection .selection-summary').count() === 0
+        && await client.locator('#booking-selection-segments').count() === 0, 'An invalid selection has neither a misleading zero total nor computed periods');
+      check(await client.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'The local lunch-break explanation fits its viewport');
+      const errorAxe = await checkAccessible(client, 'Lunch-break restriction accessibility in ' + language);
+      await capture(client, 'booking-ui-lunch-rejected-' + language + '.png');
+      await follow(client, () => client.locator('#booking-selection li[data-start="' + fixture.long_starts[1] + '"] .booking-selection-remove').click());
+      await checkBasket(client, [fixture.long_starts[0]]);
+      check(await client.locator('#booking-selection-error').count() === 0
+        && (await client.locator('#booking-selection .selection-summary').textContent()).includes('240'), 'Removing the afternoon restores a valid 240-minute booking');
+      if (language === 'en') {
+        await client.locator('#booking-name').fill('CDav Browser Lunch Recovery');
+        await client.locator('#booking-email').fill('browser-recovery@example.test');
+        await client.locator('#booking-subject').fill(fixture.appointment_subjects.recovery);
+        await client.locator('#booking-address').fill(fixture.client_address);
+        response = await follow(client, () => client.locator('#booking-confirm-selection button[type=submit]').click(), 201);
+        await checkAppointmentDetails(client, fixture.appointment_subjects.recovery);
+        check(await client.locator('#booking-confirmation-segments li').count() === 1, 'Recovered four-hour booking creates one continuous segment');
+      }
+      results.push({case: 'Four-hour lunch restriction and recovery ' + language, rejectedHttp: 422,
+        localErrorInViewport: true, zeroTotalHidden: true, recovery: language === 'en' ? 'booked201' : 'validForm', axeViolations: errorAxe});
+    }
+
+    await saveSelectionPolicy(true, true, fourHourSettings);
+    await phone.goto(publicUrl(fixture.long_split_date));
+    await addUnits(phone, fixture.long_split_starts);
+    await checkBasket(phone, fixture.long_split_starts);
+    check((await phone.locator('#booking-selection .selection-summary').textContent()).includes('480')
+      && await phone.locator('#booking-selection-segments li').count() === 2, 'Allowing split periods displays 480 minutes in two segments');
+    await capture(phone, 'booking-ui-four-hour-split-basket.png');
+    await phone.locator('#booking-name').fill('CDav Browser Long Split');
+    await phone.locator('#booking-email').fill('browser-long-split@example.test');
+    await phone.locator('#booking-subject').fill(fixture.appointment_subjects.longsplit);
+    await phone.locator('#booking-address').fill(fixture.client_address);
+    response = await follow(phone, () => phone.locator('#booking-confirm-selection button[type=submit]').click(), 201);
+    await checkAppointmentDetails(phone, fixture.appointment_subjects.longsplit);
+    check(await phone.locator('#booking-confirmation-segments li').count() === 2, 'The two four-hour periods produce one group confirmation');
+    const longAxe = await checkAccessible(phone, 'Four-hour split confirmation accessibility');
+    await capture(phone, 'booking-ui-four-hour-split-confirmation.png');
+    results.push({case: 'Two four-hour lunch periods allowed', http: response.status(), units: 2, segments: 2,
+      durationMinutes: 480, axeViolations: longAxe});
     check(errors.length === 0, 'No page script errors after extended bookings: ' + errors.join(';'));
 
     const summary = {suite: 'tests/booking_browser.cjs', browser: browser.version(),

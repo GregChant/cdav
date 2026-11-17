@@ -1,6 +1,6 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.1.2 propose un calendrier mensuel de réservation relié directement à
+CDav 6.1.3 propose un calendrier mensuel de réservation relié directement à
 l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
 choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
 l'autorise. La confirmation crée les rendez-vous natifs affectés au
@@ -18,7 +18,7 @@ La version 6.1 ajoute une table de liaison technique entre un reçu et ses
 ZIP, y compris pour une mise à niveau depuis 6.0. Les profils et liens publiés
 sont conservés ; les deux nouvelles autorisations de multisélection restent
 désactivées tant qu'un administrateur ne les active pas.
-Les mises à jour 6.1.1 et 6.1.2 ne modifient pas le schéma et conservent les
+Les mises à jour 6.1.1 à 6.1.3 ne modifient pas le schéma et conservent les
 profils et les publications de 6.1.
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
@@ -126,6 +126,18 @@ un conflit au lieu d'un second rendez-vous.
   permet pas de regrouper des unités consécutives, et inversement. Le serveur
   vérifie les autorisations actuelles au moment de confirmer.
 
+Par exemple, 08:00–12:00 puis 13:00–17:00 sont deux plages séparées par une
+pause. Pour les réserver ensemble, activer **Autoriser plusieurs plages séparées
+ou plusieurs jours** dans le profil. L'option des créneaux consécutifs seule
+ne suffit pas. Avec le fractionnement autorisé et les disponibilités requises,
+la sélection représente 480 minutes de rendez-vous, réparties en deux parties.
+
+Depuis la version 6.1.3, l'ajout de créneaux ramène directement à la sélection.
+Une combinaison refusée affiche son motif près du panier, avec les actions
+pour retirer un créneau ou vider la sélection. La durée totale et les périodes
+ne sont affichées qu'après validation ; le formulaire de confirmation reste
+absent tant que la sélection ne respecte pas le profil et les disponibilités.
+
 Le pas doit permettre d'enchaîner les unités : choisir par exemple 30 minutes
 pour une durée de base de 60 minutes. Deux unités qui se chevauchent sont
 refusées. Une sélection est limitée à 24 unités sur 8 jours locaux distincts ;
@@ -146,8 +158,11 @@ du professionnel sélectionné. Les champs non renseignés sont omis. Les option
 natives de masquage public de cet utilisateur pour la photo et les coordonnées
 sont respectées.
 
-Le logo sert aussi d'icône à l'onglet du navigateur depuis la version 6.1.2.
-Il utilise le point d'accès public natif `viewimage.php`. La photo utilise
+L'icône de l'onglet reprend en priorité la miniature du logo carré configuré
+dans Dolibarr, comme l'interface native, puis ses versions de plus grande taille.
+Le logo ordinaire reste utilisé dans l'en-tête et en repli si aucun logo carré
+n'est disponible. Les deux utilisent le point d'accès public natif `viewimage.php`.
+La photo utilise
 les fichiers natifs de l'utilisateur, avec préférence pour sa miniature, et est
 intégrée à la page ; aucune activation de la carte virtuelle publique ni nouvelle
 copie de photo n'est nécessaire. Les photos PNG, JPEG, GIF et WebP jusqu'à 1 Mio

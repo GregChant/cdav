@@ -17,7 +17,7 @@ class BookingIdentity
 	 */
 	public static function build(array $professional, $company, $conf): array
 	{
-		$identity = array('company_name' => (string) ($company->name ?? ''), 'company_logo' => '',
+		$identity = array('company_name' => (string) ($company->name ?? ''), 'company_logo' => '', 'company_favicon' => '',
 			'professional_name' => (string) ($professional['name'] ?? ''),
 			'professional_photo' => self::photo($professional, $conf),
 			'email' => '', 'email_href' => '', 'phone' => '', 'phone_href' => '', 'mobile' => '', 'mobile_href' => '');
@@ -39,6 +39,15 @@ class BookingIdentity
 		foreach (array('logos/thumbs/' => $small, 'logos/' => $logo) as $prefix => $file) {
 			if (!self::filename($file) || $directory === '' || !is_readable($directory.'/'.$prefix.$file)) continue;
 			$identity['company_logo'] = DOL_URL_ROOT.'/viewimage.php?modulepart=mycompany&entity='.((int) $conf->entity)
+				.'&file='.rawurlencode($prefix.$file);
+			break;
+		}
+		$identity['company_favicon'] = $identity['company_logo'];
+		// Native Dolibarr uses the square company thumbnail for its tab icon.
+		foreach (array('logo_squarred_mini' => 'logos/thumbs/', 'logo_squarred_small' => 'logos/thumbs/', 'logo_squarred' => 'logos/') as $field => $prefix) {
+			$file = (string) ($company->{$field} ?? '');
+			if (!self::filename($file) || $directory === '' || !is_file($directory.'/'.$prefix.$file) || !is_readable($directory.'/'.$prefix.$file)) continue;
+			$identity['company_favicon'] = DOL_URL_ROOT.'/viewimage.php?modulepart=mycompany&entity='.((int) $conf->entity)
 				.'&file='.rawurlencode($prefix.$file);
 			break;
 		}

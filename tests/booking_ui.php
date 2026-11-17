@@ -52,7 +52,9 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		'details-malformed', 'details-hostile', 'details-multiline', 'details-oversized',
 		'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed',
 		'multi-empty', 'multi-contiguous', 'multi-split', 'multi-both', 'multi-disabled', 'multi-invalid', 'multi-malformed', 'multi-scalar', 'multi-dst', 'confirmed-split',
-		'branding-full', 'branding-no-images', 'branding-no-contacts', 'branding-hostile', 'branding-hidden', 'branding-malformed', 'branding-large-photo', 'branding-oversized-photo') as $scenario) {
+		'multi-pause-invalid', 'multi-day-invalid', 'multi-contiguous-invalid', 'multi-invalid-fallback',
+		'branding-full', 'branding-no-images', 'branding-no-contacts', 'branding-hostile', 'branding-hidden', 'branding-malformed', 'branding-large-photo', 'branding-oversized-photo',
+		'branding-favicon-square', 'branding-favicon-missing', 'branding-favicon-malformed', 'branding-favicon-hostile', 'branding-favicon-data') as $scenario) {
 		$bookingProfile = array('config' => array('timezone' => 'Europe/Zurich', 'duration' => 30, 'horizon' => 60));
 		$bookingKey = str_repeat('a', 64);
 		$bookingDate = '2026-11-20';
@@ -144,8 +146,9 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			$selectionStart = (new DateTimeImmutable('2026-11-20 09:00', new DateTimeZone('Europe/Zurich')))->getTimestamp();
 			$selectionAfternoon = $selectionStart + 4 * 3600;
 			$selectionOtherDay = $selectionStart + 3 * 86400;
-			$bookingProfile['config']['allow_contiguous'] = in_array($scenario, array('multi-empty', 'multi-contiguous', 'multi-both', 'multi-invalid', 'multi-malformed', 'multi-scalar', 'multi-dst', 'confirmed-split'), true);
-			$bookingProfile['config']['allow_split'] = !in_array($scenario, array('multi-contiguous', 'multi-disabled'), true);
+			$bookingProfile['config']['allow_contiguous'] = in_array($scenario, array('multi-empty', 'multi-contiguous', 'multi-both', 'multi-invalid', 'multi-malformed', 'multi-scalar', 'multi-dst', 'confirmed-split',
+				'multi-pause-invalid', 'multi-day-invalid', 'multi-invalid-fallback'), true);
+			$bookingProfile['config']['allow_split'] = !in_array($scenario, array('multi-contiguous', 'multi-disabled', 'multi-pause-invalid', 'multi-day-invalid'), true);
 			$bookingSlots = array(array('start' => $selectionStart, 'end' => $selectionStart + 1800),
 				array('start' => $selectionStart + 1800, 'end' => $selectionStart + 3600),
 				array('start' => $selectionAfternoon, 'end' => $selectionAfternoon + 1800));
@@ -172,8 +175,24 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			}
 			if ($scenario === 'multi-invalid') {
 				$bookingSelectionValid = false;
-				$bookingError = 'The chosen slot is no longer available.';
+				$bookingError = 'The chosen slot is no longer available. <script>alert(1)</script>';
 				$bookingSlots = array($bookingSlots[2]);
+			}
+			if (in_array($scenario, array('multi-pause-invalid', 'multi-day-invalid'), true)) {
+				$selectionMorning = (new DateTimeImmutable('2026-11-20 08:00', new DateTimeZone('Europe/Zurich')))->getTimestamp();
+				$selectionLater = $selectionMorning + ($scenario === 'multi-pause-invalid' ? 5 * 3600 : 86400);
+				$bookingProfile['config']['duration'] = 240;
+				$bookingSlots = array(array('start' => $selectionMorning, 'end' => $selectionMorning + 4 * 3600),
+					array('start' => $selectionLater, 'end' => $selectionLater + 4 * 3600));
+				$bookingSelection = array($selectionMorning, $selectionLater);
+				$bookingSelectionSegments = array();
+				$bookingSelectionDuration = 0;
+				$bookingSelectionValid = false;
+				$bookingError = $langs->transnoentitiesnoconv('CDavBookingSelectionSplitDisabled');
+			}
+			if ($scenario === 'multi-contiguous-invalid' || $scenario === 'multi-invalid-fallback') {
+				$bookingSelectionValid = false;
+				if ($scenario === 'multi-contiguous-invalid') $bookingError = $langs->transnoentitiesnoconv('CDavBookingSelectionContiguousDisabled');
 			}
 			if ($scenario === 'multi-malformed') {
 				$bookingSelection = array($selectionStart, (string) ($selectionStart + 1800), array('PRIVATE-SENTINEL'), '<script>PRIVATE-SENTINEL</script>');
@@ -199,12 +218,13 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		if (str_starts_with($scenario, 'branding-')) {
 			$tinyPng = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', true);
 			$bookingIdentity = array('company_name' => 'BRAND-COMPANY-SENTINEL',
-				'company_logo' => '/dolibarr/viewimage.php?modulepart=mycompany&entity=1&file=logos%2Flogo.png',
+				'company_logo' => '/dolibarr/viewimage.php?modulepart=mycompany&entity=1&file=logos%2Flogo-header.png',
+				'company_favicon' => '/dolibarr/viewimage.php?modulepart=mycompany&entity=1&file=logos%2Fthumbs%2Flogo-square_mini.png',
 				'professional_name' => 'BRAND-PROFESSIONAL-SENTINEL', 'professional_photo' => 'data:image/png;base64,'.base64_encode($tinyPng),
 				'email' => 'professional@example.test', 'email_href' => 'mailto:professional%40example.test',
 				'phone' => '+41 21 555 01 00', 'phone_href' => 'tel:+41215550100',
 				'mobile' => '+41 79 555 01 00', 'mobile_href' => 'tel:+41795550100');
-			if ($scenario === 'branding-no-images') $bookingIdentity['company_logo'] = $bookingIdentity['professional_photo'] = '';
+			if ($scenario === 'branding-no-images') $bookingIdentity['company_logo'] = $bookingIdentity['company_favicon'] = $bookingIdentity['professional_photo'] = '';
 			if ($scenario === 'branding-no-contacts') {
 				foreach (array('email', 'email_href', 'phone', 'phone_href', 'mobile', 'mobile_href') as $identityField) $bookingIdentity[$identityField] = '';
 			}
@@ -212,6 +232,7 @@ foreach (array('fr_FR', 'en_US') as $language) {
 				$bookingIdentity['company_name'] = '<img src=x onerror="alert(1)">';
 				$bookingIdentity['professional_name'] = '<script>alert(1)</script>';
 				$bookingIdentity['company_logo'] = 'javascript:alert(1)';
+				$bookingIdentity['company_favicon'] = 'javascript:alert(1)';
 				$bookingIdentity['professional_photo'] = 'data:image/svg+xml;base64,'.base64_encode('<svg onload="alert(1)"/>');
 				$bookingIdentity['email'] = 'owner" onmouseover="alert(1)@example.test';
 				$bookingIdentity['email_href'] = $bookingIdentity['phone_href'] = $bookingIdentity['mobile_href'] = 'javascript:alert(1)';
@@ -224,6 +245,10 @@ foreach (array('fr_FR', 'en_US') as $language) {
 				$bookingIdentity['professional_photo'] = 'data:image/png;base64,'.base64_encode($tinyPng.str_repeat("\0", 300000));
 			}
 			if ($scenario === 'branding-oversized-photo') $bookingIdentity['professional_photo'] = 'data:image/png;base64,'.str_repeat('A', 1398201);
+			if ($scenario === 'branding-favicon-missing') unset($bookingIdentity['company_favicon']);
+			if ($scenario === 'branding-favicon-malformed') $bookingIdentity['company_favicon'] = array('malformed');
+			if ($scenario === 'branding-favicon-hostile') $bookingIdentity['company_favicon'] = 'https://external.example.test/favicon.svg';
+			if ($scenario === 'branding-favicon-data') $bookingIdentity['company_favicon'] = 'data:image/svg+xml;base64,'.base64_encode('<svg onload="alert(1)"/>');
 		}
 		ob_start();
 		require dirname(__DIR__).'/tpl/booking.tpl.php';
@@ -369,10 +394,12 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		}
 		if (str_starts_with($scenario, 'multi-') && $scenario !== 'multi-disabled') {
 			bookingUiAssert($xpath->query('//form[@id="booking-add-selection" and @method="get"]')->length === 1, 'An enabled profile offers a GET form to build its selection');
+			bookingUiAssert($xpath->query('//form[@id="booking-add-selection"]')->item(0)->getAttribute('action') === '?#booking-selection',
+				'Adding slots returns to the basket and its validation feedback without JavaScript');
 			bookingUiAssert($xpath->query('//input[@type="radio"]')->length === 0, 'An enabled multi-selection profile uses checkboxes instead of legacy radios');
 			bookingUiAssert($xpath->query('//input[@type="checkbox" and @name="add[]"]')->length === count($bookingSlots), 'Each current free slot has one add checkbox');
-			$permissionKey = $scenario === 'multi-contiguous' ? 'CDavBookingSelectionModesContiguous'
-				: ($scenario === 'multi-split' ? 'CDavBookingSelectionModesSplit' : 'CDavBookingSelectionModesBoth');
+			$permissionKey = $bookingAllowsContiguous && $bookingAllowsSplit ? 'CDavBookingSelectionModesBoth'
+				: ($bookingAllowsContiguous ? 'CDavBookingSelectionModesContiguous' : 'CDavBookingSelectionModesSplit');
 			bookingUiAssert(strpos($html, $langs->trans($permissionKey)) !== false, 'The public hint describes this profile\'s own selection permissions');
 			foreach ($xpath->query('//nav[contains(@class,"language")]/a | //nav[contains(@class,"calendar-navigation")]/a | //a[contains(@class,"calendar-day")]') as $navigationLink) {
 				parse_str(parse_url($navigationLink->getAttribute('href'), PHP_URL_QUERY), $query);
@@ -391,7 +418,23 @@ foreach (array('fr_FR', 'en_US') as $language) {
 				}
 				parse_str(parse_url($xpath->query('//a[@id="booking-selection-clear"]')->item(0)->getAttribute('href'), PHP_URL_QUERY), $query);
 				bookingUiAssert(array_key_exists('selection', $query) && $query['selection'] === '', 'The clear link explicitly empties the URL basket');
-				bookingUiAssert($xpath->query('//ol[@id="booking-selection-segments"]/li')->length === count($bookingSelectionSegments), 'The basket distinguishes merged periods from its individual units');
+				bookingUiAssert($xpath->query('//ol[@id="booking-selection-segments"]/li')->length === ($bookingSelectionValid ? count($bookingSelectionSegments) : 0),
+					'The basket displays merged periods only after its selection has been verified');
+				$summary = $xpath->query('//section[@id="booking-selection"]/p[contains(@class,"selection-summary")]');
+				$localError = $xpath->query('//section[@id="booking-selection"]/p[@id="booking-selection-error" and @role="alert"]');
+				if ($bookingSelectionValid) {
+					bookingUiAssert($summary->length === 1 && strpos($summary->item(0)->textContent, (string) $bookingSelectionDuration) !== false,
+						'A verified selection displays its real positive total duration');
+					bookingUiAssert($localError->length === 0, 'A verified selection has no stale basket error');
+				} else {
+					bookingUiAssert($summary->length === 0 && $xpath->query('//section[@id="booking-selection"]/h3')->length === 0,
+						'An invalid selection never displays a misleading zero total or unverified booking periods');
+					$expectedError = $bookingError !== '' ? $bookingError : $langs->transnoentitiesnoconv('CDavBookingSelectionInvalid');
+					bookingUiAssert($localError->length === 1 && trim($localError->item(0)->textContent) === $expectedError,
+						'An invalid basket always announces its escaped specific error locally, with a generic fallback');
+					bookingUiAssert($xpath->query('//section[@id="booking-selection" and @aria-describedby="booking-selection-error" and @tabindex="-1"]')->length === 1,
+						'The basket navigation target has an accessible relationship to its local error');
+				}
 			}
 			if ($bookingSelectionValid) {
 				bookingUiAssert($xpath->query('//form[@id="booking-confirm-selection" and @method="post"]')->length === 1, 'A verified selection has exactly one contact confirmation form');
@@ -416,6 +459,8 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		if ($scenario === 'multi-contiguous') {
 			bookingUiAssert($xpath->query('//input[@name="add[]" and @checked]')->length === 2, 'Selected current-day units stay checked without being disabled');
 			bookingUiAssert($xpath->query('//input[@name="add[]" and @disabled]')->length === 0, 'The visitor can still interact with selected checkboxes');
+			bookingUiAssert($xpath->query('//ol[@id="booking-selection-segments"]/li')->length === 1 && $bookingSelectionDuration === 60,
+				'Two truly adjacent units retain one continuous sixty-minute booking period');
 		}
 		if ($scenario === 'multi-invalid') {
 			bookingUiAssert($xpath->query('//*[@id="booking-error" and @role="alert"]')->length === 1, 'A stale selection retains an announced error and its remove links');
@@ -447,6 +492,20 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			}
 			bookingUiAssert($xpath->query('//a[starts-with(@href,"javascript:")] | //img[starts-with(@src,"javascript:")]')->length === 0,
 				'Identity fields cannot introduce executable URI schemes');
+			$expectedFavicon = in_array($scenario, array('branding-no-images', 'branding-hostile', 'branding-malformed'), true) ? ''
+				: (in_array($scenario, array('branding-favicon-missing', 'branding-favicon-malformed', 'branding-favicon-hostile', 'branding-favicon-data'), true)
+					? $bookingIdentity['company_logo'] : $bookingIdentity['company_favicon']);
+			$favicon = $xpath->query('//head/link[@rel="icon"]');
+			bookingUiAssert($favicon->length === ($expectedFavicon === '' ? 0 : 1), 'An icon is published only when a native company image URL is valid');
+			if ($expectedFavicon !== '') {
+				bookingUiAssert($favicon->item(0)->getAttribute('href') === $expectedFavicon,
+					'The tab icon uses the valid square favicon, falling back to the validated header logo for absent or rejected favicon data');
+			}
+		}
+		if ($scenario === 'branding-favicon-square') {
+			bookingUiAssert($xpath->query('//header[@id="booking-company"]/img')->item(0)->getAttribute('src') === $bookingIdentity['company_logo']
+				&& $xpath->query('//head/link[@rel="icon"]')->item(0)->getAttribute('href') !== $bookingIdentity['company_logo'],
+				'The rectangular company header and square browser-tab icon retain their distinct native image URLs');
 		}
 		if ($scenario === 'branding-full' || $scenario === 'branding-no-images') {
 			bookingUiAssert($xpath->query('//header[@id="booking-company"]/strong')->item(0)->textContent === $bookingIdentity['company_name'], 'The public header displays the native company name');
@@ -468,10 +527,11 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			bookingUiAssert($xpath->query('//section[@id="booking-professional"]//a')->length === 0, 'Hostile mail and telephone URI fields remain plain escaped text');
 		}
 		if ($scenario === 'branding-hidden') {
-			bookingUiAssert($xpath->query('//*[@id="booking-company" or @id="booking-professional"] | //img')->length === 0,
+			bookingUiAssert($xpath->query('//*[@id="booking-company" or @id="booking-professional"] | //img | //link[@rel="icon"]')->length === 0,
 				'An invalid or absent booking profile cannot reveal company or professional identity');
 			bookingUiAssert(strpos($html, 'BRAND-COMPANY-SENTINEL') === false && strpos($html, 'BRAND-PROFESSIONAL-SENTINEL') === false
-				&& strpos($html, 'professional@example.test') === false, 'Identity fields do not leak through an unavailable publication link');
+				&& strpos($html, 'professional@example.test') === false && strpos($html, 'logo-square_mini.png') === false,
+				'Identity fields do not leak through an unavailable publication link');
 		}
 		if ($scenario === 'branding-large-photo') {
 			bookingUiAssert($xpath->query('//section[@id="booking-professional"]//img')->length === 1, 'A verified native raster photo larger than 256KiB remains displayable below the one-MiB binary limit');

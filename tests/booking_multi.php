@@ -11,8 +11,11 @@ $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/ht
 require __DIR__.'/bootstrap.php';
 cdavTestStrictErrors($root);
 require dirname(__DIR__).'/class/CDavBookingAvailability.php';
+require dirname(__DIR__).'/class/CDavBookingService.php';
 
 use Dolibarr\CDav\BookingAvailability;
+use Dolibarr\CDav\BookingException;
+use Dolibarr\CDav\BookingService;
 
 /**
  * Assert an observable selection outcome.
@@ -168,4 +171,36 @@ multiRejects(static function () use ($long, $now) {
 multiCheck(BookingAvailability::planSelection($both, $separated) === BookingAvailability::planSelection($both, array_reverse($separated)),
 	'M07: canonical starts and receipts do not depend on selection order');
 fwrite(STDOUT, "[OK] M07 daily boundaries and canonical order for stable group receipts\n");
+
+// The two visible half-day choices are separate appointments across lunch.
+$halfDay = array_replace($continuous, array('duration' => 240, 'step' => 240,
+	'buffer_before' => 0, 'buffer_after' => 0,
+	'weekly' => array_fill(1, 7, array(array('08:00', '12:00'), array('13:00', '17:00')))));
+$halfDayStarts = array(multiStamp('2026-11-25 08:00'), multiStamp('2026-11-25 13:00'));
+$halfDaySelection = BookingAvailability::availableSelection(array_replace($halfDay, array('allow_split' => true)), array(), $halfDayStarts, $now);
+multiCheck($halfDaySelection['duration_minutes'] === 480
+	&& $halfDaySelection['segments'] === array(array('start' => $halfDayStarts[0], 'end' => $halfDayStarts[0] + 14400),
+		array('start' => $halfDayStarts[1], 'end' => $halfDayStarts[1] + 14400)),
+	'M08: the morning and afternoon reserve eight hours in two native periods when split booking is enabled');
+$unbrokenDay = array_replace($halfDay, array('weekly' => array_fill(1, 7, array(array('08:00', '17:00')))));
+$unbrokenSelection = BookingAvailability::availableSelection($unbrokenDay, array(), array($halfDayStarts[0], $halfDayStarts[0] + 14400), $now);
+multiCheck($unbrokenSelection['duration_minutes'] === 480
+	&& $unbrokenSelection['segments'] === array(array('start' => $halfDayStarts[0], 'end' => $halfDayStarts[0] + 28800)),
+	'M08: genuinely adjacent four-hour units remain one reservable eight-hour appointment');
+$previewService = new BookingService(null, 1);
+foreach (array(
+	array($halfDay, $halfDayStarts, 'CDavBookingSelectionSplitDisabled'),
+	array($split, array($first, $first + 1800), 'CDavBookingSelectionContiguousDisabled'),
+	array($both, array($first, $first), 'CDavBookingInvalid'),
+	array(array_replace($both, array('timezone' => 'PRIVATE-SENTINEL')), array($first), 'CDavBookingInvalid'),
+) as $rejectedPreview) {
+	try {
+		$previewService->previewSelection(array('config' => $rejectedPreview[0]), $rejectedPreview[1], $now);
+		throw new RuntimeException('M08: the invalid preview was unexpectedly accepted');
+	} catch (BookingException $exception) {
+		multiCheck($exception->getCode() === 422 && $exception->getMessage() === $rejectedPreview[2],
+			'M08: preview returns the precise safe mode refusal while other invalid input remains generic');
+	}
+}
+fwrite(STDOUT, "[OK] M08 half-day selections, genuine adjacency and safe public refusal reasons\n");
 fwrite(STDOUT, "All CDav multi-slot business tests passed.\n");

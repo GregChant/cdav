@@ -482,3 +482,35 @@ Les logs sont dans `dist/qa/favicon-validation/`. Les suites HTTP et navigateur
 de 6.1.1 ne sont pas relancées pour cette seule déclaration HTML ; aucun serveur
 ni base de test n'est créé. L'archive finale correspond aux blobs Git et son
 empreinte reproductible est enregistrée dans le manifeste local de livraison.
+
+## Sélections refusées et logo carré — 6.1.3
+
+Le signalement porte sur 08:00–12:00 et 13:00–17:00 avec la seule permission de
+regroupement consécutif. La pause exige la permission indépendante des plages
+séparées. Le refus était converti en erreur générique affichée en haut de page,
+alors que le panier masquait son alerte locale et présentait une durée de zéro.
+
+Le service propage désormais uniquement deux clés publiques autorisées pour
+ces refus de permissions ; les autres détails internes restent masqués. Le
+panier invalide affiche son motif échappé avec `role="alert"`, sans durée ni
+périodes trompeuses. L'ajout GET cible le panier et permet de retirer un créneau
+pour rétablir la confirmation. Les règles de disponibilité, marges, droits,
+concurrence, transactions et rejeu restent celles de la réservation native.
+
+Le précédent favicon reprenait le logo d'en-tête. La version 6.1.3 préfère la
+miniature carrée `logo_squarred_mini`, comme `main.inc.php` dans les deux cœurs,
+puis le petit logo carré et l'original carré. Le logo ordinaire reste celui de
+l'en-tête et sert de repli. Les URL utilisent `viewimage.php`, l'entité courante
+et la même validation locale ; aucun traitement d'image, endpoint, réglage ou
+schéma supplémentaire n'est ajouté.
+
+La matrice rapide Dolibarr 23.0.4/24.0.0 × PHP 8.4.26/8.5.11 passe : 40 suites,
+360 rendus FR/EN, lint complet et PHPCS natif. Les régressions couvrent les
+deux refus distincts, les véritables créneaux jointifs, les huit heures en deux
+périodes autorisées, les erreurs échappées et visibles, le logo carré distinct,
+ses priorités et replis, les chemins invalides et la confidentialité des profils
+indisponibles. Les preuves sont dans `dist/qa/selection-validation/`.
+
+Le passage natif de stabilisation sur 24/PHP 8.4 réussit : suite HTTP groupes et
+quinze parcours navigateur, sans violation axe. La qualification de l'archive
+et son empreinte sont consignées dans le manifeste de livraison avant publication.

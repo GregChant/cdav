@@ -23,20 +23,23 @@ if (!empty($bookingProfile) && is_array($bookingIdentity ?? null)) {
 		$bookingPublicIdentity[$bookingIdentityField] = is_string($bookingIdentity[$bookingIdentityField] ?? null)
 			? mb_substr($bookingIdentity[$bookingIdentityField], 0, $bookingIdentityLength) : '';
 	}
-	$bookingPublicIdentity['company_logo'] = '';
-	$bookingLogoUrl = $bookingIdentity['company_logo'] ?? '';
-	if (is_string($bookingLogoUrl) && strlen($bookingLogoUrl) <= 2048 && !preg_match('/[\x00-\x20\x7f\\\\]/', $bookingLogoUrl)) {
-		$bookingLogoParts = parse_url($bookingLogoUrl);
-		if (is_array($bookingLogoParts) && !isset($bookingLogoParts['scheme']) && !isset($bookingLogoParts['host'])
-			&& preg_match('#^/(?:[A-Za-z0-9._~%\-]+/)*viewimage\.php$#D', $bookingLogoParts['path'] ?? '')) {
-			parse_str($bookingLogoParts['query'] ?? '', $bookingLogoQuery);
-			if (($bookingLogoQuery['modulepart'] ?? null) === 'mycompany' && is_string($bookingLogoQuery['file'] ?? null)
-				&& str_starts_with($bookingLogoQuery['file'], 'logos/') && !preg_match('/[\x00-\x1f\x7f\\\\]/', $bookingLogoQuery['file'])
-				&& !in_array('..', explode('/', $bookingLogoQuery['file']), true)) {
-				$bookingPublicIdentity['company_logo'] = $bookingLogoUrl;
+	foreach (array('company_logo', 'company_favicon') as $bookingIdentityField) {
+		$bookingPublicIdentity[$bookingIdentityField] = '';
+		$bookingLogoUrl = $bookingIdentity[$bookingIdentityField] ?? '';
+		if (is_string($bookingLogoUrl) && strlen($bookingLogoUrl) <= 2048 && !preg_match('/[\x00-\x20\x7f\\\\]/', $bookingLogoUrl)) {
+			$bookingLogoParts = parse_url($bookingLogoUrl);
+			if (is_array($bookingLogoParts) && !isset($bookingLogoParts['scheme']) && !isset($bookingLogoParts['host'])
+				&& preg_match('#^/(?:[A-Za-z0-9._~%\-]+/)*viewimage\.php$#D', $bookingLogoParts['path'] ?? '')) {
+				parse_str($bookingLogoParts['query'] ?? '', $bookingLogoQuery);
+				if (($bookingLogoQuery['modulepart'] ?? null) === 'mycompany' && is_string($bookingLogoQuery['file'] ?? null)
+					&& str_starts_with($bookingLogoQuery['file'], 'logos/') && !preg_match('/[\x00-\x1f\x7f\\\\]/', $bookingLogoQuery['file'])
+					&& !in_array('..', explode('/', $bookingLogoQuery['file']), true)) {
+					$bookingPublicIdentity[$bookingIdentityField] = $bookingLogoUrl;
+				}
 			}
 		}
 	}
+	$bookingPublicIdentity['company_favicon'] = $bookingPublicIdentity['company_favicon'] ?: $bookingPublicIdentity['company_logo'];
 	$bookingPublicIdentity['professional_photo'] = '';
 	$bookingPhotoUrl = $bookingIdentity['professional_photo'] ?? '';
 	if (is_string($bookingPhotoUrl) && strlen($bookingPhotoUrl) <= 1398200
@@ -139,8 +142,8 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<meta name="robots" content="noindex,nofollow">
 	<title><?php print dol_escape_htmltag($langs->trans('CDavBookingTitle')); ?></title>
-	<?php if (!empty($bookingPublicIdentity['company_logo'])) { ?>
-	<link rel="icon" href="<?php print dol_escape_htmltag($bookingPublicIdentity['company_logo']); ?>">
+	<?php if (!empty($bookingPublicIdentity['company_favicon'])) { ?>
+	<link rel="icon" href="<?php print dol_escape_htmltag($bookingPublicIdentity['company_favicon']); ?>">
 	<?php } ?>
 	<style>
 		* { box-sizing: border-box; }
@@ -339,7 +342,7 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 		<?php if ($bookingMultiple) { ?>
 		<p class="notice"><?php print dol_escape_htmltag($langs->trans($bookingAllowsContiguous && $bookingAllowsSplit ? 'CDavBookingSelectionModesBoth' : ($bookingAllowsContiguous ? 'CDavBookingSelectionModesContiguous' : 'CDavBookingSelectionModesSplit'))); ?></p>
 			<?php if (!empty($bookingSlots)) { ?>
-		<form method="get" id="booking-add-selection">
+		<form method="get" action="?#booking-selection" id="booking-add-selection">
 			<input type="hidden" name="key" value="<?php print dol_escape_htmltag($bookingKey); ?>">
 			<input type="hidden" name="lang" value="<?php print dol_escape_htmltag($bookingLanguage); ?>">
 			<input type="hidden" name="date" value="<?php print dol_escape_htmltag($bookingDate); ?>">
@@ -361,8 +364,9 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 		</form>
 			<?php } ?>
 			<?php if (!empty($bookingSelection)) { ?>
-		<section id="booking-selection" aria-labelledby="booking-selection-heading">
+		<section id="booking-selection" aria-labelledby="booking-selection-heading" tabindex="-1"<?php if (!$bookingSelectionValid) print ' aria-describedby="booking-selection-error"'; ?>>
 			<h2 id="booking-selection-heading"><?php print dol_escape_htmltag($langs->trans('CDavBookingSelection')); ?></h2>
+				<?php if (!$bookingSelectionValid) { ?><p class="notice error" id="booking-selection-error" role="alert"><?php print dol_escape_htmltag($bookingError !== '' ? $bookingError : $langs->trans('CDavBookingSelectionInvalid')); ?></p><?php } ?>
 			<ul class="selection-list">
 				<?php foreach ($bookingSelection as $bookingSelectedStart) {
 					$bookingSelectedDate = (new DateTimeImmutable('@'.$bookingSelectedStart))->setTimezone($bookingTimezone);
@@ -373,8 +377,8 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 				</li>
 				<?php } ?>
 			</ul>
+				<?php if ($bookingSelectionValid) { ?>
 			<p class="selection-summary"><strong><?php print dol_escape_htmltag($langs->trans('CDavBookingSelectionTotal')); ?> : <?php print $bookingSelectionDuration; ?> <?php print dol_escape_htmltag($langs->trans('CDavBookingMinutes')); ?></strong></p>
-				<?php if (!empty($bookingSelectionSegments)) { ?>
 			<h3><?php print dol_escape_htmltag($langs->trans('CDavBookingSelectionSegments')); ?></h3>
 			<ol class="selection-list" id="booking-selection-segments">
 					<?php foreach ($bookingSelectionSegments as $bookingSegment) { ?>
@@ -382,7 +386,6 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 					<?php } ?>
 			</ol>
 				<?php } ?>
-				<?php if (!$bookingSelectionValid && $bookingError === '') { ?><p class="notice error"><?php print dol_escape_htmltag($langs->trans('CDavBookingSelectionInvalid')); ?></p><?php } ?>
 			<p><a id="booking-selection-clear" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=<?php print rawurlencode($bookingLanguage); ?>&amp;date=<?php print rawurlencode($bookingDate); ?><?php if ($bookingCalendarMonth) print '&amp;month='.$bookingCalendarMonth->format('Y-m'); ?>&amp;selection="><?php print dol_escape_htmltag($langs->trans('CDavBookingClearSelection')); ?></a></p>
 		</section>
 			<?php } ?>

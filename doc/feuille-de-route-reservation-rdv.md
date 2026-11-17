@@ -514,6 +514,21 @@ Texte de référence pour l'objectif :
   quatre instances jetables après conservation des preuves dans
   `dist/qa/details-validation/`, dont `teardown.json`.
 
+## Corrections de sélection et d'icône — 6.1.3
+
+- [x] Expliquer près du panier les refus liés aux autorisations du profil et
+  revenir à la sélection après ajout, avec une alerte accessible sans JavaScript.
+- [x] Masquer les totaux et périodes non validés ; conserver les actions de
+  retrait et de vidage pour rétablir une combinaison réservable.
+- [x] Distinguer les créneaux réellement jointifs d'une matinée et d'un
+  après-midi séparés par une pause, sans modifier les permissions du profil.
+- [x] Préférer le logo carré natif pour l'onglet, tout en conservant le logo
+  ordinaire dans l'en-tête et en repli si aucun logo carré n'est disponible.
+- [x] Compléter les régressions métier, rendu, HTTP et navigateur, dont le cas
+  08:00–12:00 / 13:00–17:00 en unités de 240 minutes et le favicon distinct.
+- [ ] Qualifier et publier le ZIP 6.1.3 sur les branches autorisées, puis retirer
+  les instances jetables après sauvegarde des preuves.
+
 ## Références locales
 
 - [Guide actuel : disponibilités, documents et photos](disponibilites-documents-photos-fr.md).

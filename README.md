@@ -112,6 +112,12 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.1.3 explains rejected slot combinations next to the selection and
+distinguishes continuous bookings from appointments separated by a break.
+Invalid selections no longer display a misleading zero duration. The browser
+tab uses the native square company logo when configured, keeping the normal
+company logo for the page header.
+
 Version 6.1.2 uses the native company logo as the booking page's browser tab icon.
 
 Version 6.1.1 adds the visitor's required appointment subject and intervention
