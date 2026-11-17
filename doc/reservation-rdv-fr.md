@@ -1,9 +1,10 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.0.0 propose une page publique de réservation reliée directement à l'Agenda
-Dolibarr. Les clients voient les créneaux disponibles ; la confirmation crée un
-rendez-vous natif, affecté au professionnel et marqué occupé. Ce rendez-vous est
-ensuite accessible depuis les clients CalDAV habituels.
+CDav 6.1.0 propose un calendrier mensuel de réservation relié directement à
+l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
+choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
+l'autorise. La confirmation crée les rendez-vous natifs affectés au
+professionnel et marqués occupés, accessibles depuis ses clients CalDAV.
 
 ## Installer ou mettre à niveau
 
@@ -12,6 +13,11 @@ module, puis désactiver et réactiver CDav une fois pour appliquer les schémas
 idempotents et actualiser le menu. Les événements restent dans l'Agenda natif ;
 les tables de réservation contiennent les profils et les états techniques de
 publication, de rejouabilité et de limitation des demandes.
+La version 6.1 ajoute une table de liaison technique entre un reçu et ses
+événements natifs : la réactivation du module est nécessaire après la copie du
+ZIP, y compris pour une mise à niveau depuis 6.0. Les profils et liens publiés
+sont conservés ; les deux nouvelles autorisations de multisélection restent
+désactivées tant qu'un administrateur ne les active pas.
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
 24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
@@ -44,11 +50,22 @@ Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
 
 | Réglage | Valeur initiale | Plage acceptée |
 |---|---|---|
-| Durée du rendez-vous | 30 minutes | 5 à 480 minutes |
+| Durée du rendez-vous ou du créneau de base | 30 minutes | 5 à 480 minutes |
 | Espacement des débuts proposés | 30 minutes | 5 à 240 minutes |
 | Marge avant / après | 0 / 0 minute | 0 à 240 minutes chacune |
 | Préavis minimum | 1 440 minutes, soit 24 h | 0 à 43 200 minutes |
-| Horizon de réservation | 60 jours | 1 à 90 jours |
+| Horizon de réservation | 60 jours | 1 à 180 jours ou 1 à 6 mois calendaires |
+| Regrouper des créneaux consécutifs | Non | Autorisation indépendante par profil |
+| Réserver des plages séparées ou plusieurs jours | Non | Autorisation indépendante par profil |
+
+Chaque professionnel dispose de son propre profil et de son lien public. Un même
+professionnel reste limité à un profil : plusieurs types de prestations avec
+des réglages et liens distincts pour cette même personne nécessiteraient une
+extension supplémentaire.
+
+L'horizon en mois conserve le jour et l'heure locaux, en ramenant le jour au
+dernier jour valide du mois d'arrivée : six mois après le 31 août donnent le
+28 ou 29 février. Les anciens profils exprimés en jours conservent leur unité.
 
 Une durée de 60 minutes avec un pas de 30 minutes peut proposer 9 h et 9 h 30 :
 chaque proposition doit disposer d'une heure complète. Les marges encadrent
@@ -56,10 +73,67 @@ chaque occupation et chaque nouveau rendez-vous. Avec 10 minutes avant et
 15 minutes après, il faut donc 25 minutes entre deux rendez-vous. Les marges
 doivent aussi tenir dans la plage d'ouverture.
 
+Par exemple, un RDV de 240 minutes avec 60 minutes avant et après nécessite au
+moins 360 minutes continues. Des plages 07:00–12:00 et 13:00–17:00 ne conviennent
+pas, même avec un agenda vide. Avec un pas de 7 minutes, le premier départ qui
+respecte la marge de 60 minutes tombe à 08:03 : il faut alors 363 minutes de
+plage. L'administration affiche un avertissement lorsque les réglages ne peuvent
+proposer aucun créneau ; elle ne modifie pas les marges automatiquement.
+
 Les horaires sont saisis et affichés dans le fuseau du professionnel, indiqué
 sur la page publique. Le visiteur choisit un horaire dans ce fuseau. Les heures
 locales inexistantes ou ambiguës lors d'un changement d'heure ne sont pas
 proposées.
+
+## Calendrier mensuel et réservations groupées
+
+Les jours proposant de vrais créneaux sont cliquables et indiquent leur nombre.
+Les jours complets, fermés, passés ou exclus par le préavis sont désactivés.
+La navigation s'arrête à l'horizon du profil. Le mois est recalculé à partir de
+l'Agenda à chaque consultation ; le champ Date reste disponible pour un accès
+direct. Une page sans date choisit le premier jour disponible du mois affiché.
+
+Si les deux autorisations de multisélection sont désactivées, le visiteur
+choisit un seul créneau, comme auparavant. Sinon, il coche ses créneaux puis
+utilise **Ajouter les créneaux cochés**. Sa sélection est conservée lorsqu'il
+change de jour, de mois ou de langue. Il peut retirer une unité ou vider sa
+sélection avant de renseigner ses coordonnées et de confirmer.
+
+- Deux unités consécutives de 30 minutes forment un seul événement natif de
+  60 minutes si le regroupement continu est autorisé. Les marges encadrent
+  l'ensemble, sans marge entre les deux unités.
+- Des unités séparées par une pause ou sur plusieurs jours forment plusieurs
+  événements natifs si le fractionnement est autorisé. Les pauses restent
+  libres et les marges s'appliquent autour de chaque partie.
+- Les autorisations sont indépendantes : autoriser les plages séparées ne
+  permet pas de regrouper des unités consécutives, et inversement. Le serveur
+  vérifie les autorisations actuelles au moment de confirmer.
+
+Le pas doit permettre d'enchaîner les unités : choisir par exemple 30 minutes
+pour une durée de base de 60 minutes. Deux unités qui se chevauchent sont
+refusées. Une sélection est limitée à 24 unités sur 8 jours locaux distincts ;
+elle peut dépasser 8 heures de durée totale si les horaires le permettent.
+Un changement de jour reste une partie distincte.
+
+La confirmation crée toutes les parties dans une même transaction native. Si
+l'une est devenue occupée ou si une création échoue, aucune partie n'est créée.
+Un reçu et une référence communs permettent le rejeu sans doublon. Si une partie
+est supprimée, déplacée ou rendue libre dans Dolibarr, le rejeu ne réaffirme pas
+l'ancienne réservation : il demande de contacter le professionnel.
+
+## Entreprise et professionnel affichés
+
+La page reprend le nom et le logo de l'entreprise configurés dans Dolibarr,
+puis le nom, la photo, l'adresse e-mail, le téléphone professionnel et le mobile
+du professionnel sélectionné. Les champs non renseignés sont omis. Les options
+natives de masquage public de cet utilisateur pour la photo et les coordonnées
+sont respectées.
+
+Le logo utilise le point d'accès public natif `viewimage.php`. La photo utilise
+les fichiers natifs de l'utilisateur, avec préférence pour sa miniature, et est
+intégrée à la page ; aucune activation de la carte virtuelle publique ni nouvelle
+copie de photo n'est nécessaire. Les photos PNG, JPEG, GIF et WebP jusqu'à 1 Mio
+sont prises en charge. Les SVG et fichiers trop volumineux sont omis.
 
 ## Partager, renouveler ou retirer un lien
 

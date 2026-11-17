@@ -16,6 +16,8 @@ class BookingAvailability
 	public const MAX_ITERATIONS = 50000;
 	public const MAX_SLOTS = 10000;
 	public const MAX_RANGE_SECONDS = 93 * 86400;
+	public const MAX_SELECTION_SLOTS = 24;
+	public const MAX_SELECTION_DAYS = 8;
 
 	/**
 	 * Validate server-owned settings; never infer them from a submitted slot.
@@ -34,6 +36,11 @@ class BookingAvailability
 			throw new \InvalidArgumentException('Invalid booking horizon unit');
 		}
 		$result = array('timezone' => $timezone, 'horizon_unit' => $horizonUnit);
+		foreach (array('allow_contiguous', 'allow_split') as $permission) {
+			$value = array_key_exists($permission, $config) ? $config[$permission] : false;
+			if (!is_bool($value)) throw new \InvalidArgumentException('Invalid booking selection permission');
+			$result[$permission] = $value;
+		}
 		foreach (array('duration' => array(30, 5, 480), 'step' => array(30, 5, 240),
 			'buffer_before' => array(0, 0, 240), 'buffer_after' => array(0, 0, 240),
 			'notice' => array(1440, 0, 43200), 'horizon' => array($horizonUnit === 'months' ? 6 : 60, 1, $horizonUnit === 'months' ? 6 : 180)) as $key => $rule) {
@@ -230,6 +237,22 @@ class BookingAvailability
 	 */
 	public static function slots(array $config, array $busy, int $start, int $end, int $now): array
 	{
+		return self::calculateSlots($config, $busy, $start, $end, $now);
+	}
+
+	/**
+	 * Reuse the slot engine for one configured unit or an internally merged segment.
+	 *
+	 * @param array $config Profile settings
+	 * @param array $busy Occupied timestamp pairs
+	 * @param int $start Requested range start
+	 * @param int $end Requested exclusive range end
+	 * @param int $now Current timestamp
+	 * @param int|null $segmentDuration Internal segment duration in seconds
+	 * @return array Available timestamp pairs
+	 */
+	private static function calculateSlots(array $config, array $busy, int $start, int $end, int $now, ?int $segmentDuration = null): array
+	{
 		self::validateRange($start, $end);
 		$config = self::validateConfig($config);
 		$zone = new DateTimeZone($config['timezone']);
@@ -239,7 +262,7 @@ class BookingAvailability
 		$end = min($end, $horizon);
 		if ($start >= $end) return array();
 		$busy = self::mergeIntervals($busy);
-		$duration = $config['duration'] * 60;
+		$duration = $segmentDuration ?? $config['duration'] * 60;
 		$before = $config['buffer_before'] * 60;
 		$after = $config['buffer_after'] * 60;
 		// Every occupied event reserves its own margins, just like a candidate.
@@ -284,6 +307,88 @@ class BookingAvailability
 			$day = $day->modify('+1 day')->setTime(0, 0);
 		}
 		return $slots;
+	}
+
+	/**
+	 * Canonicalize bounded unit selections without applying a moving clock.
+	 *
+	 * @param array $config Profile settings
+	 * @param array $starts Submitted unit starts as strict integer timestamps
+	 * @return array Canonical starts, distinct native segments and total minutes
+	 */
+	public static function planSelection(array $config, array $starts): array
+	{
+		$config = self::validateConfig($config);
+		if (!$starts || count($starts) > self::MAX_SELECTION_SLOTS || $starts !== array_values($starts)) {
+			throw new \InvalidArgumentException('Invalid booking selection count');
+		}
+		$seen = array();
+		$duration = $config['duration'] * 60;
+		foreach ($starts as $start) {
+			if (!is_int($start) || $start <= 0 || $start > PHP_INT_MAX - $duration || isset($seen[$start])) {
+				throw new \InvalidArgumentException('Invalid or duplicated booking selection');
+			}
+			$seen[$start] = true;
+		}
+		sort($starts, SORT_NUMERIC);
+		$zone = new DateTimeZone($config['timezone']);
+		$days = array();
+		$segments = array();
+		$lastDay = '';
+		foreach ($starts as $start) {
+			$day = (new DateTimeImmutable('@'.$start))->setTimezone($zone)->format('Y-m-d');
+			$days[$day] = true;
+			if (count($days) > self::MAX_SELECTION_DAYS) throw new \InvalidArgumentException('Too many booking selection days');
+			$last = count($segments) - 1;
+			if ($last >= 0 && $start < $segments[$last]['end']) throw new \InvalidArgumentException('Booking selections overlap');
+			if ($last >= 0 && $start === $segments[$last]['end'] && $day === $lastDay) {
+				if (!$config['allow_contiguous']) throw new \InvalidArgumentException('Continuous booking is disabled');
+				$segments[$last]['end'] = $start + $duration;
+			} else {
+				$segments[] = array('start' => $start, 'end' => $start + $duration);
+			}
+			$lastDay = $day;
+		}
+		if (count($segments) > 1 && !$config['allow_split']) throw new \InvalidArgumentException('Split booking is disabled');
+		return array('starts' => $starts, 'segments' => $segments, 'duration_minutes' => count($starts) * $config['duration']);
+	}
+
+	/**
+	 * Validate every chosen unit and each complete segment against fresh occupations.
+	 *
+	 * @param array $config Profile settings
+	 * @param array $busy Native occupied timestamp pairs
+	 * @param array $starts Submitted unit start timestamps
+	 * @param int $now Current timestamp
+	 * @return array Canonical selection safe to reserve at this instant
+	 */
+	public static function availableSelection(array $config, array $busy, array $starts, int $now): array
+	{
+		$config = self::validateConfig($config);
+		$selection = self::planSelection($config, $starts);
+		$zone = new DateTimeZone($config['timezone']);
+		$unitConfig = $config;
+		$unitConfig['buffer_before'] = $unitConfig['buffer_after'] = 0;
+		$checkedDays = array();
+		foreach ($selection['starts'] as $start) {
+			$day = (new DateTimeImmutable('@'.$start))->setTimezone($zone)->setTime(0, 0);
+			$key = $day->format('Y-m-d');
+			if (!isset($checkedDays[$key])) {
+				$unitSlots = self::calculateSlots($unitConfig, array(), $day->getTimestamp(), $day->modify('+1 day')->getTimestamp(), $now);
+				$checkedDays[$key] = array_fill_keys(array_column($unitSlots, 'start'), true);
+			}
+			if (!isset($checkedDays[$key][$start])) throw new \OutOfBoundsException('A selected booking unit is unavailable');
+		}
+		$previousEnd = null;
+		foreach ($selection['segments'] as $segment) {
+			if ($previousEnd !== null && $segment['start'] - $config['buffer_before'] * 60 < $previousEnd + $config['buffer_after'] * 60) {
+				throw new \OutOfBoundsException('Selected booking segments have conflicting margins');
+			}
+			$available = self::calculateSlots($config, $busy, $segment['start'], $segment['end'], $now, $segment['end'] - $segment['start']);
+			if ($available !== array($segment)) throw new \OutOfBoundsException('A selected booking segment is unavailable');
+			$previousEnd = $segment['end'];
+		}
+		return $selection;
 	}
 
 	/**

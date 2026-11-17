@@ -58,6 +58,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 		} elseif ($action === 'save_profile') {
 			$bookingPostedConfig = array('timezone' => GETPOST('timezone', 'alphanohtml'),
 				'horizon_unit' => GETPOSTISSET('horizon_unit') ? GETPOST('horizon_unit', 'aZ09') : 'days', 'weekly' => array());
+			foreach (array('allow_contiguous', 'allow_split') as $bookingPermission) {
+				$bookingPostedConfig[$bookingPermission] = GETPOSTINT($bookingPermission) === 1;
+			}
 			foreach (array('duration', 'step', 'buffer_before', 'buffer_after', 'notice', 'horizon') as $bookingSetting) {
 				$bookingPostedConfig[$bookingSetting] = GETPOSTINT($bookingSetting);
 			}
@@ -104,7 +107,8 @@ for ($bookingDay = 1; $bookingDay <= 7; $bookingDay++) {
 $bookingConfig = $bookingPostedConfig ?? ($bookingProfile['config'] ?? array(
 	'timezone' => $_SESSION['dol_tz_string'] ?? getDolGlobalString('MAIN_DOLIBARR_USER_TIMEZONE', 'UTC'),
 	'duration' => 30, 'step' => 30, 'buffer_before' => 0, 'buffer_after' => 0,
-	'notice' => 1440, 'horizon' => 60, 'horizon_unit' => 'days', 'weekly' => $bookingDefaultWeekly,
+	'notice' => 1440, 'horizon' => 60, 'horizon_unit' => 'days', 'allow_contiguous' => false, 'allow_split' => false,
+	'weekly' => $bookingDefaultWeekly,
 ));
 $bookingTimezoneOptions = array();
 foreach (DateTimeZone::listIdentifiers() as $bookingTimezoneName) {
@@ -147,7 +151,14 @@ print '<div class="div-table-responsive"><table class="noborder centpercent">';
 print '<tr class="liste_titre"><th colspan="2">'.dol_escape_htmltag($langs->trans('CDavBookingProfileSettings')).'</th></tr>';
 print '<tr><td><label for="profile_enabled">'.dol_escape_htmltag($langs->trans('CDavBookingProfileEnabled')).'</label></td><td>';
 print $form->selectyesno('profile_enabled', !empty($bookingProfile['enabled']) ? 1 : 0, 1);
-print '</td></tr><tr><td><label for="timezone">'.dol_escape_htmltag($langs->trans('CDavBookingTimezone')).'</label></td><td>';
+print '</td></tr>';
+foreach (array('allow_contiguous' => 'CDavBookingAllowContiguous', 'allow_split' => 'CDavBookingAllowSplit') as $bookingPermission => $bookingPermissionLabel) {
+	print '<tr><td><label for="'.$bookingPermission.'">'.dol_escape_htmltag($langs->trans($bookingPermissionLabel)).'</label></td><td>';
+	print $form->selectyesno($bookingPermission, !empty($bookingConfig[$bookingPermission]) ? 1 : 0, 1);
+	print '</td></tr>';
+}
+print '<tr><td colspan="2" class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingSelectionPermissionsHelp')).'</td></tr>';
+print '<tr><td><label for="timezone">'.dol_escape_htmltag($langs->trans('CDavBookingTimezone')).'</label></td><td>';
 print Form::selectarray('timezone', $bookingTimezoneOptions, $bookingConfig['timezone'], 0, 0, 0, 'required', 0, 0, 0, '', 'maxwidth400');
 print '</td></tr>';
 $bookingNumericFields = array(

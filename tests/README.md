@@ -26,6 +26,8 @@ pour rendre visibles les incompatibilités propres à une combinaison.
 | `attachments.php` | Décodage et limites des pièces jointes, contenu interdit, accès aux documents, traversée de chemin et nettoyage différé des fichiers |
 | `booking.php` | Créneaux réellement libres, bornes, marges, pauses, journées entières, récurrences, changements d’heure, préavis, horizon et validation des profils |
 | `booking_calendar.php` | Vue mensuelle, correspondance jours/créneaux, une lecture Agenda par mois, navigation bornée, années bissextiles et confidentialité |
+| `booking_multi.php` | Permissions indépendantes, regroupement, pauses, limites, refus des chevauchements, marges et horaires locaux |
+| `booking_identity.php` | Coordonnées publiques, logo natif, photo et miniature, bornes des images et isolation des fichiers utilisateur |
 | `booking_ui.php` | Rendus FR/EN du formulaire et du calendrier mensuel, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
 
 Les tests de réservation utilisent une horloge fixe. Des cas déterministes
@@ -46,7 +48,7 @@ de couverture. Certaines anciennes assertions de `run.php` recherchent encore du
 texte dans les sources ; elles ne prouvent pas le comportement transactionnel.
 Les doublures SQL ne valident pas les requêtes contre MariaDB.
 
-`booking_live.php` et `live_integration.php` contrôlent les vrais accès HTTP,
+`booking_live.php`, `booking_multi_live.php` et `live_integration.php` contrôlent les vrais accès HTTP,
 droits natifs, écritures, verrouillages, courses concurrentes, rejouabilité et
 rollback. `booking_browser.php` et `booking_browser.cjs` contrôlent les parcours
 réels avec Playwright et axe. Ils nécessitent une instance jetable avec base

@@ -102,6 +102,16 @@ the quality checks. Booking, native HTTP and browser tests passed with Dolibarr
 [validation report](doc/validation-reservation-rdv.md) for the exact matrix and
 known core/vendor deprecations.
 
+Version 6.1.0 adds monthly availability, booking up to six calendar months ahead,
+and independent per-professional permissions for consecutive or split bookings.
+Consecutive units become one native appointment; separate ranges and days become
+multiple native appointments in one atomic booking. Existing profiles keep both
+permissions disabled. The public page also reuses the native company logo and
+the selected professional's name, photo and business contact details, respecting
+native public-field visibility preferences. Reactivate CDav once after updating
+to install the technical group-receipt mapping table; profiles and publication
+keys are preserved.
+
 Dolibarr remains the business source of truth. Contact, third-party, member,
 agenda, project-task and intervention writes use native business classes. A
 CardDAV DELETE only deactivates a contact, third party or member; permanent
@@ -219,7 +229,7 @@ Repeat with the other target core and `CDAV_PHP_BIN=php8.5`. The optional
 `CDAV_PHPCS_STANDARD` uses Dolibarr's native code-style rules when PHP_CodeSniffer
 is installed.
 
-[GitHub Actions](.github/workflows/qa.yml) runs these seven database-free suites,
+[GitHub Actions](.github/workflows/qa.yml) runs these nine database-free suites,
 PHP lint for the whole module and native PHPCS on the booking/transport files
 for every pull request and every push to `23.0` or `master`. All four combinations
 of Dolibarr 23.0.4 / 24.0.0 and PHP 8.4 / 8.5 must pass. Dependencies are the

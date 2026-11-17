@@ -9,7 +9,7 @@ $bookingWantsJson = ($_GET['format'] ?? $_POST['format'] ?? '') === 'json';
 
 // Bound parsing even for anonymous requests, before Dolibarr's request helpers.
 if ((int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 8192 || strlen((string) ($_SERVER['QUERY_STRING'] ?? '')) > 8192
-	|| count($_POST) > 12 || count($_GET) > 5 || !empty($_FILES)) {
+	|| count($_POST) > 12 || count($_GET) > 8 || !empty($_FILES)) {
 	http_response_code(413);
 	header('Cache-Control: no-store');
 	exit;
@@ -36,6 +36,7 @@ if (!$loaded) { http_response_code(503); exit; }
 
 require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
 require_once dirname(__DIR__).'/class/CDavBookingService.php';
+require_once dirname(__DIR__).'/class/CDavBookingIdentity.php';
 require_once dirname(__DIR__).'/lib/cdav_transport.lib.php';
 
 use Dolibarr\CDav\BookingException;
@@ -46,16 +47,17 @@ header('Pragma: no-cache');
 header('Referrer-Policy: no-referrer');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
-header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+header("Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 
 $locale = GETPOST('lang', 'aZ09');
 if (in_array($locale, array('fr', 'en'), true)) $langs->setDefaultLang($locale === 'fr' ? 'fr_FR' : 'en_US');
-$langs->loadLangs(array('main', 'agenda', 'cdav@cdav'));
+$langs->loadLangs(array('main', 'agenda', 'companies', 'cdav@cdav'));
 $json = $bookingWantsJson;
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $bookingProfile = null;
 $bookingSlots = array();
 $bookingCalendar = null;
+$bookingIdentity = null;
 $bookingKey = GETPOST('key', 'alphanohtml');
 $bookingDate = GETPOST('date', 'alphanohtml');
 $bookingMonth = GETPOST('month', 'alphanohtml');
@@ -64,7 +66,19 @@ $bookingResult = null;
 $bookingMessage = '';
 $bookingError = '';
 $bookingValues = array();
+$bookingSelection = array();
+$bookingSelectionSegments = array();
+$bookingSelectionDuration = 0;
+$bookingSelectionValid = false;
 $status = 200;
+
+$parseSelection = static function ($raw) {
+	if ($raw === '') return array();
+	if (!is_string($raw) || !preg_match('/^[0-9]{10}(?:,[0-9]{10}){0,23}$/D', $raw)) {
+		throw new BookingException('CDavBookingInvalid', 422);
+	}
+	return array_map('intval', explode(',', $raw));
+};
 
 try {
 	// Native v23 may clear POST and continue after rejecting the session token.
@@ -83,8 +97,8 @@ try {
 	// The publication key must be scalar; never trust request-supplied owner/entity.
 	if (!is_string($bookingKey)) throw new BookingException('CDavBookingNotFound', 404);
 	$allowed = $method === 'POST'
-		? array('key', 'date', 'lang', 'format', 'token', 'request', 'start', 'name', 'email', 'phone', 'website')
-		: array('key', 'date', 'month', 'lang', 'format');
+		? array('key', 'date', 'lang', 'format', 'token', 'request', 'start', 'selection', 'name', 'email', 'phone', 'website')
+		: array('key', 'date', 'month', 'lang', 'format', 'selection', 'add', 'selection_action');
 	foreach (array_keys(($_GET ?? array()) + ($_POST ?? array())) as $field) {
 		if (!in_array($field, $allowed, true)) throw new BookingException('CDavBookingInvalid', 422);
 	}
@@ -93,6 +107,7 @@ try {
 	$service->throttle('ip', $remote, 240, 300);
 	$bookingProfile = $service->publicProfile($bookingKey);
 	$service->throttle($method, $bookingProfile['id'].'|'.$remote, $method === 'POST' ? 20 : 120, 300);
+	if (!$json) $bookingIdentity = \Dolibarr\CDav\BookingIdentity::build($bookingProfile['professional'] ?? array(), $mysoc ?? null, $conf);
 	if ($method === 'POST') {
 		if (strtolower(trim(explode(';', (string) ($_SERVER['CONTENT_TYPE'] ?? ''))[0])) !== 'application/x-www-form-urlencoded') {
 			throw new BookingException('CDavBookingInvalid', 415);
@@ -104,9 +119,16 @@ try {
 			throw new BookingException('CDavBookingForbidden', 403);
 		}
 		$ticket = GETPOST('request', 'alphanohtml');
-		$rawStart = GETPOST('start', 'alphanohtml');
-		if (!is_string($ticket) || strlen($ticket) > 160 || !is_string($rawStart)
-			|| !preg_match('/^[0-9]{10}$/D', $rawStart)) throw new BookingException('CDavBookingInvalid', 422);
+		if (!is_string($ticket) || strlen($ticket) > 160) throw new BookingException('CDavBookingInvalid', 422);
+		$multiple = array_key_exists('selection', $_POST);
+		if ($multiple) {
+			if (isset($_POST['start']) || isset($_GET['start'])) throw new BookingException('CDavBookingInvalid', 422);
+			$bookingSelection = $parseSelection($_POST['selection']);
+			if (!$bookingSelection) throw new BookingException('CDavBookingInvalid', 422);
+		} else {
+			$rawStart = GETPOST('start', 'alphanohtml');
+			if (!is_string($rawStart) || !preg_match('/^[0-9]{10}$/D', $rawStart)) throw new BookingException('CDavBookingInvalid', 422);
+		}
 		$contact = array();
 		foreach (array('name', 'email', 'phone', 'website') as $field) {
 			// The service validates originals; filtering must not silently accept hostile HTML.
@@ -115,7 +137,8 @@ try {
 		}
 		// Release the browser session before entering the owner transaction.
 		session_write_close();
-		$bookingResult = $service->reserve($bookingKey, $ticket, (int) $rawStart, $contact);
+		$bookingResult = $multiple ? $service->reserveMany($bookingKey, $ticket, $bookingSelection, $contact)
+			: $service->reserve($bookingKey, $ticket, (int) $rawStart, $contact);
 		$status = $bookingResult['replayed'] ? 200 : 201;
 		$bookingMessage = $langs->transnoentitiesnoconv('CDavBookingConfirmed');
 	} else {
@@ -139,6 +162,28 @@ try {
 			$bookingSlots = $service->slots($bookingProfile, $day->getTimestamp(), $day->modify('+1 day')->getTimestamp());
 		}
 		$bookingRequest = $service->requestTicket($bookingProfile);
+		$bookingSelection = $parseSelection($_GET['selection'] ?? '');
+		$selectionAction = $_GET['selection_action'] ?? '';
+		if (!is_string($selectionAction) || !in_array($selectionAction, array('', 'add'), true)) throw new BookingException('CDavBookingInvalid', 422);
+		if ($selectionAction === 'add') {
+			$added = $_GET['add'] ?? array();
+			if (!is_array($added) || !$added || count($added) > 24 || array_keys($added) !== range(0, count($added) - 1)) {
+				throw new BookingException('CDavBookingInvalid', 422);
+			}
+			foreach ($added as $addedStart) {
+				if (!is_string($addedStart) || !preg_match('/^[0-9]{10}$/D', $addedStart)) throw new BookingException('CDavBookingInvalid', 422);
+				if (!in_array((int) $addedStart, $bookingSelection, true)) $bookingSelection[] = (int) $addedStart;
+			}
+		} elseif (isset($_GET['add'])) {
+			throw new BookingException('CDavBookingInvalid', 422);
+		}
+		if ($bookingSelection) {
+			$preview = $service->previewSelection($bookingProfile, $bookingSelection);
+			$bookingSelection = $preview['starts'];
+			$bookingSelectionSegments = $preview['segments'];
+			$bookingSelectionDuration = $preview['duration_minutes'];
+			$bookingSelectionValid = true;
+		}
 	}
 } catch (BookingException $e) {
 	$status = $e->getCode();
@@ -169,6 +214,17 @@ if (!$json && $method === 'POST' && $bookingError !== '' && $bookingProfile !== 
 	} catch (Throwable $e) {
 		$bookingSlots = array();
 	}
+	if ($bookingSelection) {
+		try {
+			$preview = $service->previewSelection($bookingProfile, $bookingSelection);
+			$bookingSelection = $preview['starts'];
+			$bookingSelectionSegments = $preview['segments'];
+			$bookingSelectionDuration = $preview['duration_minutes'];
+			$bookingSelectionValid = true;
+		} catch (Throwable $e) {
+			$bookingSelectionValid = false;
+		}
+	}
 }
 
 http_response_code($status);
@@ -179,6 +235,9 @@ if ($json) {
 		'date' => $bookingDate, 'slots' => $bookingSlots, 'request' => $bookingRequest, 'token' => newToken(),
 	));
 	if ($bookingError === '' && $bookingResult === null && $bookingCalendar !== null) $response['calendar'] = $bookingCalendar;
+	if ($bookingError === '' && $bookingResult === null && $bookingSelectionValid) {
+		$response['selection'] = array('starts' => $bookingSelection, 'segments' => $bookingSelectionSegments, 'duration_minutes' => $bookingSelectionDuration);
+	}
 	echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 } else {
 	header('Content-Type: text/html; charset=utf-8');

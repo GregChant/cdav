@@ -192,6 +192,7 @@ class BookingService
 	 */
 	public function publicProfile($key, $lock = false)
 	{
+		global $langs;
 		if (!isModEnabled('cdav') || !isModEnabled('agenda') || !getDolGlobalInt('CDAV_BOOKING_ENABLED')
 			|| !preg_match('/^[a-f0-9]{64}$/D', (string) $key)) {
 			throw new BookingException('CDavBookingNotFound', 404);
@@ -206,7 +207,14 @@ class BookingService
 			.($lock ? ' FOR UPDATE' : '')));
 		if (!$row) throw new BookingException('CDavBookingNotFound', 404);
 		$profile = $this->profile($row);
-		$this->owner($profile['owner_id']);
+		$owner = $this->owner($profile['owner_id']);
+		if ($owner->loadPersonalConf() < 0) throw new BookingException('CDavBookingUnavailable', 503);
+		$profile['professional'] = array('name' => $owner->getFullName($langs),
+			'email' => getDolUserInt('USER_PUBLIC_HIDE_EMAIL', 0, $owner) ? '' : (string) $owner->email,
+			'phone' => getDolUserInt('USER_PUBLIC_HIDE_OFFICE_PHONE', 0, $owner) ? '' : (string) $owner->office_phone,
+			'mobile' => getDolUserInt('USER_PUBLIC_HIDE_USER_MOBILE', 0, $owner) ? '' : (string) $owner->user_mobile,
+			'photo' => getDolUserInt('USER_PUBLIC_HIDE_PHOTO', 0, $owner) ? '' : (string) $owner->photo,
+			'photo_directory' => get_exdir(0, 0, 0, 0, $owner, 'user').'photos/');
 		return $profile;
 	}
 
@@ -344,14 +352,131 @@ class BookingService
 	}
 
 	/**
-	 * Reserve under the same owner-row lock used by CalDAV mutations.
+	 * Recheck a bounded selection against one fresh read per chosen local day.
+	 *
+	 * @param array $profile Validated public profile
+	 * @param array $starts Selected unit starts
+	 * @param int|null $now Current timestamp, supplied for deterministic checks
+	 * @return array Canonical starts, available segments and total minutes
+	 */
+	public function previewSelection(array $profile, array $starts, ?int $now = null): array
+	{
+		global $langs;
+		$now = $now ?? time();
+		try {
+			$selection = BookingAvailability::availableSelection($profile['config'], array(), $starts, $now);
+		} catch (\OutOfBoundsException $e) {
+			throw new BookingException('CDavBookingConflict', 409);
+		} catch (\InvalidArgumentException $e) {
+			throw new BookingException('CDavBookingInvalid', 422);
+		}
+		$owner = $this->owner($profile['owner_id']);
+		$reader = new BookingCalendarReader($this->db, $owner, $langs);
+		$zone = new \DateTimeZone($profile['config']['timezone']);
+		$padding = ($profile['config']['buffer_before'] + $profile['config']['buffer_after']) * 60;
+		$days = array();
+		$busy = array();
+		foreach ($selection['starts'] as $start) {
+			$day = (new \DateTimeImmutable('@'.$start))->setTimezone($zone)->setTime(0, 0);
+			$key = $day->format('Y-m-d');
+			if (isset($days[$key])) continue;
+			$days[$key] = true;
+			$busy = array_merge($busy, $reader->busy($day->getTimestamp() - $padding,
+				$day->modify('+1 day')->getTimestamp() + $padding, $profile['config']['timezone']));
+		}
+		try {
+			return BookingAvailability::availableSelection($profile['config'], $busy, $selection['starts'], $now);
+		} catch (\OutOfBoundsException $e) {
+			throw new BookingException('CDavBookingConflict', 409);
+		} catch (\InvalidArgumentException $e) {
+			throw new BookingException('CDavBookingInvalid', 422);
+		}
+	}
+
+	/**
+	 * Keep the existing single-appointment response contract.
 	 * @param string $key Publication key
 	 * @param string $ticket Signed form ticket
 	 * @param int $start Selected timestamp
 	 * @param array $contact Visitor coordinates
-	 * @return array Public receipt
+	 * @return array Public single receipt
 	 */
 	public function reserve($key, $ticket, $start, array $contact)
+	{
+		$result = $this->reserveSelection($key, $ticket, array($start), $contact);
+		unset($result['segments'], $result['duration_minutes']);
+		return $result;
+	}
+
+	/**
+	 * Reserve every selected segment atomically, using the native owner-row lock.
+	 * @param string $key Publication key
+	 * @param string $ticket Signed form ticket
+	 * @param array $starts Selected unit start timestamps
+	 * @param array $contact Visitor coordinates
+	 * @return array Public group receipt with segment start/end pairs
+	 */
+	public function reserveMany($key, $ticket, array $starts, array $contact): array
+	{
+		return $this->reserveSelection($key, $ticket, $starts, $contact);
+	}
+
+	/**
+	 * Build a receipt without exposing event identifiers or visitor coordinates.
+	 * @param array $selection Canonical selection
+	 * @param string $reference Shared public reference
+	 * @param bool $replayed Whether an existing receipt is being returned
+	 * @return array Public receipt
+	 */
+	private function selectionReceipt(array $selection, string $reference, bool $replayed): array
+	{
+		$segments = $selection['segments'];
+		return array('reference' => $reference, 'start' => $segments[0]['start'], 'end' => $segments[count($segments) - 1]['end'],
+			'replayed' => $replayed, 'segments' => $segments, 'duration_minutes' => $selection['duration_minutes']);
+	}
+
+	/**
+	 * Require every original native event to remain in this profile's scope.
+	 * @param object $receipt Stored technical receipt
+	 * @param array $profile Current validated profile
+	 * @param array $selection Canonical original selection
+	 * @return void
+	 */
+	private function verifyReceipt($receipt, array $profile, array $selection): void
+	{
+		if (empty($receipt->fk_actioncomm)) throw new BookingException('CDavBookingNoLongerActive', 410);
+		$rows = $this->query('SELECT segment_no, fk_actioncomm FROM '.MAIN_DB_PREFIX.'cdav_booking_request_event WHERE request_hash = '
+			.$this->quote($receipt->request_hash).' ORDER BY segment_no');
+		$ids = array();
+		while ($row = $this->db->fetch_object($rows)) {
+			if ((int) $row->segment_no !== count($ids) || empty($row->fk_actioncomm)) throw new BookingException('CDavBookingNoLongerActive', 410);
+			$ids[] = (int) $row->fk_actioncomm;
+		}
+		// Receipts issued before group booking have only the original native FK.
+		if (!$ids) $ids[] = (int) $receipt->fk_actioncomm;
+		if (count($ids) !== count($selection['segments'])) throw new BookingException('CDavBookingNoLongerActive', 410);
+		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
+		foreach ($ids as $position => $id) {
+			$event = new \ActionComm($this->db);
+			$segment = $selection['segments'][$position];
+			if ($event->fetch($id) <= 0 || (int) $event->entity !== $this->entity || (int) $event->userownerid !== $profile['owner_id']
+				|| (int) $event->datep !== $segment['start'] || (int) $event->datef !== $segment['end']
+				|| (int) $event->percentage !== -1
+				|| (int) ($event->userassigned[$profile['owner_id']]['transparency'] ?? 0) !== 1) {
+				throw new BookingException('CDavBookingNoLongerActive', 410);
+			}
+		}
+	}
+
+	/**
+	 * Share validation, transaction, native writes and idempotence across both APIs.
+	 * @param string $key Publication key
+	 * @param string $ticket Signed form ticket
+	 * @param array $starts Selected unit start timestamps
+	 * @param array $contact Visitor coordinates
+	 * @return array Public group receipt
+	 */
+	private function reserveSelection($key, $ticket, array $starts, array $contact): array
 	{
 		$now = time();
 		$initial = $this->publicProfile($key);
@@ -363,12 +488,18 @@ class BookingService
 				|| !mb_check_encoding($value, 'UTF-8')) throw new BookingException('CDavBookingInvalid', 422);
 			$clean[$field] = trim($value);
 		}
-		if ($clean['name'] === '' || !isValidEmail($clean['email']) || !empty($contact['website'])
-			|| !is_int($start) || $start <= 0) throw new BookingException('CDavBookingInvalid', 422);
-		$bodyHash = hash('sha256', json_encode(array($start, $clean)));
+		if ($clean['name'] === '' || !isValidEmail($clean['email']) || !empty($contact['website'])) {
+			throw new BookingException('CDavBookingInvalid', 422);
+		}
+		try { $selection = BookingAvailability::planSelection($initial['config'], $starts); } catch (\InvalidArgumentException $e) {
+			throw new BookingException('CDavBookingInvalid', 422);
+		}
+		$starts = $selection['starts'];
+		// Retain the historical single-unit hash, including for reserveMany([start]).
+		$bodyHash = hash('sha256', json_encode(array(count($starts) === 1 ? $starts[0] : $starts, $clean)));
 		if (!$this->db->begin()) throw new BookingException('CDavBookingUnavailable', 503);
 		try {
-			// No consistent/snapshot read may precede this locking read in the transaction.
+			// No consistent/snapshot read may precede this native locking read.
 			$locked = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'user WHERE rowid = '.$initial['owner_id'].' AND statut = 1 AND fk_soc IS NULL AND entity IN (0, '.$this->entity.') FOR UPDATE'));
 			if (!$locked) throw new BookingException('CDavBookingNotFound', 404);
 			$profile = $this->publicProfile($key, true);
@@ -376,35 +507,37 @@ class BookingService
 			$previous = $this->db->fetch_object($this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_request WHERE request_hash = '.$this->quote($requestHash).' FOR UPDATE'));
 			if ($previous) {
 				if (!hash_equals((string) $previous->body_hash, $bodyHash)) throw new BookingException('CDavBookingConflict', 409);
-				if (empty($previous->fk_actioncomm)) throw new BookingException('CDavBookingNoLongerActive', 410);
-				$result = array('reference' => $previous->reference, 'start' => (int) $previous->start_at,
-					'end' => (int) $previous->end_at, 'replayed' => true);
+				$this->verifyReceipt($previous, $profile, $selection);
+				$result = $this->selectionReceipt($selection, (string) $previous->reference, true);
 			} else {
-				$tz = new \DateTimeZone($profile['config']['timezone']);
-				$day = (new \DateTimeImmutable('@'.$start))->setTimezone($tz)->setTime(0, 0);
-				$available = $this->slots($profile, $day->getTimestamp(), $day->modify('+1 day')->getTimestamp(), time());
-				$match = null;
-				foreach ($available as $slot) if ($slot['start'] === $start) $match = $slot;
-				if ($match === null) throw new BookingException('CDavBookingConflict', 409);
+				$selection = $this->previewSelection($profile, $starts, time());
 				$owner = $this->owner($profile['owner_id']);
 				require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
-				$event = new \ActionComm($this->db);
-				$event->type_code = 'AC_RDV';
-				$event->label = 'RDV — '.$clean['name'];
-				$event->datep = $match['start'];
-				$event->datef = $match['end'];
-				$event->userownerid = $owner->id;
-				$event->userassigned = array($owner->id => array('id' => $owner->id, 'transparency' => 1));
-				$event->transparency = 1;
-				$event->percentage = -1;
-				$event->priority = 0;
 				$reference = bin2hex(random_bytes(16));
-				$event->note_private = 'CDav booking '.$reference."\n".$clean['name']."\n".$clean['email']."\n".$clean['phone'];
-				if ($event->create($owner) <= 0) throw new BookingException('CDavBookingUnavailable', 503);
+				$ids = array();
+				foreach ($selection['segments'] as $segment) {
+					$event = new \ActionComm($this->db);
+					$event->type_code = 'AC_RDV';
+					$event->label = 'RDV — '.$clean['name'];
+					$event->datep = $segment['start'];
+					$event->datef = $segment['end'];
+					$event->userownerid = $owner->id;
+					$event->userassigned = array($owner->id => array('id' => $owner->id, 'transparency' => 1));
+					$event->transparency = 1;
+					$event->percentage = -1;
+					$event->priority = 0;
+					$event->note_private = 'CDav booking '.$reference."\n".$clean['name']."\n".$clean['email']."\n".$clean['phone'];
+					if ($event->create($owner) <= 0) throw new BookingException('CDavBookingUnavailable', 503);
+					$ids[] = (int) $event->id;
+				}
+				$result = $this->selectionReceipt($selection, $reference, false);
 				$this->query('INSERT INTO '.MAIN_DB_PREFIX.'cdav_booking_request (request_hash, fk_profile, fk_actioncomm, body_hash, reference, start_at, end_at, expires_at) VALUES ('
-					.$this->quote($requestHash).', '.$profile['id'].', '.((int) $event->id).', '.$this->quote($bodyHash).', '
-					.$this->quote($reference).', '.$match['start'].', '.$match['end'].', '.($validUntil + self::RECEIPT_RETENTION).')');
-				$result = array('reference' => $reference, 'start' => $match['start'], 'end' => $match['end'], 'replayed' => false);
+					.$this->quote($requestHash).', '.$profile['id'].', '.$ids[0].', '.$this->quote($bodyHash).', '
+					.$this->quote($reference).', '.$result['start'].', '.$result['end'].', '.($validUntil + self::RECEIPT_RETENTION).')');
+				foreach ($ids as $position => $id) {
+					$this->query('INSERT INTO '.MAIN_DB_PREFIX.'cdav_booking_request_event (request_hash, segment_no, fk_actioncomm) VALUES ('
+						.$this->quote($requestHash).', '.$position.', '.$id.')');
+				}
 			}
 			if (!$this->db->commit()) throw new BookingException('CDavBookingUnavailable', 503);
 			return $result;

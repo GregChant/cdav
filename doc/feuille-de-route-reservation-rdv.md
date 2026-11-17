@@ -470,6 +470,25 @@ Texte de référence pour l'objectif :
 - Matrice validée : Dolibarr 23.0.4 et 24.0.0 × PHP 8.4.26 et 8.5.11, MariaDB 10.6.23 ; sept parcours navigateur par combinaison.
 - Limites : périmètre V1 de la section 3, routage natif nécessaire pour les autres entités, absence d’interdiction globale des chevauchements créés depuis l’Agenda/DAV, dépréciations du cœur/Sabre consignées.
 
+## Évolutions demandées après la livraison 6.0
+
+- [x] Remplacer le choix à l'aveugle d'une date par un mois avec jours réellement
+  disponibles, navigation bornée et maintien du choix direct par date.
+- [x] Permettre jusqu'à six mois calendaires, avec borne de fin de mois et
+  conservation des anciens profils exprimés en jours.
+- [x] Expliquer les profils dont durée, marges et pas ne permettent aucun créneau.
+- [x] Autoriser indépendamment par profil les créneaux consécutifs et les
+  plages séparées ou réparties sur plusieurs jours ; conserver les deux options
+  désactivées par défaut.
+- [x] Créer toutes les parties via `ActionComm`, dans une transaction commune,
+  avec contrôle des droits, marges, disponibilités, concurrence et rejouabilité.
+- [x] Reprendre le logo et le nom de l'entreprise, puis l'identité, la photo et
+  les coordonnées professionnelles natives en respectant les masquages publics.
+- [x] Ajouter tests métier, rendu et HTTP réels ; exécuter les 48 parcours
+  navigateur sur la matrice 23/24 × PHP 8.4/8.5 et contrôler le style natif.
+- [ ] Qualifier le ZIP 6.1 installé et mis à niveau, publier les commits et
+  retirer les instances jetables après conservation des preuves.
+
 ## Références locales
 
 - [Guide actuel : disponibilités, documents et photos](disponibilites-documents-photos-fr.md).

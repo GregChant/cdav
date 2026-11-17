@@ -288,6 +288,59 @@ d’installation et de parcours restent celles du candidat `df43a6d` ; elles ne
 sont pas présentées comme une nouvelle qualification complète du correctif.
 Le manifeste précise les fichiers modifiés depuis ce candidat.
 
+### Évolution 6.1 : calendrier, sélection et identité
+
+La suite de la demande ajoute le calendrier mensuel, l'horizon de six mois
+calendaires, deux permissions de sélection indépendantes par professionnel et
+l'identité native de l'entreprise et du professionnel. Les profils existants
+gardent leurs horaires, leur horizon en jours et leur lien ; les deux nouvelles
+permissions sont désactivées par défaut. Une table technique supplémentaire
+relie un reçu aux `ActionComm` natifs, sans recopier leurs dates ni coordonnées.
+
+Avant empaquetage, les neuf suites rapides passent sur les quatre combinaisons
+Dolibarr 23.0.4 / 24.0.0 × PHP 8.4.26 / 8.5.11, avec lint et PHPCS natif. Les
+tests de rendu couvrent 58 situations FR/EN par combinaison. Les tests métier
+ajoutent les règles A13/A14, la présentation mensuelle, M01–M07 pour la sélection,
+les photos natives, leurs miniatures, le refus des traversées et symlinks, les
+limites d'octets et de pixels et les liens de contact.
+
+Les tests HTTP et MariaDB réels de groupe passent sur les quatre combinaisons :
+créneau continu unique, trois parties séparées, permissions falsifiées refusées,
+rejeu canonique, modification/suppression d'une partie native, conversion en
+tâche native, rollback à la deuxième création et course entre deux workers
+attendant effectivement le verrou du même propriétaire. Le rejeu d'une partie
+déplacée, rendue libre ou convertie en tâche renvoie `410`, sans nouvelle création.
+
+Une première exécution parallèle a échoué à observer les deux workers dans les
+cinq secondes. Les passages isolés et les quatre passages finaux sont réussis.
+La preuve de concurrence conserve l'exigence de deux attentes et filtre
+maintenant le propriétaire exact, avec une attente maximale de dix secondes.
+Cet ajustement ne remplace pas la barrière SQL par une temporisation arbitraire.
+
+Les 48 parcours navigateur (12 par combinaison) contrôlent les deux langues,
+le clavier, le mobile, les mois et leur limite, les paniers, les retraits, les
+confirmations et les refus de permission. Le logo est réellement servi par le
+point d'accès natif public, la photo est chargée et les coordonnées et options
+de masquage de l'utilisateur sont vérifiées. Axe ne signale aucune violation
+sur les pages contrôlées ; il ne s'agit pas d'une certification globale.
+
+Le navigateur a détecté un conflit avec le nom natif `action=add` : Dolibarr le
+traitait comme une mutation exigeant un jeton CSRF en GET. La sélection de
+présentation utilise désormais `selection_action`, sans jeton dans l'URL et sans
+relâcher la protection POST. Les confirmations vident les paramètres GET avec
+`action="?"`. Ces deux comportements ont des assertions de non-régression.
+
+Les instances de qualification utilisent uniquement des bases jetables
+`cdav_monthly_test_*`, quatre workers HTTP chacune et des répertoires privés.
+Les fixtures passent par les API natives pour les utilisateurs et événements ;
+les fichiers, constantes, reçus et historiques automatiques ajoutés sont retirés
+après chaque suite. L'instance préexistante est conservée.
+
+Preuves locales : `dist/qa/monthly-browser-matrix.json`, les quatre dossiers
+`dist/qa/monthly-doli*/`, `dist/qa/multi-native-*-php*.json` et
+`dist/qa/release-6.1-*.log`. La qualification du ZIP et son empreinte sont
+consignées dans le manifeste de livraison.
+
 Les preuves locales sanitizées sont dans `dist/qa/` :
 
 - `package-validation.json` : installation, mise à niveau, identité des blobs,
