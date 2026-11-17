@@ -506,8 +506,11 @@ Texte de référence pour l'objectif :
   inclure les nouveaux détails dans le contrôle d'idempotence.
 - [x] Ajouter les tests métier et les régressions HTTP/navigateur ; valider les
   quatre combinaisons Dolibarr 23/24 × PHP 8.4/8.5 et la revue indépendante.
-- [ ] Qualifier le paquet 6.1.1, publier sur les branches autorisées et retirer
-  les instances jetables après conservation des preuves.
+- [x] Qualifier le paquet 6.1.1 : 40 suites rapides, 288 rendus, huit suites HTTP,
+  48 parcours navigateur, PHPCS natif et 120 contrôles HTTP des scripts de test.
+- [x] Préparer la livraison reproductible pour `master` et `23.0` ; retirer les
+  quatre instances jetables après conservation des preuves dans
+  `dist/qa/details-validation/`, dont `teardown.json`.
 
 ## Références locales
 

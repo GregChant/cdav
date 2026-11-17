@@ -439,5 +439,28 @@ résidu de fixture n'est présent. Les preuves sont dans
 `dist/qa/details-validation/source-matrix.json`, `source-cleanup.json`,
 `runtime-diagnostics.json` et les dossiers `dist/qa/details-doli*/`.
 
-La qualification du paquet et sa clôture sont consignées dans le manifeste
-`dist/qa/booking-release-manifest.json` avant publication de la version 6.1.1.
+Le candidat `537193e`, SHA-256
+`8c27a037e4056239f577b3f36ccfebee6de2553b3ed1629277fada386f59549a`,
+est qualifié depuis son extrait dans les quatre instances natives. Ses 94
+fichiers correspondent aux blobs Git avant et après les essais. Les 40 suites
+rapides, 288 rendus, lint complet, PHPCS natif, huit suites HTTP et 48 parcours
+navigateur réussissent depuis cet extrait. Les quinze scripts PHP développeur
+répondent `404` avec un corps vide en GET et POST sur chaque combinaison, soit
+120 vérifications. Les bases reviennent à leur état initial, sans orphelin.
+
+Le bilan est `dist/qa/details-validation/archive-summary.json` ; les matrices,
+protections HTTP, diagnostics, résidus et commandes de reproduction figurent
+dans le même dossier. Aucun diagnostic PHP du module n'est relevé. Les huit
+avertissements natifs `QUERY_STRING` de `main.inc.php`, liés aux métadonnées du
+serveur PHP de développement, sont conservés dans la preuve des diagnostics.
+La CI du candidat sur `23.0` réussit également sur les quatre combinaisons.
+
+L'archive finale est reconstruite après cette seule clôture Markdown ; tous
+ses fichiers hors Markdown restent identiques au candidat exécuté. Son commit,
+son empreinte reproductible et les références CI sont consignés dans
+`dist/qa/booking-release-manifest.json`.
+
+Les quatre serveurs, bases et configurations jetables ont été supprimés ;
+l'instance préexistante sur le port 8023, les configurations des deux cœurs
+partagés et le cache Chromium sont préservés. La preuve de retrait figure dans
+`dist/qa/details-validation/teardown.json`.
