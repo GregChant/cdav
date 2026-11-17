@@ -23,7 +23,8 @@ Respecter également les prérequis de la version Dolibarr installée.
 ## Configurer un professionnel
 
 Un administrateur interne gère les profils depuis **Agenda > Rendez-vous en
-ligne**, entrée fournie par CDav, ou depuis la page de configuration du module.
+ligne**, entrée fournie par CDav, ou avec le bouton **Rendez-vous en ligne** de
+la page de configuration du module, accessible par son unique roue dentée.
 Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
 
 1. Sélectionner un utilisateur interne actif. Il doit posséder les droits natifs

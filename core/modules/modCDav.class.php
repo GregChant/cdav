@@ -94,7 +94,7 @@ class modCDav extends DolibarrModules
 		$this->dirs = array('/cdav');
 
 		// Config pages. Put here list of php page, stored into mymodule/admin directory, to use to setup module.
-		$this->config_page_url = array('setup.php@cdav', 'booking.php@cdav');
+		$this->config_page_url = array('setup.php@cdav');
 
 		// Dependencies
 		$this->hidden = false;			// A condition to hide module

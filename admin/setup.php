@@ -299,6 +299,12 @@ $CDAV_MANAGED_ATTACHMENT_QUOTA_MB=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_QUOTA
 
 dol_fiche_head('', 'setup', $langs->trans("CDav"), 0, "cdav@cdav");
 
+if (isModEnabled('agenda')) {
+	print '<div class="tabsAction">';
+	print '<a class="butAction" href="'.dol_escape_htmltag(dol_buildpath('/cdav/admin/booking.php', 1)).'">'.dol_escape_htmltag($langs->trans('CDavBooking')).'</a>';
+	print '</div>';
+}
+
 print_titre($langs->trans("CDavSettingValues"));
 print '<br>';
 print '<form method="post" action="setup.php">';
