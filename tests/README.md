@@ -1,0 +1,69 @@
+# Tests de CDav
+
+La commande rapide ne nécessite ni base, ni serveur HTTP, ni configuration de
+production. Elle utilise les bibliothèques du cœur Dolibarr choisi :
+
+```sh
+DOLIBARR_ROOT=/chemin/dolibarr/htdocs \
+CDAV_PHP_BIN=php8.4 \
+CDAV_PHPCS_STANDARD=/chemin/dolibarr/dev/setup/codesniffer/ruleset.xml \
+bash tests/qa.sh
+```
+
+## Protection contre les régressions
+
+Le [workflow GitHub](../.github/workflows/qa.yml) exécute cette commande pour
+chaque pull request et chaque push sur `23.0` ou `master`, sur les quatre
+combinaisons Dolibarr 23.0.4 / 24.0.0 × PHP 8.4 / 8.5. Un échec de test, de
+syntaxe ou de PHPCS fait échouer le job. Les quatre jobs continuent indépendamment
+pour rendre visibles les incompatibilités propres à une combinaison.
+
+| Suite sans base | Comportements contrôlés |
+|---|---|
+| `run.php` | Lecture vCard/iCalendar, champs absents/remplacés, photos, participants, récurrences, rappels et rejet des données incompatibles |
+| `freebusy.php` | Suppression des données privées sans changer les occupations, récurrences, exceptions et fuseaux |
+| `contact_photos.php` | Photo personnelle, logo du tiers, repli, entité propriétaire, ETag et limites des fichiers, avec fichiers temporaires et doublure SQL ciblée |
+| `attachments.php` | Décodage et limites des pièces jointes, contenu interdit, accès aux documents, traversée de chemin et nettoyage différé des fichiers |
+| `booking.php` | Créneaux réellement libres, bornes, marges, pauses, journées entières, récurrences, changements d’heure, préavis, horizon et validation des profils |
+| `booking_ui.php` | Dix rendus FR/EN du formulaire, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
+
+Les tests de réservation utilisent une horloge fixe. Des cas déterministes
+vérifient que l’ordre et les doublons des occupations ne changent pas les
+créneaux, et qu’ajouter une occupation ne peut pas créer de disponibilité.
+Le pas de proposition est testé indépendamment de la durée du rendez-vous.
+
+PHP est contrôlé en mode strict : les avertissements et dépréciations du module
+font échouer les suites. Les dépréciations du Sabre fourni par Dolibarr sont
+identifiées séparément. PHPCS applique les règles natives du cœur ciblé aux
+fichiers de réservation/transport et aux nouvelles suites ; les anciens fichiers
+conservent une dette de style et ne sont pas déclarés entièrement conformes.
+
+## Ce que ces suites ne prouvent pas
+
+Ces scripts sont des tests unitaires et de composants, pas une mesure exhaustive
+de couverture. Certaines anciennes assertions de `run.php` recherchent encore du
+texte dans les sources ; elles ne prouvent pas le comportement transactionnel.
+Les doublures SQL ne valident pas les requêtes contre MariaDB.
+
+`booking_live.php` et `live_integration.php` contrôlent les vrais accès HTTP,
+droits natifs, écritures, verrouillages, courses concurrentes, rejouabilité et
+rollback. `booking_browser.php` et `booking_browser.cjs` contrôlent les parcours
+réels avec Playwright et axe. Ils nécessitent une instance jetable avec base
+explicitement nommée comme base de test ; ils ne sont pas lancés par la CI rapide.
+Leurs commandes et les résultats de qualification sont dans le
+[guide de réservation](../doc/reservation-rdv-fr.md#contrôles-de-qualité) et le
+[rapport de validation](../doc/validation-reservation-rdv.md).
+
+Le benchmark temporel reste séparé des tests déterministes pour éviter les échecs
+liés à la charge d’un runner partagé :
+
+```sh
+DOLIBARR_ROOT=/chemin/dolibarr/htdocs \
+CDAV_BOOKING_BENCHMARK=1 php8.4 tests/booking.php
+```
+
+Pour chaque correction métier, ajouter un cas reproduisant le défaut, vérifier
+qu’il échoue avant correction puis qu’il réussit après. Pour une modification
+des droits, du SQL, des transactions ou des contrôleurs, compléter par la suite
+HTTP/base réelle concernée. Pour une modification du parcours client, compléter
+par les contrôles navigateur. Un job vert ne remplace pas ces vérifications.

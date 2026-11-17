@@ -8,12 +8,13 @@ if (PHP_SAPI !== 'cli') {
 
 /** CardDAV photo regression tests; temporary files only, no database required. */
 date_default_timezone_set('UTC');
-error_reporting(E_ALL & ~E_DEPRECATED);
 $dolibarrRoot = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
 if (!is_file($dolibarrRoot.'/includes/sabre/autoload.php')) {
 	fwrite(STDERR, "Set DOLIBARR_ROOT to a Dolibarr htdocs directory.\n");
 	exit(2);
 }
+require __DIR__.'/bootstrap.php';
+cdavTestStrictErrors($dolibarrRoot);
 define('DOL_DOCUMENT_ROOT', $dolibarrRoot);
 define('MAIN_DB_PREFIX', 'llx_');
 define('CDAV_URI_KEY', 'photo-tests');

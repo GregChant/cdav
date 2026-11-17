@@ -461,6 +461,7 @@ Texte de référence pour l'objectif :
 | Date / commit | Lot / IDs | Environnement et commande ou procédure | Résultat et preuve | Limite / suite à donner |
 |---|---|---|---|---|
 | 2026-11-17 / `df43a6d` | L0–L5 / les 26 scénarios | Dolibarr 23/24 × PHP 8.4/8.5 ; tests métier, HTTP, concurrence, navigateur, PHPCS et archive installée | [Décisions et preuves](validation-reservation-rdv.md) ; rapports JSON dans `dist/qa/` | Dépréciations natives et limites V1 documentées |
+| 2026-11-17 / renforcement avant publication | Non-régression continue | Six suites sans base × quatre combinaisons, A08–A12 et 24 plannings déterministes ; PHPCS natif 23/24 et validation du workflow | Réussis localement ; [guide des tests](../tests/README.md), CI sur push/PR | Suites HTTP/navigateur de qualification conservées, hors CI rapide |
 
 ### Bilan final à compléter
 

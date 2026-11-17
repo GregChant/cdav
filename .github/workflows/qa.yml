@@ -1,0 +1,62 @@
+name: CDav QA
+
+on:
+  push:
+    branches: [master, '23.0']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Dolibarr ${{ matrix.dolibarr }} / PHP ${{ matrix.php }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.4', '8.5']
+        dolibarr: ['23.0.4', '24.0.0']
+        include:
+          - dolibarr: '23.0.4'
+            core-ref: cb82037066c1c71f7c867482e9e92975222dfc14
+          - dolibarr: '24.0.0'
+            core-ref: 769c7db907099643558e77d7002c109cfda919e5
+    steps:
+      - name: Checkout CDav
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: module
+          persist-credentials: false
+      - name: Checkout native Dolibarr dependencies
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Dolibarr/dolibarr
+          ref: ${{ matrix.core-ref }}
+          path: dolibarr
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: ctype, curl, dom, fileinfo, gd, iconv, intl, mbstring, xml, xmlreader, xmlwriter
+          coverage: none
+          tools: phpcs:3.13.5
+      - name: Ensure ripgrep is available for lint enumeration
+        run: |
+          if ! command -v rg > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ripgrep
+          fi
+      - name: Lint, regression tests and native Dolibarr coding standard
+        working-directory: module
+        env:
+          DOLIBARR_ROOT: ${{ github.workspace }}/dolibarr/htdocs
+          CDAV_PHPCS_STANDARD: ${{ github.workspace }}/dolibarr/dev/setup/codesniffer/ruleset.xml
+        run: bash tests/qa.sh

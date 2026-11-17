@@ -9,9 +9,6 @@ if (PHP_SAPI !== 'cli') {
 /** Lightweight parser regression tests; no Dolibarr database is required. */
 
 date_default_timezone_set('UTC');
-// Dolibarr 23's bundled Sabre release emits PHP 8.5 vendor deprecations.
-error_reporting(E_ALL & ~E_DEPRECATED);
-
 $dolibarrRoot = getenv('DOLIBARR_ROOT');
 if (!$dolibarrRoot) {
 	$dolibarrRoot = dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
@@ -21,6 +18,8 @@ if (!is_file($sabreAutoload)) {
 	fwrite(STDERR, "Set DOLIBARR_ROOT to a Dolibarr htdocs directory.\n");
 	exit(2);
 }
+require __DIR__.'/bootstrap.php';
+cdavTestStrictErrors($dolibarrRoot);
 
 define('DOL_DOCUMENT_ROOT', $dolibarrRoot);
 define('CDAV_URI_KEY', 'parser-test-key');

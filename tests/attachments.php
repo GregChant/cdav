@@ -7,8 +7,9 @@ if (PHP_SAPI !== 'cli') {
 }
 
 /** Attachment parser and native download regressions without a Dolibarr DB. */
-error_reporting(E_ALL & ~E_DEPRECATED);
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
+require __DIR__.'/bootstrap.php';
+cdavTestStrictErrors($root);
 require $root.'/includes/sabre/autoload.php';
 require dirname(__DIR__).'/class/CDavManagedAttachmentStore.php';
 require dirname(__DIR__).'/class/CDavAgendaDocumentStore.php';

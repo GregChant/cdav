@@ -244,7 +244,7 @@ de test renvoient `404` par HTTP. Contrôle final : administrateur initial seul,
 aucun événement, profil/reçu de réservation, ressource ou collection orpheline.
 Aucun diagnostic PHP issu du module extrait n'a été détecté.
 
-L'archive finale `dist/module_cdav-6.0.0.zip` est construite après la clôture
+L'archive de clôture `96a5735` était construite après la clôture
 **documentaire**. Ses fichiers applicatifs, schémas, langues et tests sont
 identiques à ceux du candidat exécuté ; seuls les fichiers Markdown de preuve
 et de guide sont actualisés. Le manifeste externe
@@ -256,6 +256,37 @@ requiert aucun outil de paquetage supplémentaire :
 git archive --format=zip --prefix=cdav/ \
   --output=dist/module_cdav-6.0.0.zip HEAD
 ```
+
+### Renforcement avant publication sur `master`
+
+Le correctif d’administration conserve une seule entrée `setup.php@cdav` dans
+le descripteur : Dolibarr affichait une roue par page déclarée. La configuration
+générale propose maintenant un bouton « Rendez-vous en ligne » vers la page
+existante ; le menu Agenda reste disponible. Le descripteur natif a été chargé
+sur les quatre combinaisons pour vérifier l’entrée unique et le menu conservé.
+
+La suite `booking.php` couvre désormais A01–A12 : cinq groupes ajoutent les
+bornes/types, horaires jusqu’à `24:00`, durée distincte du pas, horizon en jours
+locaux, indépendance du fuseau PHP et sémantique iCalendar. Vingt-quatre
+plannings déterministes vérifient l’invariance par ordre/doublons, la monotonie
+des occupations et l’absence de chevauchement, y compris les marges. Deux
+défauts injectés dans des copies temporaires ont fait échouer A08 et A10
+(validation numérique relâchée et horizon remplacé par des secondes fixes).
+
+Les quatre suites historiques partagent un gestionnaire d’erreurs strict :
+les avertissements et dépréciations applicatifs font échouer les tests ; seules
+les dépréciations du Sabre natif sont comptées séparément. Les six suites, le
+lint et PHPCS natif sont automatisés par
+[GitHub Actions](../.github/workflows/qa.yml) sur Dolibarr 23.0.4 / 24.0.0 ×
+PHP 8.4 / 8.5. Le benchmark temporel reste disponible via
+`CDAV_BOOKING_BENCHMARK=1`, hors CI rapide partagée. Le
+[guide des tests](../tests/README.md) distingue ces garanties des contrôles
+HTTP/base réelle et navigateur de qualification.
+
+L’archive locale est reconstruite après ces changements. Les anciennes preuves
+d’installation et de parcours restent celles du candidat `df43a6d` ; elles ne
+sont pas présentées comme une nouvelle qualification complète du correctif.
+Le manifeste précise les fichiers modifiés depuis ce candidat.
 
 Les preuves locales sanitizées sont dans `dist/qa/` :
 

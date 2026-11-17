@@ -6,7 +6,7 @@ if (PHP_SAPI !== 'cli') {
 	exit;
 }
 
-/** Booking business regressions A01–A07; no database or HTTP server required. */
+/** Booking business regressions A01–A12; no database or HTTP server required. */
 date_default_timezone_set('Europe/Zurich');
 error_reporting(E_ALL);
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
@@ -50,7 +50,7 @@ function bookingCheck($condition, $message)
 function bookingThrows(callable $call, $message)
 {
 	$thrown = false;
-	try { $call(); } catch (Throwable $e) { $thrown = true; }
+	try { $call(); } catch (ErrorException $e) { throw $e; } catch (Throwable $e) { $thrown = true; }
 	bookingCheck($thrown, $message);
 }
 
@@ -247,20 +247,182 @@ bookingThrows(static function () use ($start, $end) {
 	BookingAvailability::busyIntervals(array_fill(0, 5001, ''), $start, $end, 'Europe/Zurich'); }, 'A07: calendar event count is bounded');
 fwrite(STDOUT, "[OK] A07 free/cancelled/tasks, recurrence availability exceptions, malformed data and limits\n");
 
-$load = array();
-for ($i = 0; $i < 1000; $i++) $load[] = bookingCalendar(bookingEvent('load-'.$i, '20261102T100000', '20261102T110000'));
-for ($i = 0; $i < 100; $i++) $load[] = bookingCalendar(bookingEvent('series-'.$i, '20261101T140000', '20261101T150000', "RRULE:FREQ=DAILY;COUNT=60\r\n"));
-$measurements = array();
-for ($i = 0; $i < 5; $i++) {
-	$before = microtime(true);
-	$loadBusy = BookingAvailability::busyIntervals($load, $start, bookingStamp('2026-12-31 00:00'), 'Europe/Zurich');
-	$measurements[] = microtime(true) - $before;
-	bookingCheck(count($loadBusy) === 60, 'R03 pure calculation retains merged occupations');
+$bounds = array('duration' => array(5, 480), 'step' => array(5, 240),
+	'buffer_before' => array(0, 240), 'buffer_after' => array(0, 240),
+	'notice' => array(0, 43200), 'horizon' => array(1, 90));
+foreach ($bounds as $setting => $limits) {
+	foreach ($limits as $limit) {
+		$normalized = BookingAvailability::validateConfig(array($setting => (string) $limit));
+		bookingCheck($normalized[$setting] === $limit, 'A08: valid numeric boundaries are normalized to integers for '.$setting);
+	}
+	foreach (array($limits[0] - 1, $limits[1] + 1, 1.5, true, false, array(), ' 5', '5 ', '+5', '5e0', "5\n") as $invalid) {
+		bookingThrows(static function () use ($setting, $invalid) {
+			BookingAvailability::validateConfig(array($setting => $invalid));
+		}, 'A08: invalid or coerced numeric settings are rejected for '.$setting);
+	}
 }
-sort($measurements);
-$p95 = $measurements[count($measurements) - 1];
-bookingCheck($p95 < 1.0, 'R03 pure calculation p95 target exceeded');
-fwrite(STDOUT, sprintf("[OK] R03 pure calculation: 1000 events + 100 series / 60 days / 5 runs; p95 %.3f s; peak %.1f MiB\n", $p95, memory_get_peak_usage(true) / 1048576));
+foreach (array(
+	array('timezone' => ''), array('timezone' => true), array('timezone' => array()),
+	array('weekly' => true), array('weekly' => array(0 => array())), array('weekly' => array(8 => array())),
+	array('weekly' => array(1 => array(array('9:00', '10:00')))),
+	array('weekly' => array(1 => array(array('09:00', '09:60')))),
+	array('weekly' => array(1 => array(array('24:00', '24:00')))),
+	array('weekly' => array(1 => array(array('23:00', '24:01')))),
+	array('weekly' => array(1 => array(array('09:00', '10:00', '11:00')))),
+	array('weekly' => array(1 => array(array('start' => '09:00', 'end' => '10:00')))),
+	array('weekly' => array(1 => array_fill(0, 5, array('09:00', '10:00'))))
+) as $invalid) {
+	bookingThrows(static function () use ($invalid) {
+		BookingAvailability::validateConfig($invalid);
+	}, 'A08: invalid timezone or malformed working hours are rejected');
+}
+foreach (array(array($start, $start), array($end, $start), array(-1, $end), array($start, $start + 93 * 86400 + 1)) as $invalid) {
+	bookingThrows(static function () use ($invalid) {
+		BookingAvailability::validateRange($invalid[0], $invalid[1]);
+	}, 'A08: nonpositive, reversed or excessive calculation ranges are rejected');
+}
+BookingAvailability::validateRange($start, $start + 93 * 86400);
+foreach (array(array($start, $start), array($end, $start), array((string) $start, $end), array('start' => $start, 'end' => $end)) as $invalid) {
+	bookingThrows(static function () use ($invalid, $start, $end, $now) {
+		BookingAvailability::slots(array('notice' => 0), array($invalid), $start, $end, $now);
+	}, 'A08: malformed occupied intervals cannot silently free time');
+}
+fwrite(STDOUT, "[OK] A08 numeric boundaries, strict types, working-hour validation and invalid occupied intervals\n");
+
+$workingHours = BookingAvailability::validateConfig(array('notice' => 0,
+	'weekly' => array(1 => array(array('13:00', '14:00'), array('10:00', '11:00'), array('09:00', '10:00')))));
+bookingCheck($workingHours['weekly'][1] === array(array('09:00', '11:00'), array('13:00', '14:00')),
+	'A09: unordered adjacent working ranges have a stable canonical meaning');
+bookingCheck(bookingHours(BookingAvailability::slots($workingHours, array(), $start, $end, $now))
+	=== array('09:00', '09:30', '10:00', '10:30', '13:00', '13:30'), 'A09: range normalization preserves all available starts and the lunch break');
+$offsetGrid = array('notice' => 0, 'duration' => 45, 'step' => 20,
+	'weekly' => array(1 => array(array('09:10', '11:00'))));
+bookingCheck(bookingHours(BookingAvailability::slots($offsetGrid, array(), $start, $end, $now)) === array('09:10', '09:30', '09:50', '10:10'),
+	'A09: the start grid is anchored to working hours, while the full independent duration must fit');
+$offsetGrid['buffer_before'] = 5;
+$offsetGrid['buffer_after'] = 10;
+bookingCheck(bookingHours(BookingAvailability::slots($offsetGrid, array(), $start, $end, $now)) === array('09:30', '09:50'),
+	'A09: asymmetric buffers fit within working hours without shifting the start grid');
+$midnightHours = array('notice' => 0, 'weekly' => array(1 => array(array('23:00', '24:00'))));
+$midnightSlots = BookingAvailability::slots($midnightHours, array(), $start, $end, $now);
+bookingCheck(bookingHours($midnightSlots) === array('23:00', '23:30') && $midnightSlots[1]['end'] === $end,
+	'A09: a 24:00 closing time permits a slot ending exactly at next-day midnight');
+bookingCheck(BookingAvailability::slots(array('notice' => 0, 'weekly' => array()), array(), $start, $end, $now) === array(),
+	'A09: an explicitly empty working week remains closed');
+fwrite(STDOUT, "[OK] A09 normalized working hours, independent duration/step, asymmetric margins and midnight closure\n");
+
+$profileZone = new DateTimeZone('America/New_York');
+$profileNow = new DateTimeImmutable('2026-10-31 12:00', $profileZone);
+$profileDeadline = $profileNow->modify('+1 day')->getTimestamp();
+$profileStart = $profileNow->setTime(0, 0)->getTimestamp();
+$profileEnd = $profileNow->modify('+2 days')->setTime(0, 0)->getTimestamp();
+$profileConfig = array('timezone' => 'America/New_York', 'notice' => 0, 'horizon' => 1,
+	'weekly' => array_fill(1, 7, array(array('00:00', '24:00'))));
+$profileSlots = BookingAvailability::slots($profileConfig, array(), $profileStart, $profileEnd, $profileNow->getTimestamp());
+bookingCheck($profileDeadline - $profileNow->getTimestamp() === 25 * 3600
+	&& $profileSlots[0]['start'] === $profileNow->getTimestamp()
+	&& $profileSlots[count($profileSlots) - 1]['end'] === $profileDeadline,
+	'A10: the booking horizon is a calendar day in the profile timezone, with an inclusive exact slot end across DST');
+foreach ($profileSlots as $slot) {
+	bookingCheck($slot['start'] >= $profileNow->getTimestamp() && $slot['end'] <= $profileDeadline,
+		'A10: no slot crosses notice or the profile-local horizon');
+}
+$processTimezone = date_default_timezone_get();
+try {
+	date_default_timezone_set('Asia/Tokyo');
+	bookingCheck(BookingAvailability::slots($profileConfig, array(), $profileStart, $profileEnd, $profileNow->getTimestamp()) === $profileSlots,
+		'A10: availability must not depend on the PHP process timezone');
+} finally {
+	date_default_timezone_set($processTimezone);
+}
+fwrite(STDOUT, "[OK] A10 profile timezone, local DST horizon, exact deadline and process-timezone independence\n");
+
+for ($scenario = 0; $scenario < 24; $scenario++) {
+	$propertyConfig = array('notice' => 0, 'duration' => array(5, 30, 45, 90)[$scenario % 4],
+		'step' => array(5, 20, 30, 60)[intdiv($scenario, 2) % 4],
+		'buffer_before' => $scenario % 3 === 0 ? 10 : 0, 'buffer_after' => $scenario % 2 === 0 ? 15 : 0,
+		'weekly' => array(1 => array(array('09:00', '12:00'), array('13:00', '17:00'))));
+	$occupied = array();
+	for ($index = 0; $index < 3; $index++) {
+		$occupiedStart = $start + (9 * 60 + ($scenario * 17 + $index * 101) % 420) * 60;
+		$occupied[] = array($occupiedStart, $occupiedStart + (10 + ($scenario + $index) % 40) * 60);
+	}
+	$original = BookingAvailability::slots($propertyConfig, $occupied, $start, $end, $now);
+	$reordered = array_merge(array_reverse($occupied), array($occupied[0], $occupied[1]));
+	bookingCheck(BookingAvailability::slots($propertyConfig, $reordered, $start, $end, $now) === $original,
+		'A11: event ordering and duplicate occupied intervals cannot change availability, scenario '.$scenario);
+	$additional = array_merge($occupied, array(array($start + 14 * 3600, $start + 15 * 3600)));
+	$reduced = BookingAvailability::slots($propertyConfig, $additional, $start, $end, $now);
+	$originalStarts = array_column($original, 'start');
+	bookingCheck(array_diff(array_column($reduced, 'start'), $originalStarts) === array(),
+		'A11: adding an occupied event cannot create a newly available slot, scenario '.$scenario);
+	$previousStart = null;
+	foreach ($original as $slot) {
+		bookingCheck(($previousStart === null || $slot['start'] > $previousStart)
+			&& $slot['end'] - $slot['start'] === $propertyConfig['duration'] * 60,
+			'A11: results have unique chronological starts and the configured real duration, scenario '.$scenario);
+		$previousStart = $slot['start'];
+		$before = $propertyConfig['buffer_before'] * 60;
+		$after = $propertyConfig['buffer_after'] * 60;
+		$fitsMorning = $slot['start'] - $before >= $start + 9 * 3600 && $slot['end'] + $after <= $start + 12 * 3600;
+		$fitsAfternoon = $slot['start'] - $before >= $start + 13 * 3600 && $slot['end'] + $after <= $start + 17 * 3600;
+		bookingCheck($fitsMorning || $fitsAfternoon, 'A11: complete reservations and margins remain inside one working range, scenario '.$scenario);
+		foreach ($occupied as $interval) {
+			bookingCheck($slot['end'] + $after <= $interval[0] - $before || $slot['start'] - $before >= $interval[1] + $after,
+				'A11: no result overlaps an event or either event margin, scenario '.$scenario);
+		}
+	}
+}
+fwrite(STDOUT, "[OK] A11 24 deterministic schedules: ordering, duplicates, monotonic occupation, unique starts, durations and margin safety\n");
+
+$explicitDuration = bookingCalendar("BEGIN:VEVENT\r\nUID:utc-duration\r\nDTSTART:20261102T090000Z\r\nDURATION:PT45M\r\nEND:VEVENT\r\n");
+$floatingTime = bookingCalendar("BEGIN:VEVENT\r\nUID:floating-time\r\nDTSTART:20261102T130000\r\nDTEND:20261102T140000\r\nEND:VEVENT\r\n");
+bookingCheck(BookingAvailability::busyIntervals(array($explicitDuration, $floatingTime), $start, $end, 'Europe/Zurich')
+	=== array(array(bookingStamp('2026-11-02 10:00'), bookingStamp('2026-11-02 10:45')),
+		array(bookingStamp('2026-11-02 13:00'), bookingStamp('2026-11-02 14:00'))),
+	'A12: explicit durations, UTC values and floating values retain their native calendar meaning');
+$implicitAllDay = bookingCalendar("BEGIN:VEVENT\r\nUID:implicit-all-day\r\nDTSTART;VALUE=DATE:20261102\r\nEND:VEVENT\r\n");
+bookingCheck(BookingAvailability::busyIntervals(array($implicitAllDay), $start, $end, 'Europe/Zurich') === array(array($start, $end)),
+	'A12: an all-day event without an explicit end occupies one complete local day');
+foreach (array("DTSTART;TZID=Europe/Zurich:20261102T120000\r\n", "DURATION:PT1H\r\n", "UID:second-uid\r\n",
+	"EXRULE:FREQ=DAILY\r\n", "RECURRENCE-ID;RANGE=THISANDFUTURE;TZID=Europe/Zurich:20261102T100000\r\n",
+	"RDATE;VALUE=DATE:20261103\r\n") as $ambiguous) {
+	bookingThrows(static function () use ($ambiguous, $start, $end) {
+		BookingAvailability::busyIntervals(array(bookingCalendar(bookingEvent('ambiguous', '20261102T100000', '20261102T110000', $ambiguous))), $start, $end, 'Europe/Zurich');
+	}, 'A12: ambiguous properties and unsupported recurrence data fail closed');
+}
+$previousRecurrenceLimit = Sabre\VObject\Settings::$maxRecurrences;
+try {
+	Sabre\VObject\Settings::$maxRecurrences = 1234;
+	BookingAvailability::busyIntervals(array($explicitDuration), $start, $end, 'Europe/Zurich');
+	bookingCheck(Sabre\VObject\Settings::$maxRecurrences === 1234, 'A12: successful calculations preserve the shared native recurrence limit');
+	bookingThrows(static function () use ($start, $end) {
+		BookingAvailability::busyIntervals(array('invalid calendar'), $start, $end, 'Europe/Zurich');
+	}, 'A12: invalid calendar parsing still fails closed');
+	bookingCheck(Sabre\VObject\Settings::$maxRecurrences === 1234, 'A12: failed calculations restore the shared native recurrence limit');
+} finally {
+	Sabre\VObject\Settings::$maxRecurrences = $previousRecurrenceLimit;
+}
+fwrite(STDOUT, "[OK] A12 native duration/date semantics, ambiguous calendars and recurrence-setting restoration\n");
+
+if (getenv('CDAV_BOOKING_BENCHMARK') === '1') {
+	$load = array();
+	for ($i = 0; $i < 1000; $i++) $load[] = bookingCalendar(bookingEvent('load-'.$i, '20261102T100000', '20261102T110000'));
+	for ($i = 0; $i < 100; $i++) $load[] = bookingCalendar(bookingEvent('series-'.$i, '20261101T140000', '20261101T150000', "RRULE:FREQ=DAILY;COUNT=60\r\n"));
+	$measurements = array();
+	for ($i = 0; $i < 5; $i++) {
+		$before = microtime(true);
+		$loadBusy = BookingAvailability::busyIntervals($load, $start, bookingStamp('2026-12-31 00:00'), 'Europe/Zurich');
+		$measurements[] = microtime(true) - $before;
+		bookingCheck(count($loadBusy) === 60, 'R03 pure calculation retains merged occupations');
+	}
+	sort($measurements);
+	$p95 = $measurements[count($measurements) - 1];
+	bookingCheck($p95 < 1.0, 'R03 pure calculation p95 target exceeded');
+	fwrite(STDOUT, sprintf("[OK] R03 pure calculation: 1000 events + 100 series / 60 days / 5 runs; p95 %.3f s; peak %.1f MiB\n", $p95, memory_get_peak_usage(true) / 1048576));
+} else {
+	fwrite(STDOUT, "[INFO] R03 performance benchmark skipped; set CDAV_BOOKING_BENCHMARK=1 on a controlled runner.\n");
+}
 fwrite(STDOUT, '[INFO] Bundled Sabre vendor deprecations: '.$vendorDeprecations." (application warnings remain fatal).\n");
 restore_error_handler();
 fwrite(STDOUT, "All CDav booking business tests passed.\n");

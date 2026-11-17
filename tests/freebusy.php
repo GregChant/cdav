@@ -8,12 +8,13 @@ if (PHP_SAPI !== 'cli') {
 
 /** Availability feed privacy and recurrence regressions; no database required. */
 date_default_timezone_set('UTC');
-error_reporting(E_ALL & ~E_DEPRECATED);
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
 if (!is_file($root.'/includes/sabre/autoload.php')) {
 	fwrite(STDERR, "Set DOLIBARR_ROOT to a Dolibarr htdocs directory.\n");
 	exit(2);
 }
+require __DIR__.'/bootstrap.php';
+cdavTestStrictErrors($root);
 require $root.'/includes/sabre/autoload.php';
 require dirname(__DIR__).'/class/CDavFreeBusyFilter.php';
 
