@@ -2849,8 +2849,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					throw new Forbidden('Contacts linked to a Dolibarr user must be deactivated in Dolibarr');
 				}
 				if ($contact->setstatus(0) < 0) {
-				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact: '.$contact->error);
-			}
+					throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact: '.$contact->error);
+				}
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV contact deletion');
 			}
