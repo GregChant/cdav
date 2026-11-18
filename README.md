@@ -112,6 +112,13 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.3.3 reduces repeated calendar serialization during CalDAV discovery,
+filtering and REPORT responses. A bounded read cache lives only for the current
+HTTP request and is disabled before native writes. UID, ETag and permission
+checks remain intact; temporary Sabre objects are explicitly released. See the
+[calendar performance qualification](doc/validation-performances-calendrier.md)
+for operation budgets, native HTTP checks and deployment limits.
+
 Version 6.3.2 factors the 25 measured production clone pairs into shared native
 mappings, bootstrap and DAV response helpers. A pinned duplication check now
 rejects production clones in CI at the unchanged 10-line/100-token threshold.

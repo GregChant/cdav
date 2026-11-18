@@ -29,6 +29,7 @@ Les rapports HTML/JSON sont conservés comme artefacts de CI. Voir
 | `sync_bootstrap.php` | Portée globale native, flags d'entrée, déploiements custom/externes, échec du chargement et constantes d'entité |
 | `multiget.php` | Vrais plugins Sabre, ordre/href absents ou filtrés, statuts ACL, XML, Prefer/Brief, vCard/jCard/jCal et expansion |
 | `calendar_factorization.php` | Identités et dates ev/pe/pt/fi, enveloppes/fragments, progrès Task et priorités des lignes commerciales |
+| `calendar_read_cost.php` | Vrais REPORT Sabre sur 100/1000 objets fictifs, budget de rendus/SQL, ETags/récurrences, cache borné, contexte, routage et invalidation avant écriture |
 | `carddav_refactoring.php` | Différences contact/tiers/adhérent, préférences vCard3/4, retraits, désactivation par API native, rollback et contacts liés |
 | `run.php` | Lecture vCard/iCalendar, champs absents/remplacés, photos, participants, récurrences, rappels et rejet des données incompatibles |
 | `freebusy.php` | Suppression des données privées sans changer les occupations, récurrences, exceptions et fuseaux |
@@ -116,3 +117,17 @@ La [qualification 6.3.2](../doc/validation-factorisation-cdav.md) complète ces
 preuves par des comparaisons avant/après des parseurs/sérialiseurs et par la
 résiliation réelle d'un adhérent via CardDAV dans BL18, avec conservation de
 sa ligne, de son type et de sa société native.
+
+La [qualification 6.3.3](../doc/validation-performances-calendrier.md) ajoute
+`calendar_read_live_cases.php`, appelé par la suite native : 200 rendez-vous
+ActionComm fictifs par combinaison, REPORT/GET identiques et aucune mutation.
+Les serveurs de qualification conservent leur limite PHP de 60 secondes. Le
+benchmark du composant reste informatif ; les assertions portent sur les appels :
+
+```sh
+DOLIBARR_ROOT=/chemin/dolibarr/htdocs \
+CDAV_READ_COST_BENCHMARK=1 php8.4 tests/calendar_read_cost.php
+```
+
+Le contrôle compte les diagnostics PHP avant délégation au gestionnaire strict,
+y compris lorsqu'un enrichisseur intercepte l'exception correspondante.

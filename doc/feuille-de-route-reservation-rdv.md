@@ -635,6 +635,24 @@ avec une course réelle entre deux acceptations et une réponse unique.
 Voir l'[audit de duplication](audit-duplication-code.md) et la
 [qualification de la factorisation](validation-factorisation-cdav.md).
 
+### Lectures CalDAV et limite PHP — 6.3.3
+
+- [x] Reproduire les rendus répétés sur 100/1000 événements entièrement fictifs,
+  avec un test qui échoue sur 6.3.2 et des budgets d'opérations déterministes.
+- [x] Réutiliser les octets par requête de lecture, avec limites mémoire/entrées,
+  isolation des contextes et désactivation avant toute écriture native.
+- [x] Conserver les filtres Sabre, UID, ETags, métadonnées, alias natifs et ACL ;
+  ne pas publier de liste partielle après une erreur de lecture.
+- [x] Libérer les arbres VObject temporaires, sans modifier les bibliothèques
+  natives ni augmenter la limite PHP de production.
+- [x] Qualifier le paquet sur 23/24 × PHP 8.4/8.5 : 96 suites PHP, 12 suites
+  HTTP, 200 rendez-vous natifs fictifs par combinaison et 280 gardes HTTP.
+- [x] Maintenir zéro duplication de production et aucun nouveau diagnostic
+  PHPCS, avec trois revues indépendantes.
+
+Voir la [qualification des performances](validation-performances-calendrier.md).
+La vérification du délai sur l'hébergement réel suit l'installation du paquet.
+
 ### Compléments à prévoir
 
 - [ ] Choisir séparément les détails exportés vers les logiciels agenda
