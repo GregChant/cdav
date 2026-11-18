@@ -47,7 +47,7 @@ header('Pragma: no-cache');
 header('Referrer-Policy: no-referrer');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
-header("Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+header("Content-Security-Policy: default-src 'none'; img-src 'self' data:; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 
 $locale = GETPOST('lang', 'aZ09');
 if (in_array($locale, array('fr', 'en'), true)) $langs->setDefaultLang($locale === 'fr' ? 'fr_FR' : 'en_US');
@@ -157,10 +157,9 @@ try {
 			throw new BookingException('CDavBookingInvalid', 422);
 		}
 		if (!$json || $bookingMonth !== '') {
-			if ($bookingMonth === '') {
-				$bookingMonth = $bookingDate !== '' ? substr($bookingDate, 0, 7) : (new DateTimeImmutable('now', $timezone))->format('Y-m');
-			}
+			if ($bookingMonth === '' && $bookingDate !== '') $bookingMonth = substr($bookingDate, 0, 7);
 			$availability = $service->calendar($bookingProfile, $bookingMonth, $bookingDate);
+			$bookingMonth = $availability['calendar']['month'];
 			$bookingDate = $availability['date'];
 			$bookingSlots = $availability['slots'];
 			$bookingCalendar = $availability['calendar'];
@@ -174,14 +173,24 @@ try {
 		$bookingRequest = $service->requestTicket($bookingProfile);
 		$bookingSelection = $parseSelection($_GET['selection'] ?? '');
 		$selectionAction = $_GET['selection_action'] ?? '';
-		if (!is_string($selectionAction) || !in_array($selectionAction, array('', 'add'), true)) throw new BookingException('CDavBookingInvalid', 422);
-		if ($selectionAction === 'add') {
+		if (!is_string($selectionAction) || !in_array($selectionAction, array('', 'add', 'set'), true)) throw new BookingException('CDavBookingInvalid', 422);
+		if ($selectionAction === 'add' || $selectionAction === 'set') {
 			$added = $_GET['add'] ?? array();
-			if (!is_array($added) || !$added || count($added) > 24 || array_keys($added) !== range(0, count($added) - 1)) {
+			if (!is_array($added) || (!$added && $selectionAction === 'add') || count($added) > 24
+				|| ($added && array_keys($added) !== range(0, count($added) - 1))) {
 				throw new BookingException('CDavBookingInvalid', 422);
+			}
+			if ($selectionAction === 'set') {
+				// Replace only this local day's checkboxes, retaining other days.
+				$bookingSelection = array_values(array_filter($bookingSelection, static function ($start) use ($timezone, $bookingDate) {
+					return (new DateTimeImmutable('@'.$start))->setTimezone($timezone)->format('Y-m-d') !== $bookingDate;
+				}));
 			}
 			foreach ($added as $addedStart) {
 				if (!is_string($addedStart) || !preg_match('/^[0-9]{10}$/D', $addedStart)) throw new BookingException('CDavBookingInvalid', 422);
+				if ($selectionAction === 'set' && (new DateTimeImmutable('@'.$addedStart))->setTimezone($timezone)->format('Y-m-d') !== $bookingDate) {
+					throw new BookingException('CDavBookingInvalid', 422);
+				}
 				if (!in_array((int) $addedStart, $bookingSelection, true)) $bookingSelection[] = (int) $addedStart;
 			}
 		} elseif (isset($_GET['add'])) {

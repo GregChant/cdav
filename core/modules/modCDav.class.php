@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '6.1.3';
+		$this->version = '6.2.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -354,10 +354,16 @@ class modCDav extends DolibarrModules
 			if ($result <= 0) {
 				return 0;
 			}
+			require_once dirname(__DIR__, 2).'/class/CDavBookingSchema.php';
+			if (\Dolibarr\CDav\BookingSchema::migrate($this->db) < 0) {
+				$this->error = $langs->trans('CDavBookingUnavailable');
+				return 0;
+			}
 		}
 		catch(Exception $ex)
 		{
 			$this->error = $ex->getMessage();
+			return 0;
 		}
 
 		return $this->_init($sql, $options);

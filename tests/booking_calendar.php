@@ -112,4 +112,32 @@ try {
 	calendarCheck($fixture->calendar($profile, '2028-02', '', $leapNow) === $leap,
 		'Month presentation depends on the profile timezone, not the server timezone');
 } finally { date_default_timezone_set($processZone); }
+
+$windowProfile = array('owner_id' => 1, 'config' => \Dolibarr\CDav\BookingAvailability::validateConfig(array(
+	'timezone' => 'Europe/Zurich', 'notice' => 0, 'horizon' => 6, 'horizon_unit' => 'months',
+	'weekly' => array_fill(1, 7, array(array('09:00', '10:00'))),
+	'valid_from' => '2026-12-07', 'valid_until' => '2026-12-07',
+)));
+$window = $fixture->calendar($windowProfile, '', '', $now);
+calendarCheck($window['calendar']['month'] === '2026-12' && $window['date'] === '2026-12-07' && count($window['slots']) === 2,
+	'A future one-day profile opens directly on its first bookable month and date');
+calendarCheck(array_filter($window['calendar']['days']) === array('2026-12-07' => 2)
+	&& $window['calendar']['previous'] === null && $window['calendar']['next'] === null,
+	'Only the configured inclusive date is selectable and month navigation respects its bounds');
+foreach (array('2026-11', '2027-01') as $outsideMonth) {
+	$rejected = false;
+	try { $fixture->calendar($windowProfile, $outsideMonth, '', $now); } catch (\Dolibarr\CDav\BookingException $e) { $rejected = $e->getCode() === 422; }
+	calendarCheck($rejected, 'A forged calendar month cannot escape the profile validity window');
+}
+foreach (array(array('valid_until' => '2026-11-16'), array('valid_from' => '2028-01-01')) as $closedBounds) {
+	$closedProfile = $windowProfile;
+	unset($closedProfile['config']['valid_from'], $closedProfile['config']['valid_until']);
+	$closedProfile['config'] = array_replace($closedProfile['config'], $closedBounds);
+	$callCount = count($fixture->calls);
+	$closedWindow = $fixture->calendar($closedProfile, '', '', $now);
+	calendarCheck(array_sum($closedWindow['calendar']['days']) === 0 && $closedWindow['slots'] === array()
+		&& $closedWindow['calendar']['previous'] === null && $closedWindow['calendar']['next'] === null,
+		'A past or beyond-horizon validity window remains visibly closed without inventing available dates');
+	calendarCheck(count($fixture->calls) === $callCount, 'An empty profile window requires no native calendar read');
+}
 fwrite(STDOUT, "All CDav monthly calendar business tests passed.\n");

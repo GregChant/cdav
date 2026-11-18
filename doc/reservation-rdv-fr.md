@@ -1,10 +1,10 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.1.3 propose un calendrier mensuel de réservation relié directement à
+CDav 6.2.0 propose un calendrier mensuel de réservation relié directement à
 l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
 choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
 l'autorise. La confirmation crée les rendez-vous natifs affectés au
-professionnel et marqués occupés, accessibles depuis ses clients CalDAV.
+collaborateur et marqués occupés, accessibles depuis ses clients CalDAV.
 
 ## Installer ou mettre à niveau
 
@@ -20,6 +20,10 @@ sont conservés ; les deux nouvelles autorisations de multisélection restent
 désactivées tant qu'un administrateur ne les active pas.
 Les mises à jour 6.1.1 à 6.1.3 ne modifient pas le schéma et conservent les
 profils et les publications de 6.1.
+La version 6.2 nécessite une nouvelle désactivation/réactivation : elle retire
+la limite d'un profil par collaborateur et ajoute les rattachements et les états
+des confirmations email. La migration conserve les identifiants, horaires,
+activations, liens et reçus existants ; elle peut être rejouée sans doublon.
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
 24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
@@ -28,7 +32,7 @@ dans le [rapport de validation](validation-reservation-rdv.md). Les autres
 SGBD restent hors de cette matrice.
 Respecter également les prérequis de la version Dolibarr installée.
 
-## Configurer un professionnel
+## Configurer un collaborateur
 
 Un administrateur interne gère les profils depuis **Agenda > Rendez-vous en
 ligne**, entrée fournie par CDav, ou avec le bouton **Rendez-vous en ligne** de
@@ -36,7 +40,7 @@ la page de configuration du module, accessible par son unique roue dentée.
 Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
 
 1. Sélectionner un utilisateur interne actif. Il doit posséder les droits natifs
-   de lecture et de création de ses événements Agenda. Le professionnel peut
+   de lecture et de création de ses événements Agenda. Le collaborateur peut
    rester non administrateur.
 2. Choisir son fuseau horaire, la durée des rendez-vous et l'espacement des heures
    de début proposées.
@@ -45,7 +49,7 @@ Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
    bornes d'une plage appartiennent au même jour et les plages ne se chevauchent
    pas.
 4. Régler les marges, le préavis et l'horizon, puis enregistrer le profil avec
-   **Autoriser les réservations pour ce professionnel** activé.
+   **Autoriser les réservations pour ce collaborateur** activé.
 5. Activer **Activer la réservation publique**. L'activation globale et celle du
    profil sont toutes deux nécessaires.
 6. Utiliser **Créer ou renouveler le lien**, puis copier l'URL affichée.
@@ -60,10 +64,46 @@ Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
 | Regrouper des créneaux consécutifs | Non | Autorisation indépendante par profil |
 | Réserver des plages séparées ou plusieurs jours | Non | Autorisation indépendante par profil |
 
-Chaque professionnel dispose de son propre profil et de son lien public. Un même
-professionnel reste limité à un profil : plusieurs types de prestations avec
-des réglages et liens distincts pour cette même personne nécessiteraient une
-extension supplémentaire.
+Chaque collaborateur peut disposer de plusieurs profils nommés. Choisir
+**Nouveau profil**, renseigner son nom et ses réglages, puis enregistrer et créer
+son lien. Pour modifier un profil existant, le sélectionner dans la liste.
+Chaque profil garde son état, ses horaires, ses permissions et son lien propres ;
+renouveler ou révoquer un lien ne modifie pas les autres profils. Le nom du profil
+est visible sur sa page publique. Tous consultent l'agenda du même collaborateur :
+une réservation sur un profil occupe aussi les autres profils de cette personne.
+
+### Période de validité facultative
+
+Les dates **Début de validité** et **Fin de validité** limitent les dates des
+rendez-vous proposés, dans le fuseau du collaborateur. Les deux jours sont
+inclus : la même date aux deux bornes ouvre une seule journée, et deux dates
+peuvent définir une semaine ou une période plus longue.
+
+Chaque borne est facultative. Deux champs vides donnent un profil sans limite
+de validité ; une seule borne permet un début ou une fin sans l'autre limite.
+Ces dates s'ajoutent aux horaires, au préavis et à l'horizon de réservation.
+Un profil valable sans limite peut donc continuer à proposer uniquement les
+six prochains mois, au fur et à mesure que cet horizon avance.
+
+Le calendrier ouvre directement le premier mois possible. Les jours hors de
+la période ne sont pas réservables et la navigation reste dans les bornes.
+Une période passée ou située au-delà de l'horizon affiche qu'aucune date n'est
+actuellement ouverte. Chaque partie d'une réservation groupée doit respecter
+les mêmes limites, vérifiées à nouveau au moment de confirmer.
+
+### Tiers et projet facultatifs
+
+Le champ **Tiers lié** est facultatif. Après l'avoir choisi, utiliser
+**Afficher les projets du tiers**, puis choisir éventuellement un projet.
+Cet affichage conserve les réglages saisis sans enregistrer le profil.
+Un projet doit appartenir au tiers sélectionné et à l'entité courante.
+Les modules natifs Tiers et Projets, ainsi que les droits de lecture du
+collaborateur sur les objets liés, sont nécessaires pour ces rattachements.
+
+Chaque partie du rendez-vous est liée nativement au tiers et au projet choisis.
+Les noms et les listes des tiers/projets restent dans l'administration ; la page
+publique affiche seulement le nom du profil choisi par l'administrateur.
+Une modification du contexte invalide les formulaires précédemment ouverts.
 
 L'horizon en mois conserve le jour et l'heure locaux, en ramenant le jour au
 dernier jour valide du mois d'arrivée : six mois après le 31 août donnent le
@@ -82,7 +122,7 @@ respecte la marge de 60 minutes tombe à 08:03 : il faut alors 363 minutes de
 plage. L'administration affiche un avertissement lorsque les réglages ne peuvent
 proposer aucun créneau ; elle ne modifie pas les marges automatiquement.
 
-Les horaires sont saisis et affichés dans le fuseau du professionnel, indiqué
+Les horaires sont saisis et affichés dans le fuseau du collaborateur, indiqué
 sur la page publique. Le visiteur choisit un horaire dans ce fuseau. Les heures
 locales inexistantes ou ambiguës lors d'un changement d'heure ne sont pas
 proposées.
@@ -96,14 +136,15 @@ l'Agenda à chaque consultation ; le champ Date reste disponible pour un accès
 direct. Une page sans date choisit le premier jour disponible du mois affiché.
 
 Si les deux autorisations de multisélection sont désactivées, le visiteur
-choisit un seul créneau, comme auparavant. Sinon, il coche ses créneaux puis
-utilise **Ajouter les créneaux cochés**. Sa sélection est conservée lorsqu'il
+choisit un seul créneau, comme auparavant. Sinon, cocher un créneau l'ajoute
+automatiquement à la sélection, et le décocher le retire. Sans JavaScript,
+utiliser **Ajouter les créneaux cochés**. Sa sélection est conservée lorsqu'il
 change de jour, de mois ou de langue. Il peut retirer une unité ou vider sa
 sélection avant de renseigner ses coordonnées et de confirmer.
 
 Le client indique aussi l'**objet du rendez-vous** et l'**adresse du rendez-vous**,
 tous deux obligatoires pour une nouvelle réservation. L'adresse est saisie par
-le client : elle désigne le lieu où le professionnel doit se rendre. Le sujet
+le client : elle désigne le lieu où le collaborateur doit se rendre. Le sujet
 accepte jusqu'à 120 caractères et l'adresse jusqu'à 128 caractères UTF-8, avec
 des retours à la ligne. Les champs trop longs sont refusés sans troncature.
 
@@ -148,13 +189,13 @@ La confirmation crée toutes les parties dans une même transaction native. Si
 l'une est devenue occupée ou si une création échoue, aucune partie n'est créée.
 Un reçu et une référence communs permettent le rejeu sans doublon. Si une partie
 est supprimée, déplacée ou rendue libre dans Dolibarr, le rejeu ne réaffirme pas
-l'ancienne réservation : il demande de contacter le professionnel.
+l'ancienne réservation : il demande de contacter le collaborateur.
 
-## Entreprise et professionnel affichés
+## Entreprise et collaborateur affichés
 
 La page reprend le nom et le logo de l'entreprise configurés dans Dolibarr,
 puis le nom, la photo, l'adresse e-mail, le téléphone professionnel et le mobile
-du professionnel sélectionné. Les champs non renseignés sont omis. Les options
+du collaborateur sélectionné. Les champs non renseignés sont omis. Les options
 natives de masquage public de cet utilisateur pour la photo et les coordonnées
 sont respectées.
 
@@ -195,7 +236,7 @@ localement et n'appelle pas de service de réservation tiers.
 
 ## Occupations prises en compte
 
-Le calcul lit les événements de l'Agenda affectés au professionnel et marqués
+Le calcul lit les événements de l'Agenda affectés au collaborateur et marqués
 occupés, qu'ils proviennent de Dolibarr, de BookCal ou d'un client CalDAV. Il
 prend en compte les journées entières, les événements sur plusieurs jours, les
 séries anciennes, les récurrences et leurs exceptions. La fenêtre habituelle de
@@ -204,7 +245,7 @@ synchronisation CDav ne limite pas cette recherche.
 Un événement marqué libre ne bloque pas les créneaux. Les tâches à faire
 (`VTODO`), tâches projet, interventions, salles et autres ressources n'occupent
 pas automatiquement ce calendrier de réservation. Pour bloquer une absence,
-créer un événement occupé dans l'Agenda du professionnel.
+créer un événement occupé dans l'Agenda du collaborateur.
 
 CDav exporte comme événements les actions dont le champ **Statut / Pourcentage**
 est **Non applicable**. Les actions exportées comme tâches à faire restent
@@ -231,10 +272,29 @@ devenu occupé depuis l'affichage de la page, le client reçoit un message et de
 disponibilités actualisées. Deux réservations publiques qui se chevauchent ne
 peuvent pas toutes deux être confirmées.
 
-La confirmation affiche une référence à conserver. Cette version ne génère pas
-de courriel ou SMS automatique. Le professionnel traite les déplacements et
-annulations directement dans l'Agenda ; le client le contacte pour demander une
-modification.
+La confirmation affiche une référence à conserver et un bouton **Réserver un
+autre rendez-vous**. Ce bouton ouvre une nouvelle sélection dans le même profil,
+avec de nouvelles disponibilités et un nouveau formulaire. Les coordonnées et
+la sélection précédente ne sont pas ajoutées à son URL. Le collaborateur traite
+les déplacements et annulations directement dans l'Agenda ; le client le contacte
+pour demander une modification.
+
+### Emails de confirmation
+
+Après validation de toutes les parties du rendez-vous, CDav utilise `CMailFile`
+et les paramètres email natifs de Dolibarr pour envoyer deux confirmations
+séparées : au réservant et au collaborateur. Configurer l'expéditeur et le
+transport SMTP dans Dolibarr, et une adresse email valide sur la fiche du
+collaborateur. Un email masqué sur la page publique reste utilisable pour cet
+envoi interne ; il n'est pas divulgué au client.
+
+Les messages reprennent le sujet, l'adresse, les périodes, le fuseau et la
+référence. Chaque destinataire reçoit son message sans copie à l'autre. Les
+états d'envoi sont conservés sur le reçu pour empêcher les doublons lors d'un
+rejeu. Une erreur SMTP ou un envoi dont le résultat reste incertain ne supprime
+pas le rendez-vous : la confirmation affiche un avertissement et la référence
+reste valable. Aucun nouvel essai automatique n'est lancé après une tentative
+incertaine. Les SMS et les confirmations d'écritures DAV restent hors périmètre.
 
 Le formulaire reste valide 15 minutes. Le rejeu d'une même demande encore valide
 retrouve sa réservation et ne crée pas un second rendez-vous. Une demande

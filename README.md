@@ -112,6 +112,17 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.2.0 adds multiple named booking profiles per collaborator, optional
+native third-party/project links, automatic checkbox selection with a manual
+fallback, and separate native confirmation emails to the visitor and collaborator.
+Optional inclusive start/end dates can limit a profile to a day, a week or any
+date range; empty bounds keep its validity unlimited, alongside the rolling horizon.
+The confirmation also offers a fresh appointment in the same profile. Reactivate
+CDav after updating to apply the idempotent migration; existing profiles and links
+are preserved. All profiles for one collaborator share the same native agenda.
+Emails use Dolibarr's configured sender and SMTP transport after the booking
+commits; a mail failure leaves the appointment intact and shows a generic warning.
+
 Version 6.1.3 explains rejected slot combinations next to the selection and
 distinguishes continuous bookings from appointments separated by a break.
 Invalid selections no longer display a misleading zero duration. The browser
@@ -242,7 +253,8 @@ Repeat with the other target core and `CDAV_PHP_BIN=php8.5`. The optional
 `CDAV_PHPCS_STANDARD` uses Dolibarr's native code-style rules when PHP_CodeSniffer
 is installed.
 
-[GitHub Actions](.github/workflows/qa.yml) runs these ten database-free suites,
+[GitHub Actions](.github/workflows/qa.yml) runs the twelve database-free PHP suites
+and the JavaScript selection regressions,
 PHP lint for the whole module and native PHPCS on the booking/transport files
 for every pull request and every push to `23.0` or `master`. All four combinations
 of Dolibarr 23.0.4 / 24.0.0 and PHP 8.4 / 8.5 must pass. Dependencies are the

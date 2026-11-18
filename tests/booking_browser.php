@@ -42,6 +42,8 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/lib/functions2.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/user/class/user.class.php';
 require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
+require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
 require_once dirname(__DIR__).'/class/CDavBookingService.php';
 
 /**
@@ -90,6 +92,9 @@ $automaticScope = ' FROM '.MAIN_DB_PREFIX.'actioncomm a INNER JOIN '.MAIN_DB_PRE
 	."c_actioncomm c ON c.id = a.fk_action WHERE c.type = 'systemauto' AND a.entity = ".$entity;
 $automaticSnapshot = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb'.$automaticScope));
 if (!$agendaSnapshot || !$automaticSnapshot) throw new RuntimeException('Unable to snapshot native Agenda audit records');
+$orphanScope = ' FROM '.MAIN_DB_PREFIX.'actioncomm_resources r LEFT JOIN '.MAIN_DB_PREFIX.'actioncomm a ON a.id = r.fk_actioncomm WHERE a.id IS NULL';
+$orphanSnapshot = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb'.$orphanScope));
+if (!$orphanSnapshot) throw new RuntimeException('Unable to snapshot native Agenda resource integrity');
 $adminRow = $db->fetch_object(bookingBrowserQuery('SELECT rowid FROM '.MAIN_DB_PREFIX
 	.'user WHERE admin = 1 AND statut = 1 AND entity IN (0, '.$entity.') ORDER BY rowid LIMIT 1'));
 $admin = new User($db);
@@ -109,6 +114,10 @@ $rateResult = bookingBrowserQuery('SELECT bucket_hash,hits,expires_at FROM '.MAI
 while ($row = $db->fetch_object($rateResult)) $rateSnapshot[] = $row;
 $mappingSnapshot = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request_event'));
 $ownerId = 0;
+$thirdpartyId = 0;
+$projectId = 0;
+$privateThirdpartyName = 'CDav Browser Private Thirdparty '.bin2hex(random_bytes(5));
+$privateProjectName = 'CDav Browser Private Project '.bin2hex(random_bytes(5));
 $temporaryDirectory = '';
 $fileSnapshots = array();
 $createdDirectories = array();
@@ -128,6 +137,25 @@ try {
 	$ownerId = $owner->create($admin);
 	if ($ownerId <= 0 || $owner->addrights(0, 'agenda', '', $entity) <= 0) {
 		throw new RuntimeException('Unable to create the isolated browser owner');
+	}
+	if (isModEnabled('societe') && isModEnabled('project')) {
+		if ($owner->addrights(0, 'societe', '', $entity) <= 0 || $owner->addrights(0, 'projet', '', $entity) <= 0) {
+			throw new RuntimeException('Unable to grant native browser business-context rights');
+		}
+		$thirdparty = new Societe($db);
+		$thirdparty->entity = $entity;
+		$thirdparty->name = $privateThirdpartyName;
+		$thirdpartyId = $thirdparty->create($admin);
+		if ($thirdpartyId <= 0) throw new RuntimeException('Unable to create the isolated native third party');
+		$project = new Project($db);
+		$project->entity = $entity;
+		$project->ref = 'CDAV-BROWSER-'.bin2hex(random_bytes(6));
+		$project->title = $privateProjectName;
+		$project->socid = $thirdpartyId;
+		$project->public = 1;
+		$projectId = $project->create($admin);
+		if ($projectId <= 0) throw new RuntimeException('Unable to create the isolated native project');
+		if ($project->setValid($admin) <= 0) throw new RuntimeException('Unable to open the isolated native project for selection');
 	}
 	$password = 'Browser!'.bin2hex(random_bytes(16)).'7aA';
 	$passwordResult = $owner->setPassword($admin, $password, 0, 0, 1);
@@ -160,8 +188,11 @@ try {
 	$config = array('timezone' => 'Europe/Zurich', 'duration' => 30, 'step' => 30,
 		'buffer_before' => 0, 'buffer_after' => 0, 'notice' => 0, 'horizon' => 60,
 		'weekly' => array_fill(1, 7, array(array('09:00', '12:00'), array('13:00', '17:00'))));
-	$service->saveProfile($ownerId, $config, true);
-	$key = $service->rotateToken($ownerId);
+	$profileLabel = 'Consultation atelier';
+	$secondaryProfileLabel = 'Visites & maintenance';
+	$tertiaryProfileLabel = 'Consultation projet';
+	$profile = $service->saveProfile($ownerId, $config, true, 0, array('label' => $profileLabel));
+	$key = $service->rotateToken($ownerId, $profile['id']);
 	$openDay = new DateTimeImmutable('tomorrow', new DateTimeZone('Europe/Zurich'));
 	$closedDay = $openDay->modify('+1 day');
 	$contiguousDay = $openDay->modify('+5 days');
@@ -169,6 +200,7 @@ try {
 	$otherSplitDay = $openDay->modify('+8 days');
 	$longDay = $openDay->modify('+10 days');
 	$longSplitDay = $openDay->modify('+11 days');
+	$fallbackDay = $openDay->modify('+12 days');
 	$today = new DateTimeImmutable('today', new DateTimeZone('Europe/Zurich'));
 	$limitMonth = $today->setDate((int) $today->format('Y'), (int) $today->format('m'), 1)->modify('+6 months');
 	$limitDay = $limitMonth->setDate((int) $limitMonth->format('Y'), (int) $limitMonth->format('m'),
@@ -215,6 +247,10 @@ try {
 		'home_url' => $origin.DOL_URL_ROOT.'/index.php',
 		'admin_url' => substr($bookingUrl, 0, -strlen('/public/booking.php')).'/admin/booking.php',
 		'owner_id' => $ownerId, 'key' => $key, 'login' => $owner->login, 'password' => $password,
+		'profile_id' => $profile['id'], 'profile_label' => $profileLabel,
+		'secondary_profile_label' => $secondaryProfileLabel, 'tertiary_profile_label' => $tertiaryProfileLabel,
+		'thirdparty_id' => $thirdpartyId, 'project_id' => $projectId,
+		'private_thirdparty_name' => $privateThirdpartyName, 'private_project_name' => $privateProjectName,
 		'date' => $openDay->format('Y-m-d'), 'closed_date' => $closedDay->format('Y-m-d'),
 		'contiguous_date' => $contiguousDay->format('Y-m-d'),
 		'contiguous_starts' => array($contiguousDay->setTime(9, 0)->getTimestamp(), $contiguousDay->setTime(9, 30)->getTimestamp()),
@@ -224,7 +260,11 @@ try {
 		'long_date' => $longDay->format('Y-m-d'), 'long_split_date' => $longSplitDay->format('Y-m-d'),
 		'long_starts' => array($longDay->setTime(8, 0)->getTimestamp(), $longDay->setTime(13, 0)->getTimestamp()),
 		'long_split_starts' => array($longSplitDay->setTime(8, 0)->getTimestamp(), $longSplitDay->setTime(13, 0)->getTimestamp()),
+		'fallback_date' => $fallbackDay->format('Y-m-d'),
+		'fallback_starts' => array($fallbackDay->setTime(8, 0)->getTimestamp(), $fallbackDay->setTime(13, 0)->getTimestamp()),
 		'calendar_month' => $today->format('Y-m'), 'six_month_limit' => $limitDay->format('Y-m-d'),
+		'calendar_today' => $today->format('Y-m-d'), 'validity_date' => $openDay->modify('+14 days')->format('Y-m-d'),
+		'validity_until' => $openDay->modify('+20 days')->format('Y-m-d'),
 		'company_name' => $companyName, 'professional_name' => $owner->getFullName($langs),
 		'company_favicon_file' => 'logos/thumbs/'.$squareName,
 		'professional_email' => $owner->email, 'professional_phone_href' => 'tel:+41215550101',
@@ -243,6 +283,19 @@ try {
 	fclose($pipes[0]);
 	$exitCode = proc_close($process);
 	if ($exitCode !== 0) throw new RuntimeException('Browser checks failed with exit code '.$exitCode);
+	$profiles = $service->profilesForOwner($ownerId);
+	if (count($profiles) !== 3) throw new RuntimeException('Browser administration lost or duplicated an independent profile');
+	$profileByLabel = array_column($profiles, null, 'label');
+	if (!isset($profileByLabel[$profileLabel], $profileByLabel[$secondaryProfileLabel], $profileByLabel[$tertiaryProfileLabel])
+		|| $profileByLabel[$secondaryProfileLabel]['config']['duration'] !== 75
+		|| $profileByLabel[$secondaryProfileLabel]['thirdparty_id'] !== $thirdpartyId
+		|| $profileByLabel[$secondaryProfileLabel]['project_id'] !== $projectId
+		|| isset($profileByLabel[$secondaryProfileLabel]['config']['valid_from']) || isset($profileByLabel[$secondaryProfileLabel]['config']['valid_until'])
+		|| $profileByLabel[$tertiaryProfileLabel]['enabled'] !== false
+		|| $profileByLabel[$tertiaryProfileLabel]['config']['duration'] !== 90) {
+		throw new RuntimeException('Browser profile settings, links or optional native business context were not isolated');
+	}
+	fwrite(STDOUT, "Three collaborator profiles retain independent settings, publication keys and native business context.\n");
 	// One absence, two single bookings and seven grouped/recovered segments.
 	$eventCount = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX
 		.'actioncomm WHERE fk_user_action = '.$ownerId.' AND entity = '.$entity));
@@ -298,7 +351,7 @@ try {
 } finally {
 	try {
 		if ($ownerId > 0) {
-			$service->disableProfile($ownerId);
+			foreach ($service->profilesForOwner($ownerId) as $cleanupProfile) $service->disableProfile($ownerId, $cleanupProfile['id']);
 			$events = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_user_action = '.$ownerId.' AND entity = '.$entity);
 			$eventIds = array();
 			while ($row = $db->fetch_object($events)) $eventIds[] = (int) $row->id;
@@ -326,6 +379,31 @@ try {
 		fwrite(STDERR, 'Native browser fixture cleanup failed: '.get_class($cleanupFailure).PHP_EOL);
 	}
 	try {
+		if ($projectId > 0) {
+			$project = new Project($db);
+			if ($project->fetch($projectId) > 0 && $project->delete($admin) <= 0) throw new RuntimeException('Native browser project cleanup failed');
+		}
+		if ($thirdpartyId > 0) {
+			$thirdparty = new Societe($db);
+			if ($thirdparty->fetch($thirdpartyId) > 0) {
+				// Societe's raw Agenda cascade omits resources. Remove only this
+				// fixture's new history natively and avoid recreating deletion history.
+				$companyEvents = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_soc = '.$thirdpartyId
+					.' AND id > '.((int) $agendaSnapshot->last_id));
+				$companyIds = array();
+				while ($row = $db->fetch_object($companyEvents)) $companyIds[] = (int) $row->id;
+				foreach ($companyIds as $eventId) {
+					$event = new ActionComm($db);
+					if ($event->fetch($eventId) <= 0 || $event->delete($admin) <= 0) throw new RuntimeException('Native browser company history cleanup failed');
+				}
+				if ($thirdparty->delete($thirdpartyId, $admin, 0) <= 0) throw new RuntimeException('Native browser third-party cleanup failed');
+			}
+		}
+	} catch (Throwable $cleanupFailure) {
+		$failure = $failure ?: $cleanupFailure;
+		fwrite(STDERR, 'Native browser business-context cleanup failed: '.get_class($cleanupFailure).PHP_EOL);
+	}
+	try {
 		// Native user lifecycle triggers also create systemauto Agenda records.
 		// This exclusively isolated test may remove only records born after its snapshot.
 		$automaticEvents = bookingBrowserQuery('SELECT a.id'.$automaticScope.' AND a.id > '.((int) $agendaSnapshot->last_id));
@@ -339,8 +417,13 @@ try {
 		if (!$automaticRemaining || (int) $automaticRemaining->nb !== (int) $automaticSnapshot->nb) {
 			throw new RuntimeException('Native automatic Agenda record count was not restored');
 		}
+		$orphanRemaining = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb'.$orphanScope));
+		if (!$orphanRemaining || (int) $orphanRemaining->nb !== (int) $orphanSnapshot->nb) {
+			throw new RuntimeException('Browser fixture introduced orphaned native Agenda resources');
+		}
 		fwrite(STDOUT, 'Native automatic Agenda records restored: '.((int) $automaticSnapshot->nb)
 			.' -> '.((int) $automaticRemaining->nb).' (removed '.count($automaticIds).').'.PHP_EOL);
+		fwrite(STDOUT, 'Native Agenda orphan resources unchanged: '.((int) $orphanSnapshot->nb).' -> '.((int) $orphanRemaining->nb).'.'.PHP_EOL);
 	} catch (Throwable $cleanupFailure) {
 		$failure = $failure ?: $cleanupFailure;
 		fwrite(STDERR, 'Native automatic Agenda cleanup failed: '.get_class($cleanupFailure).PHP_EOL);

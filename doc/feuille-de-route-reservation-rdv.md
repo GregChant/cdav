@@ -46,6 +46,10 @@ Ces résultats ne valident pas la future réservation publique.
 
 ## 3. Périmètre de la première version
 
+Cette section conserve le cadrage historique V1. Les évolutions 6.2 ci-dessous
+ajoutent plusieurs profils par collaborateur, les rattachements tiers/projet,
+la sélection automatique et les confirmations email.
+
 - Un professionnel et son agenda Dolibarr par lien ; un profil public actif par
   utilisateur. Un second utilisateur sert notamment à vérifier l'isolation.
 - Plages hebdomadaires configurables, pauses, durée de rendez-vous, pas des
@@ -531,6 +535,28 @@ Texte de référence pour l'objectif :
 - [x] Préparer la publication reproductible sur `master` et `23.0`, avec les
   preuves conservées dans `dist/qa/selection-validation/` et le retrait ciblé
   des quatre instances jetables après qualification.
+
+## Profils collaborateurs et confirmations — 6.2
+
+- [x] Gérer plusieurs profils nommés pour un collaborateur, avec liens et
+  réglages indépendants ; préserver les profils, liens et reçus existants.
+- [x] Employer « collaborateur » dans les interfaces de réservation.
+- [x] Affecter facultativement un tiers et un projet de ce tiers, avec les
+  sélecteurs et droits natifs et les liaisons `ActionComm` sur chaque partie.
+- [x] Partager les occupations et le verrou du collaborateur entre ses profils.
+- [x] Ajouter et retirer automatiquement les cases cochées, par requête GET,
+  avec un repli manuel sans JavaScript et conservation des autres jours.
+- [x] Confirmer par deux emails séparés via `CMailFile` après commit, sans
+  renvoi sur rejeu ; signaler un envoi incertain sans annuler le rendez-vous.
+- [x] Proposer un nouveau rendez-vous depuis la confirmation, dans le même
+  profil avec un formulaire et des disponibilités recalculés.
+- [x] Définir des dates de validité inclusives et facultatives pour les
+  rendez-vous proposés ; accepter un jour, une semaine ou aucune limite de
+  validité, en complément de l'horizon et du préavis.
+- [x] Vérifier la migration 6.1.3 et l'installation neuve sur les quatre
+  combinaisons, y compris anciens liens, reçus et formulaires encore valides.
+- [ ] Terminer la qualification HTTP, navigateur et SMTP local, la revue qualité,
+  l'archive reproductible et la publication sur les branches autorisées.
 
 ## Références locales
 

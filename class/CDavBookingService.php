@@ -103,65 +103,166 @@ class BookingService
 		$config = json_decode((string) $row->config, true);
 		if (!is_array($config)) throw new BookingException('CDavBookingUnavailable', 503);
 		return array('id' => (int) $row->rowid, 'owner_id' => (int) $row->fk_user,
+			'label' => (string) ($row->label ?? ''), 'thirdparty_id' => (int) ($row->fk_soc ?? 0),
+			'project_id' => (int) ($row->fk_project ?? 0),
 			'enabled' => (bool) $row->enabled, 'config' => BookingAvailability::validateConfig($config),
 			'token_hash' => (string) $row->token_hash);
 	}
 
 	/**
-	 * Read settings in the authenticated administration context.
+	 * List this collaborator's calendars in the administration context.
 	 * @param int $ownerId Owner identifier
-	 * @return array|null Profile
+	 * @return array Profiles ordered by their stable identifiers
 	 */
-	public function profileForOwner($ownerId)
+	public function profilesForOwner($ownerId): array
 	{
 		$this->manager();
-		$row = $this->db->fetch_object($this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId)));
+		$rows = $this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' ORDER BY rowid');
+		$profiles = array();
+		while ($row = $this->db->fetch_object($rows)) $profiles[] = $this->profile($row);
+		return $profiles;
+	}
+
+	/**
+	 * Read one calendar without selecting a different collaborator's profile.
+	 * @param int $ownerId Owner identifier
+	 * @param int|null $profileId Specific profile, or null for the first legacy profile
+	 * @return array|null Profile
+	 */
+	public function profileForOwner($ownerId, $profileId = null)
+	{
+		$this->manager();
+		if ($profileId !== null && (!is_int($profileId) || $profileId <= 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
+		$row = $this->db->fetch_object($this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId)
+			.($profileId !== null ? ' AND rowid = '.$profileId : '').' ORDER BY rowid LIMIT 1'));
 		return $row ? $this->profile($row) : null;
 	}
 
 	/**
-	 * Save server-controlled hours without restoring a revoked publication key.
+	 * Validate native optional business links without publishing private names.
+	 * @param int $thirdpartyId Native third-party identifier, or zero
+	 * @param int $projectId Native project identifier, or zero
+	 * @param \User $owner Native collaborator whose business access is required
+	 * @param bool $lock Lock native parent rows in the current mutation transaction
+	 * @return void
+	 */
+	private function validateBusinessLinks(int $thirdpartyId, int $projectId, \User $owner, bool $lock = false): void
+	{
+		if ($projectId && !$thirdpartyId) throw new BookingException('CDavBookingInvalid', 422);
+		if ($thirdpartyId) {
+			if (!isModEnabled('societe')) throw new BookingException('CDavBookingInvalid', 422);
+			require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+			require_once DOL_DOCUMENT_ROOT.'/core/lib/security.lib.php';
+			if ($lock) {
+				$row = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'societe WHERE rowid = '.$thirdpartyId.' AND entity = '.$this->entity.' FOR UPDATE'));
+				if (!$row) throw new BookingException('CDavBookingInvalid', 422);
+			}
+			$thirdparty = new \Societe($this->db);
+			if ($thirdparty->fetch($thirdpartyId) <= 0 || (int) $thirdparty->entity !== $this->entity
+				|| !checkUserAccessToObject($owner, array('societe'), $thirdparty, 'societe')) throw new BookingException('CDavBookingInvalid', 422);
+		}
+		if ($projectId) {
+			if (!isModEnabled('project')) throw new BookingException('CDavBookingInvalid', 422);
+			require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
+			if ($lock) {
+				$row = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$projectId.' AND entity = '.$this->entity.' AND fk_soc = '.$thirdpartyId.' FOR UPDATE'));
+				if (!$row) throw new BookingException('CDavBookingInvalid', 422);
+			}
+			$project = new \Project($this->db);
+			if ($project->fetch($projectId) <= 0 || (int) $project->entity !== $this->entity || (int) $project->socid !== $thirdpartyId
+				|| $project->restrictedProjectArea($owner, 'read') <= 0) {
+				throw new BookingException('CDavBookingInvalid', 422);
+			}
+		}
+	}
+
+	/**
+	 * Save hours and optional native context, preserving every publication key.
 	 * @param int $ownerId Owner identifier
 	 * @param array $config Settings
 	 * @param bool $enabled Profile activation
+	 * @param int|null $profileId Null updates the first legacy profile, zero creates, positive targets one profile
+	 * @param array $metadata Optional public label and internal thirdparty_id/project_id
 	 * @return array Profile
 	 */
-	public function saveProfile($ownerId, array $config, $enabled)
+	public function saveProfile($ownerId, array $config, $enabled, $profileId = null, array $metadata = array())
 	{
 		$this->manager();
-		$this->owner($ownerId);
+		$nativeOwner = $this->owner($ownerId);
+		if ($profileId !== null && (!is_int($profileId) || $profileId < 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
 		$config = BookingAvailability::validateConfig($config);
 		$json = json_encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-		$this->query('INSERT INTO '.MAIN_DB_PREFIX.'cdav_booking_profile (entity, fk_user, enabled, config) VALUES ('
-			.$this->entity.', '.((int) $ownerId).', '.((int) (bool) $enabled).', '.$this->quote($json).') ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), config = VALUES(config)');
-		return $this->profileForOwner($ownerId);
+		if (!$this->db->begin()) throw new BookingException('CDavBookingUnavailable', 503);
+		try {
+			// Serialize both old default-profile callers and explicit profile changes.
+			$lockedOwner = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'user WHERE rowid = '.((int) $ownerId)
+				.' AND statut = 1 AND fk_soc IS NULL AND entity IN (0, '.$this->entity.') FOR UPDATE'));
+			if (!$lockedOwner) throw new BookingException('CDavBookingNotFound', 404);
+			$existing = $profileId === 0 ? null : $this->profileForOwner($ownerId, $profileId);
+			if ($profileId !== null && $profileId > 0 && !$existing) throw new BookingException('CDavBookingNotFound', 404);
+			$label = array_key_exists('label', $metadata) ? $metadata['label'] : ($existing['label'] ?? '');
+			if (!is_string($label) || !mb_check_encoding($label, 'UTF-8') || preg_match('/[\x00-\x1f\x7f<>]/u', $label)) {
+				throw new BookingException('CDavBookingInvalid', 422);
+			}
+			$label = trim($label);
+			if (mb_strlen($label, 'UTF-8') > 120 || ($profileId === 0 && $label === '')) throw new BookingException('CDavBookingInvalid', 422);
+			$links = array();
+			foreach (array('thirdparty_id', 'project_id') as $field) {
+				$value = array_key_exists($field, $metadata) ? $metadata[$field] : ($existing[$field] ?? 0);
+				if (!is_int($value) || $value < 0 || $value > 2147483647) throw new BookingException('CDavBookingInvalid', 422);
+				$links[$field] = $value;
+			}
+			$this->validateBusinessLinks($links['thirdparty_id'], $links['project_id'], $nativeOwner, true);
+			if ($existing) {
+				$id = $existing['id'];
+				$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET enabled = '.((int) (bool) $enabled).', config = '.$this->quote($json)
+					.', label = '.$this->quote($label).', fk_soc = '.($links['thirdparty_id'] ?: 'NULL').', fk_project = '.($links['project_id'] ?: 'NULL')
+					.' WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.$id);
+			} else {
+				$this->query('INSERT INTO '.MAIN_DB_PREFIX.'cdav_booking_profile (entity, fk_user, enabled, config, label, fk_soc, fk_project) VALUES ('
+					.$this->entity.', '.((int) $ownerId).', '.((int) (bool) $enabled).', '.$this->quote($json).', '.$this->quote($label).', '
+					.($links['thirdparty_id'] ?: 'NULL').', '.($links['project_id'] ?: 'NULL').')');
+				$id = (int) $this->db->last_insert_id(MAIN_DB_PREFIX.'cdav_booking_profile');
+			}
+			$result = $this->profileForOwner($ownerId, $id);
+			if (!$result || !$this->db->commit()) throw new BookingException('CDavBookingUnavailable', 503);
+			return $result;
+		} catch (\Throwable $e) {
+			$this->db->rollback();
+			throw $e;
+		}
 	}
 
 	/**
 	 * Publish a fresh random key, storing only its hash.
 	 * @param int $ownerId Owner identifier
+	 * @param int|null $profileId Specific profile, or null for the legacy first profile
 	 * @return string New publication key
 	 */
-	public function rotateToken($ownerId)
+	public function rotateToken($ownerId, $profileId = null)
 	{
 		$this->manager();
 		$this->owner($ownerId);
-		if (!$this->profileForOwner($ownerId)) throw new BookingException('CDavBookingNotFound', 404);
+		$profile = $this->profileForOwner($ownerId, $profileId);
+		if (!$profile) throw new BookingException('CDavBookingNotFound', 404);
 		$key = bin2hex(random_bytes(32));
 		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET token_hash = '.$this->quote(hash('sha256', $key))
-			.' WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId));
+			.' WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.$profile['id']);
 		return $key;
 	}
 
 	/**
 	 * Disable the profile and permanently revoke its current key.
 	 * @param int $ownerId Owner identifier
+	 * @param int|null $profileId Specific profile, or null for the legacy first profile
 	 * @return void
 	 */
-	public function disableProfile($ownerId)
+	public function disableProfile($ownerId, $profileId = null)
 	{
 		$this->manager();
-		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET enabled = 0, token_hash = NULL WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId));
+		$profile = $this->profileForOwner($ownerId, $profileId);
+		if (!$profile) throw new BookingException('CDavBookingNotFound', 404);
+		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET enabled = 0, token_hash = NULL WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.$profile['id']);
 	}
 
 	/**
@@ -210,6 +311,12 @@ class BookingService
 		if (!$row) throw new BookingException('CDavBookingNotFound', 404);
 		$profile = $this->profile($row);
 		$owner = $this->owner($profile['owner_id']);
+		try {
+			$this->validateBusinessLinks($profile['thirdparty_id'], $profile['project_id'], $owner, $lock);
+		} catch (BookingException $e) {
+			if ($e->getCode() !== 422) throw $e;
+			throw new BookingException('CDavBookingNotFound', 404);
+		}
 		if ($owner->loadPersonalConf() < 0) throw new BookingException('CDavBookingUnavailable', 503);
 		$profile['professional'] = array('name' => $owner->getFullName($langs),
 			'email' => getDolUserInt('USER_PUBLIC_HIDE_EMAIL', 0, $owner) ? '' : (string) $owner->email,
@@ -240,8 +347,14 @@ class BookingService
 	 */
 	private function requestSignature(array $profile, $payload)
 	{
+		$settings = $profile['config'];
+		// Preserve the exact signature of profiles published before named calendars.
+		if (($profile['label'] ?? '') !== '' || !empty($profile['thirdparty_id']) || !empty($profile['project_id'])) {
+			$settings['profile_context'] = array((string) ($profile['label'] ?? ''),
+				(int) ($profile['thirdparty_id'] ?? 0), (int) ($profile['project_id'] ?? 0));
+		}
 		return hash_hmac('sha256', 'cdav-booking|'.$profile['id'].'|'.$profile['token_hash'].'|'
-			.hash('sha256', json_encode($profile['config'])).'|'.$payload, $this->secret());
+			.hash('sha256', json_encode($settings)).'|'.$payload, $this->secret());
 	}
 
 	/**
@@ -313,11 +426,18 @@ class BookingService
 		$now = $now ?? time();
 		$zone = new \DateTimeZone($profile['config']['timezone']);
 		$today = (new \DateTimeImmutable('@'.$now))->setTimezone($zone);
+		$validity = BookingAvailability::validityRange($profile['config']);
+		$rangeStart = max($now, $validity['start'] ?? $now);
+		$horizon = BookingAvailability::horizonEnd($profile['config'], $now);
+		$rangeEnd = min($horizon, $validity['end'] ?? $horizon);
+		$hasRange = $rangeStart < $rangeEnd;
+		$firstDay = $hasRange ? (new \DateTimeImmutable('@'.$rangeStart))->setTimezone($zone) : $today;
+		$lastDay = $hasRange ? (new \DateTimeImmutable('@'.($rangeEnd - 1)))->setTimezone($zone) : $today;
+		if ($month === '') $month = $firstDay->format('Y-m');
 		if (!preg_match('/^\d{4}-\d{2}$/D', $month)) throw new BookingException('CDavBookingInvalid', 422);
 		$first = \DateTimeImmutable::createFromFormat('!Y-m', $month, $zone);
-		$last = (new \DateTimeImmutable('@'.BookingAvailability::horizonEnd($profile['config'], $now)))->setTimezone($zone);
 		if (!$first || $first->format('Y-m') !== $month
-			|| $month < $today->format('Y-m') || $month > $last->format('Y-m')) {
+			|| $month < $firstDay->format('Y-m') || $month > $lastDay->format('Y-m')) {
 			throw new BookingException('CDavBookingInvalid', 422);
 		}
 		if ($date !== '') {
@@ -331,8 +451,8 @@ class BookingService
 		$days = array();
 		$byDay = array();
 		for ($day = $first; $day < $next; $day = $day->modify('+1 day')) $days[$day->format('Y-m-d')] = 0;
-		$from = max($first->getTimestamp(), $now);
-		$until = min($next->getTimestamp(), $last->getTimestamp());
+		$from = max($first->getTimestamp(), $rangeStart);
+		$until = min($next->getTimestamp(), $rangeEnd);
 		$slots = $until > $from ? $this->slots($profile, $from, $until, $now) : array();
 		foreach ($slots as $slot) {
 			$dayKey = (new \DateTimeImmutable('@'.$slot['start']))->setTimezone($zone)->format('Y-m-d');
@@ -340,15 +460,15 @@ class BookingService
 			$byDay[$dayKey][] = $slot;
 		}
 		if ($date === '') {
-			$date = $month === $today->format('Y-m') ? $today->format('Y-m-d') : $first->format('Y-m-d');
+			$date = $month === $firstDay->format('Y-m') ? $firstDay->format('Y-m-d') : $first->format('Y-m-d');
 			foreach ($days as $dayKey => $count) {
 				if ($count > 0) { $date = $dayKey; break; }
 			}
 		}
 		return array('date' => $date, 'slots' => $byDay[$date] ?? array(), 'calendar' => array(
 			'month' => $month,
-			'previous' => $previous->format('Y-m') >= $today->format('Y-m') ? $previous->format('Y-m') : null,
-			'next' => $next->format('Y-m') <= $last->format('Y-m') ? $next->format('Y-m') : null,
+			'previous' => $hasRange && $previous->format('Y-m') >= $firstDay->format('Y-m') ? $previous->format('Y-m') : null,
+			'next' => $hasRange && $next->format('Y-m') <= $lastDay->format('Y-m') ? $next->format('Y-m') : null,
 			'days' => $days,
 		));
 	}
@@ -462,6 +582,7 @@ class BookingService
 			$event = new \ActionComm($this->db);
 			$segment = $selection['segments'][$position];
 			if ($event->fetch($id) <= 0 || (int) $event->entity !== $this->entity || (int) $event->userownerid !== $profile['owner_id']
+				|| (int) $event->socid !== (int) ($profile['thirdparty_id'] ?? 0) || (int) $event->fk_project !== (int) ($profile['project_id'] ?? 0)
 				|| (int) $event->datep !== $segment['start'] || (int) $event->datef !== $segment['end']
 				|| (int) $event->percentage !== -1
 				|| (int) ($event->userassigned[$profile['owner_id']]['transparency'] ?? 0) !== 1) {
@@ -507,6 +628,10 @@ class BookingService
 				if (!hash_equals((string) $previous->body_hash, $bodyHash)) throw new BookingException('CDavBookingConflict', 409);
 				$this->verifyReceipt($previous, $profile, $selection);
 				$result = $this->selectionReceipt($selection, (string) $previous->reference, true);
+				if (in_array((int) ($previous->mail_customer ?? 0), array(1, 3), true)
+					|| in_array((int) ($previous->mail_owner ?? 0), array(1, 3), true)) {
+					$result['notification_warning'] = true;
+				}
 			} else {
 				if ($details['legacy']) throw new BookingException('CDavBookingInvalid', 422);
 				$selection = $this->previewSelection($profile, $starts, time());
@@ -522,6 +647,8 @@ class BookingService
 					$event->datep = $segment['start'];
 					$event->datef = $segment['end'];
 					$event->userownerid = $owner->id;
+					$event->socid = $profile['thirdparty_id'];
+					$event->fk_project = $profile['project_id'];
 					$event->userassigned = array($owner->id => array('id' => $owner->id, 'transparency' => 1));
 					$event->transparency = 1;
 					$event->percentage = -1;
@@ -542,10 +669,23 @@ class BookingService
 				}
 			}
 			if (!$this->db->commit()) throw new BookingException('CDavBookingUnavailable', 503);
-			return $result;
 		} catch (\Throwable $e) {
 			$this->db->rollback();
 			throw $e;
 		}
+		if (!$result['replayed']) {
+			// SMTP cannot roll back a committed appointment or create a second one.
+			try {
+				require_once __DIR__.'/CDavBookingNotification.php';
+				$notification = (new BookingNotification($this->db, $this->entity))->notify(
+					$requestHash, $profile, $clean, $selection, $result['reference'], $owner
+				);
+				if ($notification['notification_warning']) $result['notification_warning'] = true;
+			} catch (\Throwable $e) {
+				$result['notification_warning'] = true;
+				dol_syslog('CDav booking confirmation failed: '.get_class($e), LOG_ERR);
+			}
+		}
+		return $result;
 	}
 }

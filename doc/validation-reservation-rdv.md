@@ -543,3 +543,62 @@ Les quatre serveurs, bases et configurations jetables sont supprimés après
 qualification. Le port 8023, les configurations des cœurs partagés et le cache
 Chromium sont préservés ; la preuve figure dans
 `dist/qa/selection-validation/teardown.json`.
+
+## Profils collaborateurs, confirmations et validité — 6.2.0
+
+La version 6.2 ajoute plusieurs profils nommés par collaborateur, leurs liens
+indépendants, un tiers et un projet facultatifs, la sélection automatique par
+GET, deux confirmations email séparées et le bouton de nouveau rendez-vous.
+Des dates de validité inclusives peuvent ouvrir un jour ou une période ; chaque
+borne est facultative. Sans date, la validité reste illimitée, tandis que le
+préavis et l'horizon continuent de s'appliquer.
+
+Les profils partagent les occupations et le verrou natif du collaborateur.
+Les tiers et projets passent par les classes et droits natifs ; un projet doit
+appartenir au tiers et à l'entité du profil. Chaque `ActionComm` reçoit les liens
+natifs. Les listes et noms de ces objets restent privés. Les mutations ciblent
+un identifiant de profil vérifié avec son collaborateur et son entité ; les
+valeurs invalides ne deviennent pas des créations silencieuses.
+
+La migration utilise les API DDL natives pour les colonnes, crée l'index de
+recherche avant de retirer l'ancienne unicité du collaborateur et garde les
+identifiants et clés. Les deux dates vides restent absentes du JSON canonique,
+préservant exactement les signatures des anciens profils sans bornes. Les
+nouveaux contextes et dates entrent dans la signature des formulaires.
+
+Les confirmations utilisent `CMailFile` après commit, avec deux enveloppes
+distinctes et des états par destinataire sur le reçu. Un rejeu n'envoie rien.
+Un échec ou un résultat incertain préserve le rendez-vous et produit seulement
+un avertissement générique ; aucun retry automatique n'est lancé après un claim
+incertain. Les textes sont traduits séparément, reprennent les périodes locales,
+le sujet, l'adresse et la référence, et ne divulguent pas l'email privé du
+collaborateur au client.
+
+Le script local externe remplace les cases du jour par GET, conserve les autres
+jours et le repli sans JavaScript, sans POST de réservation automatique. Les
+changements rapides sont groupés et le retour navigateur ne bloque pas la suite.
+Le bouton de confirmation utilise un nouveau GET avec seulement clé, langue et
+date issue du rendez-vous confirmé, puis recalcule les disponibilités.
+
+La matrice rapide passe sur Dolibarr 23.0.4/24.0.0 × PHP 8.4.26/8.5.11 : douze
+suites PHP et une suite JavaScript par combinaison, 488 rendus FR/EN, lint complet
+et PHPCS natif. Une revue indépendante a vérifié droits, isolation, transactions,
+sélection, administration et dates ; les écarts trouvés ont été corrigés avant
+qualification. Les preuves locales sont dans `dist/qa/profiles-validation/`.
+
+La migration depuis le module 6.1.3 puis l'installation neuve passent sur les
+quatre combinaisons, avec profils, anciennes clés, reçus et formulaires encore
+valides conservés. Le passage natif de stabilisation vérifie P01–P08 sur 24/PHP
+8.4, dont concurrence entre profils, deux messages réellement acceptés par un
+SMTP local, rejeu, SMTP refusé après commit, rollback sans email et validité.
+Les 23 parcours navigateur passent sur 23/PHP 8.4 sans violation axe ni erreur JS.
+
+Le serveur SMTP de qualification écoute seulement sur `127.0.0.1:9125` et
+conserve les messages dans le répertoire privé de test. Le paramètre natif
+utilise le nom `localhost` résolu en loopback : le transport Dolibarr refuse
+l'IP réservée littérale avant connexion. Aucun email de qualification ne sort
+vers un serveur de production. Le sink rejette DATA sans destinataire accepté.
+
+La qualification du ZIP final sur toute la matrice, les captures, les résidus,
+les diagnostics natifs et le retrait des instances sont consignés dans le
+manifeste local de livraison.

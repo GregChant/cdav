@@ -1,7 +1,8 @@
 # Tests de CDav
 
 La commande rapide ne nécessite ni base, ni serveur HTTP, ni configuration de
-production. Elle utilise les bibliothèques du cœur Dolibarr choisi :
+production. Elle utilise les bibliothèques du cœur Dolibarr choisi et Node.js
+pour les régressions du script de sélection, sans paquet npm supplémentaire :
 
 ```sh
 DOLIBARR_ROOT=/chemin/dolibarr/htdocs \
@@ -29,7 +30,10 @@ pour rendre visibles les incompatibilités propres à une combinaison.
 | `booking_multi.php` | Permissions indépendantes, regroupement, pauses, limites, refus des chevauchements, marges et horaires locaux |
 | `booking_identity.php` | Coordonnées publiques, logo natif, photo et miniature, bornes des images et isolation des fichiers utilisateur |
 | `booking_details.php` | Objet et adresse du client obligatoires, bornes UTF-8 natives, adresses multilignes normalisées et compatibilité des anciens reçus |
+| `booking_notification.php` | Enveloppes et langues séparées, coordonnées privées, contenu des confirmations et frontière transactionnelle, sans envoyer d'email |
+| `booking_validity.php` | Validité facultative d'un profil, jour/semaine, bornes inclusives, profils illimités, horizon/préavis et changements d'heure |
 | `booking_ui.php` | Rendus FR/EN du formulaire et du calendrier mensuel, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
+| `booking_selection_js.cjs` | Sélection/désélection par GET, changements rapides, repli manuel, retour navigateur et absence de POST automatique |
 
 Les tests de réservation utilisent une horloge fixe. Des cas déterministes
 vérifient que l’ordre et les doublons des occupations ne changent pas les
@@ -49,7 +53,8 @@ de couverture. Certaines anciennes assertions de `run.php` recherchent encore du
 texte dans les sources ; elles ne prouvent pas le comportement transactionnel.
 Les doublures SQL ne valident pas les requêtes contre MariaDB.
 
-`booking_live.php`, `booking_multi_live.php` et `live_integration.php` contrôlent les vrais accès HTTP,
+`booking_live.php`, `booking_multi_live.php`, `booking_profiles_live.php` et
+`live_integration.php` contrôlent les vrais accès HTTP,
 droits natifs, écritures, verrouillages, courses concurrentes, rejouabilité et
 rollback. `booking_browser.php` et `booking_browser.cjs` contrôlent les parcours
 réels avec Playwright et axe. Ils nécessitent une instance jetable avec base
@@ -57,6 +62,13 @@ explicitement nommée comme base de test ; ils ne sont pas lancés par la CI rap
 Leurs commandes et les résultats de qualification sont dans le
 [guide de réservation](../doc/reservation-rdv-fr.md#contrôles-de-qualité) et le
 [rapport de validation](../doc/validation-reservation-rdv.md).
+
+La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
+sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.
+Elle vérifie les profils indépendants, liens tiers/projet et droits natifs,
+la concurrence entre profils, les deux messages réels, l'absence de renvoi,
+le rollback et l'échec SMTP après commit. Aucun email ne doit partir vers un
+transport de production lors des qualifications natives.
 
 Le benchmark temporel reste séparé des tests déterministes pour éviter les échecs
 liés à la charge d’un runner partagé :

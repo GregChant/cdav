@@ -86,7 +86,43 @@ class BookingAvailability
 				$result['weekly'][(int) $weekday][] = array(self::formatMinutes($range[0]), self::formatMinutes($range[1]));
 			}
 		}
+		// Omit empty bounds so existing profile settings and signed tickets retain
+		// their exact canonical JSON when no validity window is configured.
+		foreach (array('valid_from', 'valid_until') as $field) {
+			$value = array_key_exists($field, $config) ? $config[$field] : '';
+			if (!is_string($value) || !mb_check_encoding($value, 'UTF-8')) throw new \InvalidArgumentException('Invalid booking validity date');
+			if ($value === '') continue;
+			if (!preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/D', $value)
+				|| !checkdate((int) substr($value, 5, 2), (int) substr($value, 8, 2), (int) substr($value, 0, 4))) {
+				throw new \InvalidArgumentException('Invalid booking validity date');
+			}
+			$result[$field] = $value;
+		}
+		if (isset($result['valid_from'], $result['valid_until']) && $result['valid_from'] > $result['valid_until']) {
+			throw new \InvalidArgumentException('Reversed booking validity dates');
+		}
 		return $result;
+	}
+
+	/**
+	 * Resolve inclusive appointment dates into local half-open timestamp bounds.
+	 * @param array $config Profile settings
+	 * @return array Start inclusive and end exclusive, or null for an open bound
+	 */
+	public static function validityRange(array $config): array
+	{
+		$config = self::validateConfig($config);
+		$zone = new DateTimeZone($config['timezone']);
+		$start = isset($config['valid_from']) ? (new DateTimeImmutable($config['valid_from'].' 00:00:00', $zone))->getTimestamp() : null;
+		$end = null;
+		if (isset($config['valid_until'])) {
+			// Advance the calendar date before resolving its local midnight. This
+			// handles 23/25-hour DST days and even a timezone's skipped local day.
+			$nextDate = (new DateTimeImmutable($config['valid_until'].' 00:00:00', new DateTimeZone('UTC')))->modify('+1 day');
+			$end = $nextDate->setTimezone($zone)->setDate((int) $nextDate->format('Y'), (int) $nextDate->format('m'),
+				(int) $nextDate->format('d'))->setTime(0, 0)->getTimestamp();
+		}
+		return array('start' => $start, 'end' => $end);
 	}
 
 	/**
@@ -260,6 +296,9 @@ class BookingAvailability
 		$horizon = self::horizonEnd($config, $now);
 		$start = max($start, $cutoff);
 		$end = min($end, $horizon);
+		$validity = self::validityRange($config);
+		if ($validity['start'] !== null) $start = max($start, $validity['start']);
+		if ($validity['end'] !== null) $end = min($end, $validity['end']);
 		if ($start >= $end) return array();
 		$busy = self::mergeIntervals($busy);
 		$duration = $segmentDuration ?? $config['duration'] * 60;

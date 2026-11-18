@@ -18,8 +18,9 @@ if (!is_file($root.'/core/lib/functions.lib.php')) {
 	exit(2);
 }
 define('DOL_DOCUMENT_ROOT', $root);
+define('DOL_URL_ROOT', '/dolibarr');
 $conf = (object) array('global' => new stdClass(),
-	'file' => (object) array('dol_document_root' => array($root)), 'cache' => array());
+	'file' => (object) array('dol_document_root' => array('main' => $root)), 'cache' => array());
 require $root.'/core/lib/functions.lib.php';
 require $root.'/core/class/translate.class.php';
 $_SESSION = array('newtoken' => 'native-csrf-sentinel');
@@ -48,14 +49,22 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			$langs->tab_translate[$key] = $value;
 		}
 	}
+	foreach ($langs->tab_translate as $key => $value) {
+		if (str_starts_with($key, 'CDavBooking')) bookingUiAssert(!preg_match('/professionnel|professional/iu', $value), 'All booking labels refer to the collaborator consistently');
+	}
 	foreach (array('slots', 'empty', 'error', 'confirmed', 'malformed', 'invalid-month', 'invalid-days', 'leap-month', 'full-week-month', 'current-day', 'six-month-horizon',
 		'details-malformed', 'details-hostile', 'details-multiline', 'details-oversized',
 		'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed',
 		'multi-empty', 'multi-contiguous', 'multi-split', 'multi-both', 'multi-disabled', 'multi-invalid', 'multi-malformed', 'multi-scalar', 'multi-dst', 'confirmed-split',
 		'multi-pause-invalid', 'multi-day-invalid', 'multi-contiguous-invalid', 'multi-invalid-fallback',
 		'branding-full', 'branding-no-images', 'branding-no-contacts', 'branding-hostile', 'branding-hidden', 'branding-malformed', 'branding-large-photo', 'branding-oversized-photo',
-		'branding-favicon-square', 'branding-favicon-missing', 'branding-favicon-malformed', 'branding-favicon-hostile', 'branding-favicon-data') as $scenario) {
-		$bookingProfile = array('config' => array('timezone' => 'Europe/Zurich', 'duration' => 30, 'horizon' => 60));
+		'branding-favicon-square', 'branding-favicon-missing', 'branding-favicon-malformed', 'branding-favicon-hostile', 'branding-favicon-data',
+		'profile-label-hostile', 'profile-label-malformed', 'profile-label-hidden', 'confirmed-email-warning',
+		'validity-unlimited', 'validity-empty', 'validity-day', 'validity-week', 'validity-from', 'validity-until',
+		'validity-invalid', 'validity-malformed', 'validity-past', 'validity-later-than-horizon', 'validity-controller-max', 'multi-validity-outside') as $scenario) {
+		$bookingProfile = array('label' => 'Consultation atelier', 'thirdparty_id' => 42, 'project_id' => 81,
+			'company_private_name' => 'PRIVATE-THIRDPARTY-SENTINEL', 'project_private_name' => 'PRIVATE-PROJECT-SENTINEL',
+			'config' => array('timezone' => 'Europe/Zurich', 'duration' => 30, 'horizon' => 60));
 		$bookingKey = str_repeat('a', 64);
 		$bookingDate = '2026-11-20';
 		unset($bookingLastDate);
@@ -64,7 +73,7 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		$bookingRequest = 'request-sentinel';
 		$bookingSlots = in_array($scenario, array('slots', 'error', 'details-malformed', 'details-hostile', 'details-multiline', 'details-oversized'), true)
 			? array(array('start' => 1795179600, 'end' => 1795181400)) : array();
-		$bookingResult = in_array($scenario, array('confirmed', 'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed'), true)
+		$bookingResult = in_array($scenario, array('confirmed', 'confirmed-legacy', 'confirmed-details-hostile', 'confirmed-details-malformed', 'confirmed-email-warning'), true)
 			? array('reference' => 'public-ref', 'start' => 1795179600, 'end' => 1795181400) : null;
 		$bookingMessage = '';
 		$bookingError = $scenario === 'error' ? 'Please reload <script>alert(1)</script>' : '';
@@ -75,6 +84,42 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		$bookingSelectionDuration = 0;
 		$bookingSelectionValid = false;
 		$bookingIdentity = null;
+		if ($scenario === 'profile-label-hostile') $bookingProfile['label'] = '</p><script>alert(1)</script>';
+		if ($scenario === 'profile-label-malformed') $bookingProfile['label'] = array('PRIVATE-SENTINEL');
+		if ($scenario === 'profile-label-hidden') $bookingProfile = null;
+		if ($scenario === 'confirmed-email-warning') $bookingResult['notification_warning'] = true;
+		$validityToday = new DateTimeImmutable('today', new DateTimeZone('Europe/Zurich'));
+		$validityExpectedFrom = $validityExpectedUntil = null;
+		if (str_starts_with($scenario, 'validity-')) {
+			if ($scenario === 'validity-empty') {
+				$bookingProfile['config']['valid_from'] = $bookingProfile['config']['valid_until'] = '';
+			} elseif ($scenario === 'validity-invalid') {
+				$bookingProfile['config']['valid_from'] = '2026-02-30';
+				$bookingProfile['config']['valid_until'] = '"><script>VALIDITY-PRIVATE-SENTINEL</script>';
+			} elseif ($scenario === 'validity-malformed') {
+				$bookingProfile['config']['valid_from'] = array('VALIDITY-PRIVATE-SENTINEL');
+				$bookingProfile['config']['valid_until'] = true;
+			} elseif ($scenario !== 'validity-unlimited') {
+				$validityExpectedFrom = $validityToday->modify('+2 days')->format('Y-m-d');
+				$validityExpectedUntil = $validityToday->modify($scenario === 'validity-day' ? '+2 days' : '+8 days')->format('Y-m-d');
+				if ($scenario === 'validity-from') $validityExpectedUntil = null;
+				if ($scenario === 'validity-until') $validityExpectedFrom = null;
+				if ($scenario === 'validity-past') {
+					$validityExpectedFrom = $validityToday->modify('-8 days')->format('Y-m-d');
+					$validityExpectedUntil = $validityToday->modify('-1 day')->format('Y-m-d');
+				}
+				if ($scenario === 'validity-later-than-horizon') {
+					$validityExpectedFrom = $validityToday->modify('+70 days')->format('Y-m-d');
+					$validityExpectedUntil = $validityToday->modify('+76 days')->format('Y-m-d');
+				}
+				if ($validityExpectedFrom !== null) $bookingProfile['config']['valid_from'] = $validityExpectedFrom;
+				if ($validityExpectedUntil !== null) $bookingProfile['config']['valid_until'] = $validityExpectedUntil;
+				$bookingDate = max($validityToday->format('Y-m-d'), $validityExpectedFrom ?? '');
+				$bookingCalendar = array('month' => substr($bookingDate, 0, 7), 'previous' => null, 'next' => null, 'days' => array());
+				if (!in_array($scenario, array('validity-past', 'validity-later-than-horizon'), true)) $bookingCalendar['days'][$bookingDate] = 1;
+				if ($scenario === 'validity-controller-max') $bookingLastDate = $validityToday->modify('+3 days')->format('Y-m-d');
+			}
+		}
 		if ($scenario === 'malformed') {
 			$bookingProfile = null;
 			$bookingDate = array('hostile');
@@ -147,7 +192,7 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			$selectionAfternoon = $selectionStart + 4 * 3600;
 			$selectionOtherDay = $selectionStart + 3 * 86400;
 			$bookingProfile['config']['allow_contiguous'] = in_array($scenario, array('multi-empty', 'multi-contiguous', 'multi-both', 'multi-invalid', 'multi-malformed', 'multi-scalar', 'multi-dst', 'confirmed-split',
-				'multi-pause-invalid', 'multi-day-invalid', 'multi-invalid-fallback'), true);
+				'multi-pause-invalid', 'multi-day-invalid', 'multi-invalid-fallback', 'multi-validity-outside'), true);
 			$bookingProfile['config']['allow_split'] = !in_array($scenario, array('multi-contiguous', 'multi-disabled', 'multi-pause-invalid', 'multi-day-invalid'), true);
 			$bookingSlots = array(array('start' => $selectionStart, 'end' => $selectionStart + 1800),
 				array('start' => $selectionStart + 1800, 'end' => $selectionStart + 3600),
@@ -193,6 +238,12 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			if ($scenario === 'multi-contiguous-invalid' || $scenario === 'multi-invalid-fallback') {
 				$bookingSelectionValid = false;
 				if ($scenario === 'multi-contiguous-invalid') $bookingError = $langs->transnoentitiesnoconv('CDavBookingSelectionContiguousDisabled');
+			}
+			if ($scenario === 'multi-validity-outside') {
+				$bookingProfile['config']['valid_from'] = $validityToday->modify('+10 days')->format('Y-m-d');
+				$bookingProfile['config']['valid_until'] = $validityToday->modify('+12 days')->format('Y-m-d');
+				$bookingSelectionValid = false;
+				$bookingError = $langs->transnoentitiesnoconv('CDavBookingInvalid');
 			}
 			if ($scenario === 'multi-malformed') {
 				$bookingSelection = array($selectionStart, (string) ($selectionStart + 1800), array('PRIVATE-SENTINEL'), '<script>PRIVATE-SENTINEL</script>');
@@ -259,7 +310,20 @@ foreach (array('fr_FR', 'en_US') as $language) {
 		libxml_clear_errors();
 		libxml_use_internal_errors($previous);
 		$xpath = new DOMXPath($dom);
-		bookingUiAssert($xpath->query('//script')->length === 0, 'The public template must not execute injected scripts');
+		bookingUiAssert($xpath->query('//script[not(@src) or normalize-space(.) != ""]')->length === 0, 'The public template must not execute inline or injected scripts');
+		$selectionScript = $xpath->query('//script[@src="/dolibarr/cdav/js/booking.js" and @defer]');
+		bookingUiAssert($xpath->query('//script')->length === $selectionScript->length
+			&& $selectionScript->length === ($bookingMultiple && !empty($bookingProfile) && empty($bookingResult) ? 1 : 0),
+			'Only the local deferred read-only selection script is loaded for an eligible booking form');
+		bookingUiAssert(strpos($html, 'PRIVATE-THIRDPARTY-SENTINEL') === false && strpos($html, 'PRIVATE-PROJECT-SENTINEL') === false,
+			'Private linked third parties and projects never appear in the public page');
+		bookingUiAssert(strpos($html, 'VALIDITY-PRIVATE-SENTINEL') === false, 'Malformed profile dates cannot inject or expose arbitrary values');
+		$profileLabel = $xpath->query('//*[@id="booking-profile-name"]');
+		$expectedProfileLabel = !empty($bookingProfile) && is_string($bookingProfile['label'] ?? null) ? $bookingProfile['label'] : '';
+		bookingUiAssert($profileLabel->length === ($expectedProfileLabel !== '' ? 1 : 0), 'A named booking profile is shown only for an available publication');
+		if ($expectedProfileLabel !== '') bookingUiAssert($profileLabel->item(0)->textContent === $expectedProfileLabel, 'The booking profile name remains escaped plain text');
+		bookingUiAssert($xpath->query('//*[@id="booking-email-warning" and @role="status"]')->length === ($scenario === 'confirmed-email-warning' ? 1 : 0),
+			'An email failure after booking displays one generic warning without another reservation form');
 		bookingUiAssert($xpath->query('//*[@onfocus or @onclick or @onmouseover or @onerror]')->length === 0, 'Input must not create executable attributes');
 		bookingUiAssert($xpath->query('//h1')->length === 1, 'The public page must have one main heading');
 		bookingUiAssert(strpos($html, 'CDavBooking') === false, 'All public booking labels must be translated');
@@ -314,6 +378,13 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			bookingUiAssert(strpos($html, 'public-ref') !== false, 'Confirmation must expose the public reference');
 		}
 		if ($bookingResult !== null) {
+			$restart = $xpath->query('//a[@id="booking-again"]');
+			bookingUiAssert($restart->length === 1, 'Every confirmation offers a fresh appointment through a GET link');
+			parse_str(parse_url($restart->item(0)->getAttribute('href'), PHP_URL_QUERY), $restartQuery);
+			bookingUiAssert(array_keys($restartQuery) === array('key', 'lang', 'date') && $restartQuery['key'] === $bookingKey
+				&& $restartQuery['lang'] === $bookingLanguage, 'A new appointment keeps only its profile, language and confirmed date');
+			bookingUiAssert($restartQuery['date'] === (new DateTimeImmutable('@'.((int) $bookingResult['start'])))->setTimezone($bookingTimezone)->format('Y-m-d'),
+				'The new appointment date comes from the confirmed event rather than untrusted form data');
 			foreach (array('subject', 'address') as $detailField) {
 				$detail = $xpath->query('//*[@id="booking-confirmation-'.$detailField.'"]');
 				if (($bookingValues[$detailField] ?? '') === '') {
@@ -334,7 +405,7 @@ foreach (array('fr_FR', 'en_US') as $language) {
 					'Errors must be associated with the '.$name.' field');
 			}
 		}
-		if ($bookingResult === null && !in_array($scenario, array('malformed', 'invalid-month', 'branding-hidden'), true)) {
+		if ($bookingResult === null && !in_array($scenario, array('malformed', 'invalid-month', 'branding-hidden', 'profile-label-hidden'), true)) {
 			bookingUiAssert($xpath->query('//table[contains(@class,"calendar-grid")]')->length === 1, 'A valid public month must render a calendar table');
 			bookingUiAssert($xpath->query('//table[contains(@class,"calendar-grid")]//th[@scope="col"]')->length === 7, 'The monthly calendar has seven named weekday columns');
 			$firstHeader = $xpath->query('//table[contains(@class,"calendar-grid")]//th')->item(0);
@@ -392,10 +463,36 @@ foreach (array('fr_FR', 'en_US') as $language) {
 			bookingUiAssert($xpath->query('//input[@id="booking-date"]')->item(0)->getAttribute('max') === $expectedMaximum,
 				'The native date field preserves the exact six-calendar-month booking horizon');
 		}
+		if (str_starts_with($scenario, 'validity-')) {
+			$dateInput = $xpath->query('//input[@id="booking-date"]')->item(0);
+			$expectedMinimum = max($validityToday->format('Y-m-d'), $validityExpectedFrom ?? '');
+			$expectedMaximum = $validityToday->modify('+60 days')->format('Y-m-d');
+			if ($validityExpectedUntil !== null) $expectedMaximum = min($expectedMaximum, $validityExpectedUntil);
+			if (in_array($scenario, array('validity-invalid', 'validity-malformed'), true)) $expectedMaximum = $validityToday->modify('-1 day')->format('Y-m-d');
+			if ($scenario === 'validity-controller-max') $expectedMaximum = $validityToday->modify('+3 days')->format('Y-m-d');
+			bookingUiAssert($dateInput->getAttribute('min') === $expectedMinimum && $dateInput->getAttribute('max') === $expectedMaximum,
+				'Optional inclusive validity dates constrain the public date field without extending its independent horizon');
+			$validityNotice = $xpath->query('//*[@id="booking-validity"]');
+			bookingUiAssert($validityNotice->length === ($validityExpectedFrom !== null || $validityExpectedUntil !== null ? 1 : 0),
+				'Unbounded, empty or malformed validity fields do not invent a public period');
+			foreach (array_filter(array($validityExpectedFrom, $validityExpectedUntil)) as $bound) {
+				bookingUiAssert(strpos($validityNotice->item(0)->textContent, $bound) !== false, 'The public period displays each configured date as escaped text');
+			}
+			$emptyWindow = $expectedMinimum > $expectedMaximum;
+			bookingUiAssert($dateInput->hasAttribute('disabled') === $emptyWindow
+				&& $xpath->query('//*[@id="booking-validity-empty" and @role="status"]')->length === ($emptyWindow ? 1 : 0),
+				'A past validity period or a start beyond the horizon disables date selection and announces the absence of bookable dates');
+			bookingUiAssert($xpath->query('//input[@id="booking-date"]/ancestor::form/button[@disabled]')->length === ($emptyWindow ? 1 : 0),
+				'An empty validity window has no unusable date-form submission');
+			if ($scenario === 'validity-day') bookingUiAssert($expectedMinimum === $expectedMaximum, 'Matching bounds retain one complete bookable local day');
+		}
 		if (str_starts_with($scenario, 'multi-') && $scenario !== 'multi-disabled') {
 			bookingUiAssert($xpath->query('//form[@id="booking-add-selection" and @method="get"]')->length === 1, 'An enabled profile offers a GET form to build its selection');
 			bookingUiAssert($xpath->query('//form[@id="booking-add-selection"]')->item(0)->getAttribute('action') === '?#booking-selection',
 				'Adding slots returns to the basket and its validation feedback without JavaScript');
+			bookingUiAssert($xpath->query('//form[@id="booking-add-selection"]//input[@name="selection_action" and @value="add"]')->length === 1
+				&& $xpath->query('//form[@id="booking-add-selection"]//button[@type="submit" and not(@hidden)]')->length === 1,
+				'The read-only manual add form stays usable when JavaScript is unavailable');
 			bookingUiAssert($xpath->query('//input[@type="radio"]')->length === 0, 'An enabled multi-selection profile uses checkboxes instead of legacy radios');
 			bookingUiAssert($xpath->query('//input[@type="checkbox" and @name="add[]"]')->length === count($bookingSlots), 'Each current free slot has one add checkbox');
 			$permissionKey = $bookingAllowsContiguous && $bookingAllowsSplit ? 'CDavBookingSelectionModesBoth'
