@@ -1,6 +1,6 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.2.1 propose un calendrier mensuel de réservation relié directement à
+CDav 6.3.0 propose un calendrier mensuel de réservation relié directement à
 l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
 choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
 l'autorise. La confirmation crée les rendez-vous natifs affectés au
@@ -24,6 +24,10 @@ La version 6.2 nécessite une nouvelle désactivation/réactivation : elle retir
 la limite d'un profil par collaborateur et ajoute les rattachements et les états
 des confirmations email. La migration conserve les identifiants, horaires,
 activations, liens et reçus existants ; elle peut être rejouée sans doublon.
+La version 6.3 ajoute la provenance des événements pour protéger les données
+métier lors des écritures CalDAV. Réactiver le module conserve les anciens
+identifiants et applique la protection aux origines inconnues ; voir le
+[guide de protection métier](protection-metier-dav-fr.md).
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
 24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
@@ -99,9 +103,12 @@ Cet affichage conserve les réglages saisis sans enregistrer le profil.
 Un projet doit être ouvert, appartenir au tiers sélectionné et à l'entité
 courante. Le sélecteur exclut les projets brouillons et fermés ; la même règle
 est vérifiée côté serveur à l'enregistrement et à la réservation.
-Si un projet lié à un ancien profil est fermé, son rattachement reste conservé.
-Il faut choisir un autre projet ouvert ou confirmer explicitement le retrait
-du lien. Les rendez-vous déjà créés restent dans l'Agenda.
+Si un projet lié à un ancien profil est fermé, brouillon ou supprimé, son
+rattachement reste conservé. Un avertissement permet de choisir un autre projet
+ou de confirmer explicitement le retrait du lien. Tant que le projet n'est plus
+ouvert, le lien public est indisponible ; la liaison et le jeton sont conservés.
+Une réouverture du projet rétablit le même lien. Les rendez-vous déjà créés
+restent dans l'Agenda.
 Les modules natifs Tiers et Projets, ainsi que les droits de lecture du
 collaborateur sur les objets liés, sont nécessaires pour ces rattachements.
 
@@ -383,8 +390,10 @@ des données anormales sans mesure de charge préalable.
 Si aucun créneau ne s'affiche, vérifier le jour et le fuseau, les plages,
 la durée avec ses marges, le préavis, l'horizon et les occupations. Si le lien
 est indisponible, vérifier les activations globale/profil, le jeton courant,
-l'utilisateur actif, ses droits Agenda, HTTPS et le contexte d'entité. Après une
-mise à niveau, vérifier que le module a été réactivé pour charger ses schémas.
+l'utilisateur actif, ses droits Agenda, HTTPS et le contexte d'entité. Si un
+tiers ou un projet est lié, vérifier aussi les droits natifs sur ces objets et
+le statut ouvert du projet. Après une mise à niveau, vérifier que le module a
+été réactivé pour charger ses schémas.
 
 ## Contrôles de qualité
 

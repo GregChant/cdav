@@ -78,6 +78,14 @@ async function follow(page, action, expected = 200) {
   return response;
 }
 
+async function checkNativeAdministrationError(page, message) {
+  // Dolibarr renders a persistent jNotify error with JavaScript enabled and
+  // falls back to an inline .error block when that native feature is disabled.
+  const notification = page.locator('.jnotify-notification-error, .error').first();
+  await notification.waitFor({state: 'visible', timeout: 5000});
+  check((await notification.textContent()).trim().length > 0, message);
+}
+
 async function checkBasket(page, starts, valid = true) {
   check(!new URL(page.url()).searchParams.has('subject') && !new URL(page.url()).searchParams.has('address'),
     'Appointment subject and client address never enter calendar or basket URLs');
@@ -500,9 +508,9 @@ async function checkBranding(page) {
           select.value = String(value);
         }, forgedId);
         await follow(admin, () => projectForm().locator('button.button-save').click());
-        check(await admin.locator('.error').first().isVisible(), 'A forged nonopen or unrelated project produces a native administration error');
         check(nativeFixture('profile_snapshot', namedFirst.id).fingerprint === before.fingerprint,
           'Rejecting a forged project preserves the entire previously saved profile');
+        await checkNativeAdministrationError(admin, 'A forged nonopen or unrelated project produces a native administration error');
       }
       results.push({case: 'Forged draft closed or unrelated project save rejected', nativeErrors: true, profileUnchanged: true});
 
@@ -544,9 +552,9 @@ async function checkBranding(page) {
         'A closed legacy project is not silently reintroduced into the open-project dropdown');
       const beforeSilentSave = nativeFixture('profile_snapshot', namedFirst.id);
       await follow(admin, () => projectForm().locator('button.button-save').click());
-      check(await admin.locator('.error').first().isVisible()
-        && nativeFixture('profile_snapshot', namedFirst.id).fingerprint === beforeSilentSave.fingerprint,
+      check(nativeFixture('profile_snapshot', namedFirst.id).fingerprint === beforeSilentSave.fingerprint,
         'Saving an empty filtered selector without explicit consent cannot silently detach its original project');
+      await checkNativeAdministrationError(admin, 'An implicit project detachment produces a native administration error');
       await admin.goto(projectAdminUrl);
       await projectForm().locator('select[name=project_id]').selectOption(String(fixture.replacement_project_id));
       await follow(admin, () => projectForm().locator('button.button-save').click());
