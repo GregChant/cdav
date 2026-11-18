@@ -683,15 +683,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$createdAttachments = array();
 		$removedAttachments = array();
 		try {
-		$this->_lockCalendarOwner((int) $calendarId);
-			$lockedEventId = $this->_findActionCommByUri((string) $objectUri, true, (int) $calendarId);
-		$resolvedObject = $this->_resolveCalendarObject($calendarId, $objectUri);
-		if ($resolvedObject === null) {
-			throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
-		}
-			if ($resolvedObject['source'] === 'ev' && (int) $resolvedObject['id'] !== $lockedEventId) {
-				throw new \Sabre\DAV\Exception\PreconditionFailed('The native appointment identity changed while its row was being locked', 'If-Match');
-			}
+			$resolvedObject = $this->_lockAndResolveCalendarObject((int) $calendarId, (string) $objectUri);
 		$calendarData['id'] = $resolvedObject['id'];
 		$calendarData['elem_source'] = $resolvedObject['source'];
 		if ($calendarData['elem_source'] === 'ev') {
@@ -741,45 +733,18 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		{
 				$this->_updateActionCommFromCalendarData((int) $calendarData['id'], $calendarData, (int) $calendarId, $protectedMove !== false);
 		}
-		elseif($calendarData['elem_source']=='pe')	// event
-		{
-			require_once DOL_DOCUMENT_ROOT.'/projet/class/task.class.php';
-			$task = new \Task($this->db);
-			if ($task->fetch((int) $calendarData['id']) <= 0
-				|| !in_array((int) $task->entity, array_map('intval', explode(',', getEntity('project'))), true)) {
-				throw new \Sabre\DAV\Exception\NotFound('Dolibarr project task not found');
+			elseif (in_array($calendarData['elem_source'], array('pe', 'pt'), true)) {
+				require_once DOL_DOCUMENT_ROOT.'/projet/class/task.class.php';
+				$task = new \Task($this->db);
+				if ($task->fetch((int) $calendarData['id']) <= 0
+					|| !in_array((int) $task->entity, array_map('intval', explode(',', getEntity('project'))), true)) {
+					throw new \Sabre\DAV\Exception\NotFound('Dolibarr project task not found');
+				}
+				$this->_applyProjectTaskData($task, $calendarData);
+				if ($task->update($this->user) <= 0) {
+					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr project task: '.$task->error);
+				}
 			}
-			$task->label = (string) $calendarData['label'];
-			$task->date_start = (int) $calendarData['start'];
-			$task->date_end = !empty($calendarData['fullday'])
-				? max($task->date_start, (int) $calendarData['end'] - 1)
-				: max($task->date_start, (int) $calendarData['end']);
-			$task->priority = (int) $calendarData['priority'];
-			$task->description = (string) $calendarData['note'];
-			if ($task->update($this->user) <= 0) {
-				throw new \Sabre\DAV\Exception('Unable to update the Dolibarr project task: '.$task->error);
-			}
-		}
-		elseif($calendarData['elem_source']=='pt') // todo
-		{
-			require_once DOL_DOCUMENT_ROOT.'/projet/class/task.class.php';
-			$task = new \Task($this->db);
-			if ($task->fetch((int) $calendarData['id']) <= 0
-				|| !in_array((int) $task->entity, array_map('intval', explode(',', getEntity('project'))), true)) {
-				throw new \Sabre\DAV\Exception\NotFound('Dolibarr project task not found');
-			}
-			$task->label = (string) $calendarData['label'];
-			$task->date_start = (int) $calendarData['start'];
-			$task->date_end = !empty($calendarData['fullday'])
-				? max($task->date_start, (int) $calendarData['end'] - 1)
-				: max($task->date_start, (int) $calendarData['end']);
-			$task->priority = (int) $calendarData['priority'];
-			$task->description = (string) $calendarData['note'];
-			$task->progress = (int) $calendarData['percent'];
-			if ($task->update($this->user) <= 0) {
-				throw new \Sabre\DAV\Exception('Unable to update the Dolibarr project task: '.$task->error);
-			}
-		}
 		elseif($calendarData['elem_source']=='fi') // fichinter line (fichinterdet)
 		{
 			require_once DOL_DOCUMENT_ROOT.'/fichinter/class/fichinterligne.class.php';
@@ -1448,8 +1413,33 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
+	 * Lock the owner and native row before any repeatable-read object lookup.
+	 * Both PUT and DELETE retain this transaction ordering independently of preflight.
+	 *
+	 * @param int $calendarId Calendar owner
+	 * @param string $objectUri Resource basename
+	 * @return array<string,mixed> Resolved object protected by its native row lock
+	 */
+	private function _lockAndResolveCalendarObject($calendarId, $objectUri)
+	{
+		$this->_lockCalendarOwner((int) $calendarId);
+		$lockedEventId = $this->_findActionCommByUri((string) $objectUri, true, (int) $calendarId);
+		$resolved = $this->_resolveCalendarObject($calendarId, $objectUri);
+		if ($resolved === null) throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
+		if ($resolved['source'] === 'ev' && (int) $resolved['id'] !== $lockedEventId) {
+			throw new \Sabre\DAV\Exception\PreconditionFailed('The native appointment identity changed while its row was being locked', 'If-Match');
+		}
+		return $resolved;
+	}
+
+	/**
 	 * Couple an RFC 8607 POST to the exact calendar representation it modified.
 	 * The native user-row lock makes this check and the following ActionComm update atomic.
+	 *
+	 * @param int $calendarId Calendar owner
+	 * @param string $objectUri Resource basename
+	 * @param string $etag Expected calendar representation hash
+	 * @return void
 	 */
 	public function expectCalendarVersion($calendarId, $objectUri, $etag)
 	{
@@ -1471,6 +1461,24 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				'If-Match'
 			);
 		}
+	}
+
+	/**
+	 * Map calendar fields before the existing native Task::update call.
+	 * Only the VTODO representation owns progress; VEVENT preserves native progress.
+	 *
+	 * @param object $task Fetched native project task
+	 * @param array<string,mixed> $data Validated calendar values
+	 * @return void
+	 */
+	private function _applyProjectTaskData($task, array $data)
+	{
+		$task->label = (string) $data['label'];
+		$task->date_start = (int) $data['start'];
+		$task->date_end = max($task->date_start, (int) $data['end'] - (!empty($data['fullday']) ? 1 : 0));
+		$task->priority = (int) $data['priority'];
+		$task->description = (string) $data['note'];
+		if ($data['elem_source'] === 'pt') $task->progress = (int) $data['percent'];
 	}
 
 	/** Populate an ActionComm through fields supported by Dolibarr's native API. */
@@ -2770,15 +2778,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 		$removedAttachments = array();
 		try {
-			$this->_lockCalendarOwner((int) $calendarId);
-			$lockedEventId = $this->_findActionCommByUri((string) $objectUri, true, (int) $calendarId);
-			$resolvedObject = $this->_resolveCalendarObject($calendarId, $objectUri);
-			if ($resolvedObject === null) {
-				throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
-			}
-			if ($resolvedObject['source'] === 'ev' && (int) $resolvedObject['id'] !== $lockedEventId) {
-				throw new \Sabre\DAV\Exception\PreconditionFailed('The native appointment identity changed while its row was being locked', 'If-Match');
-			}
+			$resolvedObject = $this->_lockAndResolveCalendarObject((int) $calendarId, (string) $objectUri);
 			$oid = (int) $resolvedObject['id'];
 			$source = (string) $resolvedObject['source'];
 			$this->_assertCalendarVersion((int) $calendarId, (string) $objectUri);

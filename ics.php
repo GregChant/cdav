@@ -30,37 +30,9 @@ function base64url_decode($data) {
 	return base64_decode($data, true);
 } 
 
-// Load Dolibarr environment
-$res = 0;
-// Try main.inc.php into web root known defined into CONTEXT_DOCUMENT_ROOT (not always defined)
-if (!$res && !empty($_SERVER["CONTEXT_DOCUMENT_ROOT"])) {
-	$res = @include $_SERVER["CONTEXT_DOCUMENT_ROOT"]."/main.inc.php";
-}
-// Try main.inc.php into web root detected using web root calculated from SCRIPT_FILENAME
-$tmp = empty($_SERVER['SCRIPT_FILENAME']) ? '' : $_SERVER['SCRIPT_FILENAME']; $tmp2 = realpath(__FILE__); $i = strlen($tmp) - 1; $j = strlen($tmp2) - 1;
-while ($i > 0 && $j > 0 && isset($tmp[$i]) && isset($tmp2[$j]) && $tmp[$i] == $tmp2[$j]) {
-	$i--;
-	$j--;
-}
-if (!$res && $i > 0 && file_exists(substr($tmp, 0, ($i + 1))."/main.inc.php")) {
-	$res = @include substr($tmp, 0, ($i + 1))."/main.inc.php";
-}
-if (!$res && $i > 0 && file_exists(dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php")) {
-	$res = @include dirname(substr($tmp, 0, ($i + 1)))."/main.inc.php";
-}
-// Try main.inc.php using relative path
-if (!$res && file_exists("../main.inc.php")) {
-	$res = @include "../main.inc.php";
-}
-if (!$res && file_exists("../../main.inc.php")) {
-	$res = @include "../../main.inc.php";
-}
-if (!$res && file_exists("../../../main.inc.php")) {
-	$res = @include "../../../main.inc.php";
-}
-if (!$res) {
-	die("Include of main fails");
-}
+// Keep the native bootstrap at global scope for $db, $conf, $langs and $user.
+$cdavBootstrapFile = __FILE__;
+require __DIR__.'/lib/cdav_bootstrap.inc.php';
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
@@ -74,70 +46,8 @@ $langs->load("cdav@cdav");
 require_once __DIR__.'/lib/cdav.lib.php';
 
 
-// define CDAV_CONTACT_TAG if not
-if(!defined('CDAV_CONTACT_TAG'))
-{
-	define('CDAV_CONTACT_TAG', getDolGlobalInt('CDAV_CONTACT_TAG'));
-}
-
-// define CDAV_URI_KEY if not
-if(!defined('CDAV_URI_KEY'))
-{
-	define('CDAV_URI_KEY', getDolGlobalString('CDAV_URI_KEY', substr(md5($_SERVER['HTTP_HOST'] ?? 'localhost'), 0, 8)));
-}
-
-// define CDAV_TASK_USER_ROLE if not
-if(!defined('CDAV_TASK_USER_ROLE'))
-{
-	define('CDAV_TASK_USER_ROLE', getDolGlobalInt('CDAV_TASK_USER_ROLE'));
-}
-
-// define CDAV_SYNC_PAST if not
-if(!defined('CDAV_SYNC_PAST'))
-{
-	define('CDAV_SYNC_PAST', getDolGlobalInt('CDAV_SYNC_PAST', 31));
-}
-
-// define CDAV_SYNC_FUTURE if not
-if(!defined('CDAV_SYNC_FUTURE'))
-{
-	define('CDAV_SYNC_FUTURE', getDolGlobalInt('CDAV_SYNC_FUTURE', 365));
-}
-
-// define CDAV_TASK_SYNC if not
-if(!defined('CDAV_TASK_SYNC'))
-{
-	define('CDAV_TASK_SYNC', getDolGlobalInt('CDAV_TASK_SYNC'));
-}
-
-// define CDAV_INTERV_SYNC if not
-if(!defined('CDAV_INTERV_SYNC'))
-{
-	define('CDAV_INTERV_SYNC', getDolGlobalInt('CDAV_INTERV_SYNC'));
-}
-
-// define CDAV_INTERV_USER_ROLE if not
-if(!defined('CDAV_INTERV_USER_ROLE'))
-{
-	define('CDAV_INTERV_USER_ROLE', getDolGlobalInt('CDAV_INTERV_USER_ROLE'));
-}
-
-// define CDAV_THIRD_SYNC if not
-if(!defined('CDAV_THIRD_SYNC'))
-{
-	define('CDAV_THIRD_SYNC', getDolGlobalInt('CDAV_THIRD_SYNC'));
-}
-
-// define CDAV_MEMBER_SYNC if not
-if(!defined('CDAV_MEMBER_SYNC'))
-{
-	define('CDAV_MEMBER_SYNC', getDolGlobalInt('CDAV_MEMBER_SYNC'));
-}
-
-// 0 < CDAV_ADDRESSBOOK_ID_SHIFT = Contacts
-// CDAV_ADDRESSBOOK_ID_SHIFT   < 2*CDAV_ADDRESSBOOK_ID_SHIFT = Thirdparties
-// 2*CDAV_ADDRESSBOOK_ID_SHIFT < 3*CDAV_ADDRESSBOOK_ID_SHIFT = Members
-define('CDAV_ADDRESSBOOK_ID_SHIFT', 100000);
+require_once __DIR__.'/lib/cdav_config.lib.php';
+cdav_initialize_sync_constants();
 
 // Parse the signed token. Keep the historical encrypted formats readable so
 // existing subscriptions continue to work after the module upgrade.

@@ -1150,11 +1150,41 @@ class CdavLib
 	}
 
 	/**
-	 * Convert calendar row to VCalendar string
+	 * Format a native postal address as a single calendar location.
 	 *
-	 * @param row object
-	 * @return string
+	 * @param string $address Street lines
+	 * @param string $zip Postal code
+	 * @param string $town Town
+	 * @param string $country Country label
+	 * @return string Calendar location, empty when no street is present
 	 */
+	private function calendarAddress($address, $zip, $town, $country)
+	{
+		if (empty($address)) return '';
+		$location = trim(str_replace(array("\r", "\t", "\n"), ' ', $address));
+		$location = trim($location.', '.$zip);
+		$location = trim($location.' '.$town);
+		return trim($location.', '.$country);
+	}
+
+	/**
+	 * Build the identical native timestamps before source-specific UID and fields.
+	 * Sabre still performs final escaping, folding and complete resource serialization.
+	 *
+	 * @param object $row Selected native calendar row
+	 * @param string $type VEVENT or VTODO
+	 * @param bool $withHeader Whether to include the VCALENDAR envelope
+	 * @return string Calendar/component prefix
+	 */
+	private function calendarComponentHeader($row, $type, $withHeader)
+	{
+		$header = $withHeader ? "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Dolibarr CDav//FR\n" : '';
+		$header .= 'BEGIN:'.$type."\n";
+		$header .= 'CREATED:'.gmdate('Ymd\THis', strtotime($row->datec))."Z\n";
+		$modified = gmdate('Ymd\THis', strtotime($row->lastupd))."Z\n";
+		return $header.'LAST-MODIFIED:'.$modified.'DTSTAMP:'.$modified;
+	}
+
 	/**
 	 * Export a native calendar row using the existing DAV recurrence metadata.
 	 *
@@ -1181,19 +1211,13 @@ class CdavLib
 			// contact address
 			if(empty($location) && !empty($obj->address))
 			{
-				$location = trim(str_replace(array("\r","\t","\n"),' ', $obj->address));
-				$location = trim($location.', '.$obj->zip);
-				$location = trim($location.' '.$obj->town);
-				$location = trim($location.', '.$obj->country_label);
+				$location = $this->calendarAddress($obj->address, $obj->zip, $obj->town, $obj->country_label);
 			}
 
 			// contact address
 			if(empty($location) && !empty($obj->soc_address))
 			{
-				$location = trim(str_replace(array("\r","\t","\n"),' ', $obj->soc_address));
-				$location = trim($location.', '.$obj->soc_zip);
-				$location = trim($location.' '.$obj->soc_town);
-				$location = trim($location.', '.$obj->soc_country_label);
+				$location = $this->calendarAddress($obj->soc_address, $obj->soc_zip, $obj->soc_town, $obj->soc_country_label);
 			}
 
 			$address=explode("\n",$obj->address,2);
@@ -1211,17 +1235,7 @@ class CdavLib
 
 			$timezone = date_default_timezone_get();
 
-			$caldata ="";
-			if($bHeader)
-			{
-				$caldata ="BEGIN:VCALENDAR\n";
-				$caldata.="VERSION:2.0\n";
-				$caldata.="PRODID:-//Dolibarr CDav//FR\n";
-			}
-			$caldata.="BEGIN:".$type."\n";
-			$caldata.="CREATED:".gmdate('Ymd\THis', strtotime($obj->datec))."Z\n";
-			$caldata.="LAST-MODIFIED:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
-			$caldata.="DTSTAMP:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
+			$caldata = $this->calendarComponentHeader($obj, $type, $bHeader);
 			if($obj->sourceuid=='')
 				$caldata.="UID:".$obj->id.'-ev-'./*$calid.'-cal-'.*/ CDAV_URI_KEY."\n";
 			else
@@ -1306,30 +1320,11 @@ class CdavLib
 			else 	// 'pt'
 				$type='VTODO';
 
-			$location='';
-
-			// soc address
-			if(!empty($obj->soc_address))
-			{
-				$location = trim(str_replace(array("\r","\t","\n"),' ', $obj->soc_address));
-				$location = trim($location.', '.$obj->soc_zip);
-				$location = trim($location.' '.$obj->soc_town);
-				$location = trim($location.', '.$obj->soc_country_label);
-			}
+			$location = empty($obj->soc_address) ? '' : $this->calendarAddress($obj->soc_address, $obj->soc_zip, $obj->soc_town, $obj->soc_country_label);
 
 			$timezone = date_default_timezone_get();
 
-			$caldata ="";
-			if($bHeader)
-			{
-				$caldata ="BEGIN:VCALENDAR\n";
-				$caldata.="VERSION:2.0\n";
-				$caldata.="PRODID:-//Dolibarr CDav//FR\n";
-			}
-			$caldata.="BEGIN:".$type."\n";
-			$caldata.="CREATED:".gmdate('Ymd\THis', strtotime($obj->datec))."Z\n";
-			$caldata.="LAST-MODIFIED:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
-			$caldata.="DTSTAMP:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
+			$caldata = $this->calendarComponentHeader($obj, $type, $bHeader);
 			$caldata.="UID:".$obj->id.'-'.$obj->elem_source.'-'./*$calid.'-cal-'.*/ CDAV_URI_KEY."\n";
 			$summary = '['.$this->cleanDolibarrText($obj->proj_title).'] '.$this->cleanDolibarrText($obj->label);
 			$caldata.="SUMMARY:".$this->escapeICalendarText(trim($summary))."\n";
@@ -1384,30 +1379,11 @@ class CdavLib
 	   {
 			$type='VEVENT';
 
-			$location='';
-
-			// soc address
-			if(!empty($obj->soc_address))
-			{
-				$location = trim(str_replace(array("\r","\t","\n"),' ', $obj->soc_address));
-				$location = trim($location.', '.$obj->soc_zip);
-				$location = trim($location.' '.$obj->soc_town);
-				$location = trim($location.', '.$obj->soc_country_label);
-			}
+			$location = empty($obj->soc_address) ? '' : $this->calendarAddress($obj->soc_address, $obj->soc_zip, $obj->soc_town, $obj->soc_country_label);
 
 			$timezone = date_default_timezone_get();
 
-			$caldata ="";
-			if($bHeader)
-			{
-				$caldata ="BEGIN:VCALENDAR\n";
-				$caldata.="VERSION:2.0\n";
-				$caldata.="PRODID:-//Dolibarr CDav//FR\n";
-			}
-			$caldata.="BEGIN:".$type."\n";
-			$caldata.="CREATED:".gmdate('Ymd\THis', strtotime($obj->datec))."Z\n";
-			$caldata.="LAST-MODIFIED:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
-			$caldata.="DTSTAMP:".gmdate('Ymd\THis', strtotime($obj->lastupd))."Z\n";
+			$caldata = $this->calendarComponentHeader($obj, $type, $bHeader);
 			$caldata.="UID:".$obj->id.'-fi-'.CDAV_URI_KEY."\n";
 			$summary = trim($obj->fi_description);
 			if($summary=='')

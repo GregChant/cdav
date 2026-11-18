@@ -44,6 +44,44 @@ class ActionsCDav
 	}
 
 	/**
+	 * Append service task values using the same commercial-line/product fallback.
+	 * Orders and proposals keep their own queries, source links and exclusion rules.
+	 *
+	 * @param object $line Selected order/proposal service line and product defaults
+	 * @param array $labels Task labels, in commercial document order
+	 * @param array $descriptions Native task descriptions
+	 * @param array $durations Original native duration strings
+	 * @return void
+	 */
+	private function appendCommercialTask($line, array &$labels, array &$descriptions, array &$durations)
+	{
+		if (!empty($line->label)) {
+			$label = $line->label;
+		} elseif (!empty($line->prod_label)) {
+			$label = $line->prod_label;
+		} elseif (!empty($line->description)) {
+			$label = strtok($line->description, "\n");
+		} else {
+			$label = 'Task';
+		}
+		$labels[] = $label;
+		$description = '';
+		if (!empty($line->description)) {
+			$description = $line->description;
+		} elseif (!empty($line->prod_description)) {
+			$description = $line->prod_description;
+		}
+		$descriptions[] = $description;
+		$duration = '';
+		if (!empty($line->cdav_duration)) {
+			$duration = $line->cdav_duration;
+		} elseif (!empty($line->prod_duration)) {
+			$duration = $line->prod_duration;
+		}
+		$durations[] = $duration;
+	}
+
+	/**
 	 * Overloading the doActions function : replacing the parent's function with the one below
 	 *
 	 * @param   array           $parameters     Hook metadatas (context, etc...)
@@ -174,25 +212,7 @@ class ActionsCDav
 					if (isset($WEEE_PRODUCT_ID) && $WEEE_PRODUCT_ID == $det->fk_product)
 						continue;
 
-					if (!empty($det->label))
-						$rTasksLib[] = $det->label;
-					elseif (!empty($det->prod_label))
-						$rTasksLib[] = $det->prod_label;
-					elseif (!empty($det->description))
-						$rTasksLib[] = strtok($det->description, "\n");
-					else $rTasksLib[] = 'Task';
-
-					if (!empty($det->description))
-						$rTasksDesc[] = $det->description;
-					elseif (!empty($det->prod_description))
-						$rTasksDesc[] = $det->prod_description;
-					else $rTasksDesc[] = '';
-
-					if (!empty($det->cdav_duration))
-						$rTasksDuree[] = $det->cdav_duration;
-					elseif (!empty($det->prod_duration))
-						$rTasksDuree[] = $det->prod_duration;
-					else $rTasksDuree[] = '';
+					$this->appendCommercialTask($det, $rTasksLib, $rTasksDesc, $rTasksDuree);
 				}
 				unset($det);
 				$db->free($querydet);
@@ -231,25 +251,7 @@ class ActionsCDav
 					//if( !isset($CDAV_EXTRAFIELD_DURATION) || $CDAV_EXTRAFIELD_DURATION != true || empty($det->duration) )
 					//	continue;
 
-					if (!empty($det->label))
-						$rTasksLib[] = $det->label;
-					elseif (!empty($det->prod_label))
-						$rTasksLib[] = $det->prod_label;
-					elseif (!empty($det->description))
-						$rTasksLib[] = strtok($det->description, "\n");
-					else $rTasksLib[] = 'Task';
-
-					if (!empty($det->description))
-						$rTasksDesc[] = $det->description;
-					elseif (!empty($det->prod_description))
-						$rTasksDesc[] = $det->prod_description;
-					else $rTasksDesc[] = '';
-
-					if (!empty($det->cdav_duration))
-						$rTasksDuree[] = $det->cdav_duration;
-					elseif (!empty($det->prod_duration))
-						$rTasksDuree[] = $det->prod_duration;
-					else $rTasksDuree[] = '';
+					$this->appendCommercialTask($det, $rTasksLib, $rTasksDesc, $rTasksDuree);
 				}
 				unset($det);
 				$db->free($querydet);

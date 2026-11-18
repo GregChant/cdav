@@ -1422,747 +1422,457 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
-	 * Convert contact row to VCard string
-	 *
-	 * @param row object
-	 * @return string
+	 * Keep native business labels in the same order for each address-book type.
+	 * @param object $row Native row before vCard escaping
+	 * @param string $type Contact, member or third-party code
+	 * @return array Categories
+	 */
+	private function _vCardCategories($row, $type)
+	{
+		$prefix = $type === 'th' ? '' : 'soc_';
+		$categories = array();
+		foreach (array('client' => 'Customer', 'fournisseur' => 'Supplier') as $field => $label) {
+			if (!empty($row->{$prefix.$field})) $categories[] = $this->langs->transnoentitiesnoconv($label);
+		}
+		if ($type === 'ct') $categories[] = $this->langs->transnoentitiesnoconv($row->priv ? 'ContactPrivate' : 'ContactPublic');
+		if (isModEnabled('category') && $this->_hasRight('categorie', 'read') && trim($row->category_label) !== '') {
+			$categories[] = trim($row->category_label);
+		}
+		return $categories;
+	}
+
+	/**
+	 * Retain the native two-part street representation used by existing clients.
+	 * @param string $value Native street
+	 * @return array Structured address lines
+	 */
+	private function _vCardStreetParts($value)
+	{
+		$parts = explode("\n", $value, 2);
+		foreach ($parts as &$part) $part = trim(str_replace(array("\r", "\t"), ' ', str_replace("\n", ' | ', trim($part))));
+		unset($part);
+		return array_merge($parts, array('', ''));
+	}
+
+	/**
+	 * Escape SQL strings once, after rich notes and structured streets were captured.
+	 * @param object $row Native row
+	 * @return void
+	 */
+	private function _escapeVCardRow($row)
+	{
+		foreach (get_object_vars($row) as $key => $value) {
+			if (is_string($value)) $row->{$key} = strtr(trim($value), array("\n" => '\\n', "\r" => ''));
+		}
+	}
+
+	/**
+	 * Start a vCard with the existing native or externally mapped identity.
+	 * @param object $row Native row
+	 * @param string $type Native object code
+	 * @return string Card header
+	 */
+	private function _vCardHeader($row, $type)
+	{
+		return "BEGIN:VCARD\nVERSION:3.0\nPRODID:-//Dolibarr CDav//FR\nUID:".$this->_getCardSourceUid($row, $type)."\n";
+	}
+
+	/**
+	 * Render one native structured address without changing vCard component order.
+	 * @param string $type HOME or WORK
+	 * @param array $street Two-part native street
+	 * @param string $town Native town
+	 * @param string $zip Native postcode
+	 * @param string $country Native country label
+	 * @return string Address property
+	 */
+	private function _vCardAddress($type, array $street, $town, $zip, $country)
+	{
+		return 'ADR;TYPE='.$type.';CHARSET=UTF-8:;'.str_replace(';', '\;', $street[1]).';'.str_replace(';', '\;', $street[0]).';'
+			.str_replace(';', '\;', $town).';;'.str_replace(';', '\;', $zip).';'.str_replace(';', '\;', $country)."\n";
+	}
+
+	/**
+	 * Share communication rendering while keeping native personal/company fallbacks.
+	 * @param object $obj Escaped native row
+	 * @param string $type Native object code
+	 * @return string Phone, email and URL properties
+	 */
+	private function _vCardCommunications($obj, $type)
+	{
+		$personal = $type !== 'th';
+		$phone = $personal && trim($obj->phone) === '' ? $obj->soc_phone : $obj->phone;
+		$fields = array('TEL;TYPE=WORK,VOICE' => $phone,
+			'TEL;TYPE=HOME,VOICE' => $personal ? $obj->phone_perso : '',
+			'TEL;TYPE=CELL,VOICE' => $obj->phone_mobile,
+			'TEL;TYPE=WORK,FAX' => $personal ? $obj->soc_fax : $obj->fax,
+			'TEL;TYPE=HOME,FAX' => $type === 'ct' ? $obj->fax : '',
+			'EMAIL;TYPE=PREF,INTERNET' => $obj->email,
+			'EMAIL' => $personal && $obj->soc_email !== $obj->email ? $obj->soc_email : '');
+		$data = '';
+		foreach ($fields as $property => $value) {
+			if ($property === 'TEL;TYPE=WORK,VOICE' || !empty($value)) $data .= $property.':'.str_replace(';', '\;', $value)."\n";
+		}
+		$url = $personal && empty($obj->url) ? $obj->soc_url : $obj->url;
+		if (!empty($url)) $data .= 'URL:'.(strpos($url, '://') === false ? 'https://' : '').trim($url)."\n";
+		return $data;
+	}
+
+	/**
+	 * Append native photo/revision properties and merge the lossless DAV sidecar.
+	 * @param object $row Escaped native row
+	 * @param string $type Native object code
+	 * @param string $data Generated properties
+	 * @return string Final vCard
+	 */
+	private function _finishVCard($row, $type, $data)
+	{
+		$photoType = array('ct' => 'contact', 'mb' => 'member', 'th' => 'thirdparty');
+		$data .= $this->_photoPropertyForRow($photoType[$type], $row);
+		$data .= 'REV;TZID='.date_default_timezone_get().':'.strtr($row->lastupd, array(' ' => 'T', ':' => '', '-' => ''))."\nEND:VCARD\n";
+		return $this->vcardStore->merge($type, (int) $row->rowid, $this->_normalizeVCardData($data));
+	}
+
+	/**
+	 * Render native contact/member fields with their explicit privacy/title/date differences.
+	 * @param object $obj Native row
+	 * @param string $type Contact or member code
+	 * @return string vCard
+	 */
+	private function _personToVCard($obj, $type)
+	{
+		$obj = $this->_normalizeDatabaseRow($obj);
+		$networks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
+		$note = $this->_cleanDolibarrText($obj->note_public ?? '');
+		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
+		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
+		$categories = $this->_vCardCategories($obj, $type);
+		$address = $this->_vCardStreetParts($obj->address);
+		$companyAddress = $this->_vCardStreetParts($obj->soc_address);
+		$this->_escapeVCardRow($obj);
+		$data = $this->_vCardHeader($obj, $type);
+		$data .= 'N'.$nameParameters.':'.str_replace(';', '\;', $obj->lastname).';'.str_replace(';', '\;', $obj->firstname).';;'.str_replace(';', '\;', $civility).";\n";
+		$companyPrefix = $type === 'ct' && !empty($obj->soc_nom) && getDolGlobalInt('CDAV_CONCAT_SOCNAME_FOR_PHONE') ? '('.$obj->soc_nom.') ' : '';
+		$data .= 'FN'.$nameParameters.':'.str_replace(';', '\;', $companyPrefix.$obj->lastname.' '.$obj->firstname)."\n";
+		if (!empty($obj->soc_nom)) {
+			$organization = $obj->soc_nom.(!empty($obj->soc_name_alias) ? ' ('.$obj->soc_name_alias.')' : '');
+			$data .= 'ORG;CHARSET=UTF-8:'.str_replace(';', '\;', $organization).";\n";
+		}
+		if ($type === 'ct' && !empty($obj->poste)) $data .= 'TITLE;CHARSET=UTF-8:'.str_replace(';', '\;', $obj->poste)."\n";
+		if ($categories) $data .= 'CATEGORIES;CHARSET=UTF-8:'.str_replace(';', '\;', implode(',', $categories))."\n";
+		$data .= 'CLASS:'.($type === 'ct' && $obj->priv ? 'PRIVATE' : 'PUBLIC')."\n";
+		$data .= $this->_vCardAddress('HOME', $address, $obj->town, $obj->zip, $obj->country_label);
+		$data .= $this->_vCardAddress('WORK', $companyAddress, $obj->soc_town, $obj->soc_zip, $obj->soc_country_label);
+		$data .= $this->_vCardCommunications($obj, $type).$this->_socialNetworksToVCard($networks);
+		if ($type === 'ct' && !empty($obj->birthday)) $data .= 'BDAY:'.str_replace(';', '\;', $obj->birthday)."\n";
+		if ($type === 'mb' && !empty($obj->birth)) $data .= 'BDAY;VALUE=DATE:'.str_replace(';', '\;', date('Ymd', strtotime($obj->birth)))."\n";
+		if ($note !== '') $data .= 'NOTE;CHARSET=UTF-8:'.$this->_escapeVCardText($note)."\n";
+		return $this->_finishVCard($obj, $type, $data);
+	}
+
+	/**
+	 * Convert a native contact to its existing vCard dialect.
+	 * @param object $obj Native contact row
+	 * @return string vCard
 	 */
 	protected function _contactToVCard($obj)
 	{
-		$obj = $this->_normalizeDatabaseRow($obj);
-		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
-		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
-		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
-		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
-		$nick = [];
-		$categ = [];
-		if($obj->soc_client)
-		{
-			$nick[] = $obj->soc_code_client;
-			$categ[] = $this->langs->transnoentitiesnoconv('Customer');
-		}
-		if($obj->soc_fournisseur)
-		{
-			$nick[] = $obj->soc_code_fournisseur;
-			$categ[] = $this->langs->transnoentitiesnoconv('Supplier');
-		}
-		if($obj->priv)
-			$categ[] = $this->langs->transnoentitiesnoconv('ContactPrivate');
-		else
-			$categ[] = $this->langs->transnoentitiesnoconv('ContactPublic');
-		if (isModEnabled('categorie') && $this->_hasRight('categorie', 'read'))
-			if(trim($obj->category_label)!='')
-				$categ[] = trim($obj->category_label);
-
-		$soc_address=explode("\n",$obj->soc_address,2);
-		foreach($soc_address as $kAddr => $vAddr)
-			$soc_address[$kAddr] = trim(str_replace(array("\r","\t"),' ', str_replace("\n",' | ', trim($vAddr))));
-		$soc_address[]='';
-		$soc_address[]='';
-
-		$address=explode("\n",$obj->address,2);
-		foreach($address as $kAddr => $vAddr)
-		{
-			$address[$kAddr] = trim(str_replace(array("\r","\t"),' ', str_replace("\n",' | ', trim($vAddr))));
-		}
-		$address[]='';
-		$address[]='';
-
-		// remove carriage return in data
-		$objvars = get_object_vars($obj);
-		foreach ($objvars as $key => $value)
-		{
-			if(is_string($value))
-				$obj->$key = strtr(trim($value), array("\n"=>"\\n", "\r"=>""));
-		}
-
-		$carddata ="BEGIN:VCARD\n";
-		$carddata.="VERSION:3.0\n";
-		$carddata.="PRODID:-//Dolibarr CDav//FR\n";
-		$carddata.="UID:".$this->_getCardSourceUid($obj, 'ct')."\n";
-		if(!empty($obj->soc_nom) && getDolGlobalInt('CDAV_CONCAT_SOCNAME_FOR_PHONE'))
-		{
-			$carddata.="N".$nameParameters.":".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$civility).";\n";
-			$carddata.="FN".$nameParameters.":".str_replace(';','\;',"(".$obj->soc_nom.") ".$obj->lastname." ".$obj->firstname)."\n";
-		}
-		else
-		{
-			$carddata.="N".$nameParameters.":".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$civility).";\n";
-			$carddata.="FN".$nameParameters.":".str_replace(';','\;',$obj->lastname." ".$obj->firstname)."\n";
-		}
-
-		if(!empty($obj->soc_nom) && !empty($obj->soc_name_alias))
-			$carddata.="ORG;CHARSET=UTF-8:".str_replace(';','\;',$obj->soc_nom." (".$obj->soc_name_alias.")").";\n";
-		elseif(!empty($obj->soc_nom))
-			$carddata.="ORG;CHARSET=UTF-8:".str_replace(';','\;',$obj->soc_nom).";\n";
-		if(!empty($obj->poste))
-			$carddata.="TITLE;CHARSET=UTF-8:".str_replace(';','\;',$obj->poste)."\n";
-		if(count($categ)>0)
-			$carddata.="CATEGORIES;CHARSET=UTF-8:".str_replace(';','\;',implode(',',$categ))."\n";
-		$carddata.="CLASS:".($obj->priv?'PRIVATE':'PUBLIC')."\n";
-		$carddata.="ADR;TYPE=HOME;CHARSET=UTF-8:;".str_replace(';','\;',$address[1]).";".str_replace(';','\;',$address[0]).";";
-		$carddata.=	 str_replace(';','\;',$obj->town).";;".str_replace(';','\;',$obj->zip).";".str_replace(';','\;',$obj->country_label)."\n";
-		$carddata.="ADR;TYPE=WORK;CHARSET=UTF-8:;".str_replace(';','\;',$soc_address[1]).";".str_replace(';','\;',$soc_address[0]).";";
-		$carddata.=	 str_replace(';','\;',$obj->soc_town).";;".str_replace(';','\;',$obj->soc_zip).";".str_replace(';','\;',$obj->soc_country_label)."\n";
-		$carddata.="TEL;TYPE=WORK,VOICE:".str_replace(';','\;',(trim($obj->phone)==''?$obj->soc_phone:$obj->phone))."\n";
-		if(!empty($obj->phone_perso))
-			$carddata.="TEL;TYPE=HOME,VOICE:".str_replace(';','\;',$obj->phone_perso)."\n";
-		if(!empty($obj->phone_mobile))
-			$carddata.="TEL;TYPE=CELL,VOICE:".str_replace(';','\;',$obj->phone_mobile)."\n";
-		if(!empty($obj->soc_fax))
-			$carddata.="TEL;TYPE=WORK,FAX:".str_replace(';','\;',$obj->soc_fax)."\n";
-		if(!empty($obj->fax))
-			$carddata.="TEL;TYPE=HOME,FAX:".str_replace(';','\;',$obj->fax)."\n";
-		if(!empty($obj->email))
-			$carddata.="EMAIL;TYPE=PREF,INTERNET:".str_replace(';','\;',$obj->email)."\n";
-		if(!empty($obj->soc_email) && $obj->soc_email!=$obj->email)
-			$carddata.="EMAIL:".str_replace(';','\;',$obj->soc_email)."\n";
-		$contactUrl = !empty($obj->url) ? $obj->url : $obj->soc_url;
-		if(!empty($contactUrl))
-		{
-			if(strpos($contactUrl,'://')===false)
-				$carddata.="URL:https://".trim($contactUrl)."\n";
-			else
-				$carddata.="URL:".trim($contactUrl)."\n";
-		}
-		$carddata .= $this->_socialNetworksToVCard($socialNetworks);
-		if(!empty($obj->birthday))
-			$carddata.="BDAY:".str_replace(';','\;',$obj->birthday)."\n";
-		if($notePublic !== '')
-			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
-		$carddata .= $this->_photoPropertyForRow('contact', $obj);
-   		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
-		$carddata.="END:VCARD\n";
-		return $this->vcardStore->merge('ct', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
+		return $this->_personToVCard($obj, 'ct');
 	}
 
 	/**
-	 * Convert member row to VCard string
-	 *
-	 * @param row object
-	 * @return string
+	 * Convert a native member to its existing vCard dialect.
+	 * @param object $obj Native member row
+	 * @return string vCard
 	 */
 	protected function _memberToVCard($obj)
 	{
-		$obj = $this->_normalizeDatabaseRow($obj);
-		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
-		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
-		$civility = $this->_getLocalizedCivility($obj->civility ?? '');
-		$nameParameters = ';CHARSET=UTF-8'.$this->_getVCardLanguageParameter();
-		$nick = [];
-		$categ = [];
-		if($obj->soc_client)
-		{
-			$nick[] = $obj->soc_code_client;
-			$categ[] = $this->langs->transnoentitiesnoconv('Customer');
-		}
-		if($obj->soc_fournisseur)
-		{
-			$nick[] = $obj->soc_code_fournisseur;
-			$categ[] = $this->langs->transnoentitiesnoconv('Supplier');
-		}
-		if (isModEnabled('categorie') && $this->_hasRight('categorie', 'read'))
-			if(trim($obj->category_label)!='')
-				$categ[] = trim($obj->category_label);
-
-		$soc_address=explode("\n",$obj->soc_address,2);
-		foreach($soc_address as $kAddr => $vAddr)
-			$soc_address[$kAddr] = trim(str_replace(array("\r","\t"),' ', str_replace("\n",' | ', trim($vAddr))));
-		$soc_address[]='';
-		$soc_address[]='';
-
-		$address=explode("\n",$obj->address,2);
-		foreach($address as $kAddr => $vAddr)
-		{
-			$address[$kAddr] = trim(str_replace(array("\r","\t"),' ', str_replace("\n",' | ', trim($vAddr))));
-		}
-		$address[]='';
-		$address[]='';
-
-		// remove carriage return in data
-		$objvars = get_object_vars($obj);
-		foreach ($objvars as $key => $value)
-		{
-			if(is_string($value))
-				$obj->$key = strtr(trim($value), array("\n"=>"\\n", "\r"=>""));
-		}
-
-		$carddata ="BEGIN:VCARD\n";
-		$carddata.="VERSION:3.0\n";
-		$carddata.="PRODID:-//Dolibarr CDav//FR\n";
-		$carddata.="UID:".$this->_getCardSourceUid($obj, 'mb')."\n";
-		$carddata.="N".$nameParameters.":".str_replace(';','\;',$obj->lastname).";".str_replace(';','\;',$obj->firstname).";;".str_replace(';','\;',$civility).";\n";
-		$carddata.="FN".$nameParameters.":".str_replace(';','\;',$obj->lastname." ".$obj->firstname)."\n";
-		if(!empty($obj->soc_nom) && !empty($obj->soc_name_alias))
-			$carddata.="ORG;CHARSET=UTF-8:".str_replace(';','\;',$obj->soc_nom." (".$obj->soc_name_alias.")").";\n";
-		elseif(!empty($obj->soc_nom))
-			$carddata.="ORG;CHARSET=UTF-8:".str_replace(';','\;',$obj->soc_nom).";\n";
-		/*if(!empty($obj->poste))
-			$carddata.="TITLE;CHARSET=UTF-8:".str_replace(';','\;',$obj->poste)."\n";*/
-		if(count($categ)>0)
-			$carddata.="CATEGORIES;CHARSET=UTF-8:".str_replace(';','\;',implode(',',$categ))."\n";
-		$carddata.="CLASS:PUBLIC\n";
-		$carddata.="ADR;TYPE=HOME;CHARSET=UTF-8:;".str_replace(';','\;',$address[1]).";".str_replace(';','\;',$address[0]).";";
-		$carddata.=	 str_replace(';','\;',$obj->town).";;".str_replace(';','\;',$obj->zip).";".str_replace(';','\;',$obj->country_label)."\n";
-		$carddata.="ADR;TYPE=WORK;CHARSET=UTF-8:;".str_replace(';','\;',$soc_address[1]).";".str_replace(';','\;',$soc_address[0]).";";
-		$carddata.=	 str_replace(';','\;',$obj->soc_town).";;".str_replace(';','\;',$obj->soc_zip).";".str_replace(';','\;',$obj->soc_country_label)."\n";
-		$carddata.="TEL;TYPE=WORK,VOICE:".str_replace(';','\;',(trim($obj->phone)==''?$obj->soc_phone:$obj->phone))."\n";
-		if(!empty($obj->phone_perso))
-			$carddata.="TEL;TYPE=HOME,VOICE:".str_replace(';','\;',$obj->phone_perso)."\n";
-		if(!empty($obj->phone_mobile))
-			$carddata.="TEL;TYPE=CELL,VOICE:".str_replace(';','\;',$obj->phone_mobile)."\n";
-		if(!empty($obj->soc_fax))
-			$carddata.="TEL;TYPE=WORK,FAX:".str_replace(';','\;',$obj->soc_fax)."\n";
-		if(!empty($obj->email))
-			$carddata.="EMAIL;TYPE=PREF,INTERNET:".str_replace(';','\;',$obj->email)."\n";
-		if(!empty($obj->soc_email) && $obj->soc_email!=$obj->email)
-			$carddata.="EMAIL:".str_replace(';','\;',$obj->soc_email)."\n";
-		$memberUrl = !empty($obj->url) ? $obj->url : $obj->soc_url;
-		if(!empty($memberUrl))
-		{
-			if(strpos($memberUrl,'://')===false)
-				$carddata.="URL:https://".trim($memberUrl)."\n";
-			else
-				$carddata.="URL:".trim($memberUrl)."\n";
-		}
-		$carddata .= $this->_socialNetworksToVCard($socialNetworks);
-		if(!empty($obj->birth))
-			$carddata.="BDAY;VALUE=DATE:".str_replace(';','\;',date('Ymd',strtotime($obj->birth)))."\n";
-		if($notePublic !== '')
-			$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText($notePublic)."\n";
-		$carddata .= $this->_photoPropertyForRow('member', $obj);
-		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
-		$carddata.="END:VCARD\n";
-		return $this->vcardStore->merge('mb', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
+		return $this->_personToVCard($obj, 'mb');
 	}
 
-
 	/**
-	 * Convert thirdparty row to VCard string
-	 *
-	 * @param row object
-	 * @return string
+	 * Convert a native third party without personal privacy or birthday fields.
+	 * @param object $obj Native company row
+	 * @return string vCard
 	 */
 	protected function _thirdpartyToVCard($obj)
 	{
-		global $conf;
 		$obj = $this->_normalizeDatabaseRow($obj);
-		$socialNetworks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
-		$notePublic = $this->_cleanDolibarrText($obj->note_public ?? '');
-		$doliinfo = [];
-		$categ = [];
-		if($obj->client)
-		{
-			$doliinfo[] = "💼👑".$obj->code_client;
-			$categ[] = $this->langs->transnoentitiesnoconv('Customer');
-		}
-		if($obj->fournisseur)
-		{
-			$doliinfo[] = "💼🏭".$obj->code_fournisseur;
-			$categ[] = $this->langs->transnoentitiesnoconv('Supplier');
-		}
-		if (isModEnabled('categorie') && $this->_hasRight('categorie', 'read'))
-			if(trim($obj->category_label)!='')
-				$categ[] = trim($obj->category_label);
-
-		$address=explode("\n",$obj->address,2);
-		foreach($address as $kAddr => $vAddr)
-		{
-			$address[$kAddr] = trim(str_replace(array("\r","\t"),' ', str_replace("\n",' | ', trim($vAddr))));
-		}
-		$address[]='';
-		$address[]='';
-
-		// remove carriage return in data
-		$objvars = get_object_vars($obj);
-		foreach ($objvars as $key => $value)
-		{
-			if(is_string($value))
-				$obj->$key = strtr(trim($value), array("\n"=>"\\n", "\r"=>""));
-		}
-
-		$carddata ="BEGIN:VCARD\n";
-		$carddata.="VERSION:3.0\n";
-		$carddata.="PRODID:-//Dolibarr CDav//FR\n";
-		$carddata.="UID:".$this->_getCardSourceUid($obj, 'th')."\n";
-		$carddata.="N;CHARSET=UTF-8:".str_replace(';','\;',$obj->nom).";;;;\n";
-		$carddata.="FN;CHARSET=UTF-8:".str_replace(';','\;',$obj->nom)."\n";
-		if(!empty($obj->nom))
-			$carddata.="ORG;CHARSET=UTF-8:".str_replace(';','\;',$obj->nom).";\n";
-		if(!empty($obj->name_alias))
-			$carddata.="NICKNAME;CHARSET=UTF-8:".str_replace(';','\;',$obj->name_alias).";\n";
-		if(!empty($obj->forme_juridique))
-			$carddata.="TITLE;CHARSET=UTF-8:".str_replace(';','\;',$obj->forme_juridique)."\n";
-		if(count($categ)>0)
-			$carddata.="CATEGORIES;CHARSET=UTF-8:".str_replace(';','\;',implode(',',$categ))."\n";
-		// $carddata.="CLASS:".($obj->priv?'PRIVATE':'PUBLIC')."\n";
-		$carddata.="CLASS:PRIVATE\n";
-		$carddata.="ADR;TYPE=WORK;CHARSET=UTF-8:;".str_replace(';','\;',$address[1]).";".str_replace(';','\;',$address[0]).";";
-		$carddata.=	 str_replace(';','\;',$obj->town).";;".str_replace(';','\;',$obj->zip).";".str_replace(';','\;',$obj->country_label)."\n";
-		$carddata.="TEL;TYPE=WORK,VOICE:".str_replace(';','\;',$obj->phone)."\n";
-		if(!empty($obj->phone_mobile))
-			$carddata.="TEL;TYPE=CELL,VOICE:".str_replace(';','\;',$obj->phone_mobile)."\n";
-		if(!empty($obj->fax))
-			$carddata.="TEL;TYPE=WORK,FAX:".str_replace(';','\;',$obj->fax)."\n";
-		if(!empty($obj->email))
-			$carddata.="EMAIL;TYPE=PREF,INTERNET:".str_replace(';','\;',$obj->email)."\n";
-		if(!empty($obj->url))
-		{
-			if(strpos($obj->url,'://')===false)
-				$carddata.="URL:https://".trim($obj->url)."\n";
-			else
-				$carddata.="URL:".trim($obj->url)."\n";
-		}
-		$carddata .= $this->_socialNetworksToVCard($socialNetworks);
-		$noteParts = $doliinfo;
-		if($notePublic !== '')
-			$noteParts[] = $notePublic;
-		$carddata.="NOTE;CHARSET=UTF-8:".$this->_escapeVCardText(implode("\n", $noteParts))."\n";
-		$carddata .= $this->_photoPropertyForRow('thirdparty', $obj);
-		$carddata.="REV;TZID=".date_default_timezone_get().":".strtr($obj->lastupd,array(" "=>"T", ":"=>"", "-"=>""))."\n";
-		$carddata.="END:VCARD\n";
-
-		return $this->vcardStore->merge('th', (int) $obj->rowid, $this->_normalizeVCardData($carddata));
+		$networks = $this->_decodeSocialNetworks($obj->socialnetworks ?? '');
+		$note = $this->_cleanDolibarrText($obj->note_public ?? '');
+		$categories = $this->_vCardCategories($obj, 'th');
+		$businessNotes = array();
+		if ($obj->client) $businessNotes[] = '💼👑'.$obj->code_client;
+		if ($obj->fournisseur) $businessNotes[] = '💼🏭'.$obj->code_fournisseur;
+		$address = $this->_vCardStreetParts($obj->address);
+		$this->_escapeVCardRow($obj);
+		$data = $this->_vCardHeader($obj, 'th');
+		$data .= 'N;CHARSET=UTF-8:'.str_replace(';', '\;', $obj->nom).";;;;\n";
+		$data .= 'FN;CHARSET=UTF-8:'.str_replace(';', '\;', $obj->nom)."\n";
+		if (!empty($obj->nom)) $data .= 'ORG;CHARSET=UTF-8:'.str_replace(';', '\;', $obj->nom).";\n";
+		if (!empty($obj->name_alias)) $data .= 'NICKNAME;CHARSET=UTF-8:'.str_replace(';', '\;', $obj->name_alias).";\n";
+		if (!empty($obj->forme_juridique)) $data .= 'TITLE;CHARSET=UTF-8:'.str_replace(';', '\;', $obj->forme_juridique)."\n";
+		if ($categories) $data .= 'CATEGORIES;CHARSET=UTF-8:'.str_replace(';', '\;', implode(',', $categories))."\n";
+		$data .= "CLASS:PRIVATE\n".$this->_vCardAddress('WORK', $address, $obj->town, $obj->zip, $obj->country_label);
+		$data .= $this->_vCardCommunications($obj, 'th').$this->_socialNetworksToVCard($networks);
+		if ($note !== '') $businessNotes[] = $note;
+		$data .= 'NOTE;CHARSET=UTF-8:'.$this->_escapeVCardText(implode("\n", $businessNotes))."\n";
+		return $this->_finishVCard($obj, 'th', $data);
 	}
 
-	/*
-	 * parse vcard data to dolibarr table fields
-	 * @param cardData : string vcard
-	 * @param mode : C=create / U=update
+	/**
+	 * Read synchronization identity and optional personal photo bytes once.
+	 * @param object $card Parsed vCard
+	 * @param bool $photo Whether this native object imports personal photos
+	 * @return array Native-independent input metadata
+	 */
+	private function _parseCardIdentity($card, $photo)
+	{
+		$data = array('_category_labels' => $this->_extractCategoryLabels($card), '_uid' => isset($card->UID) ? trim((string) $card->UID) : '');
+		$this->_validateCardUid($data['_uid']);
+		if ($photo) {
+			$data['_photo_bin'] = isset($card->PHOTO) && strpos(substr((string) $card->PHOTO, 0, 10), '://') === false ? (string) $card->PHOTO : false;
+		}
+		return $data;
+	}
+
+	/**
+	 * Resolve structured personal names without applying company naming rules.
+	 * @param object $card Parsed vCard
+	 * @param string $fallback Native contact/member fallback label
+	 * @return array Name and civility fields
+	 */
+	private function _parsePersonalNames($card, $fallback)
+	{
+		$names = isset($card->N) ? $card->N->getParts() : array();
+		$lastname = isset($names[0]) && trim((string) $names[0]) !== '' ? (string) $names[0] : '';
+		if ($lastname === '' && isset($card->FN) && trim((string) $card->FN) !== '') $lastname = (string) $card->FN;
+		if ($lastname === '' && isset($names[1]) && trim((string) $names[1]) !== '') $lastname = (string) $names[1];
+		if ($lastname === '') $lastname = $fallback.' '.date('Y-m-d H:i:s');
+		return array('lastname' => $lastname, 'firstname' => isset($names[1]) ? (string) $names[1] : '',
+			'civility' => isset($names[3]) ? $this->_getCivilityCode((string) $names[3]) : '');
+	}
+
+	/**
+	 * Preserve the distinct contact, member and company telephone priorities.
+	 * @param object $card Parsed vCard
+	 * @param array $data Native replacement fields
+	 * @param string $type Native object code
+	 * @return void
+	 */
+	private function _parseCardTelephones($card, array &$data, $type)
+	{
+		foreach ($card->select('TEL') as $telephone) {
+			$types = $this->_getPropertyTypes($telephone);
+			if (isset($types['WORK']) && (isset($types['VOICE']) || count($types) === 1)) $data['phone'] = (string) $telephone;
+			if ($type !== 'th' && isset($types['HOME']) && (isset($types['VOICE']) || count($types) === 1)) $data['phone_perso'] = (string) $telephone;
+			if (isset($types['CELL'])) $data['phone_mobile'] = (string) $telephone;
+			if ($type !== 'mb' && isset($types['FAX'])) {
+				if ($type === 'th' || isset($types['HOME']) || $data['fax'] === '') $data['fax'] = (string) $telephone;
+			} elseif (!$types && $data['phone'] === '') {
+				$data['phone'] = (string) $telephone;
+			}
+		}
+	}
+
+	/**
+	 * Decode a selected structured address using the existing native field order.
+	 * @param array $parts vCard ADR components
+	 * @param array $data Native replacement fields
+	 * @return void
+	 */
+	private function _parseCardAddressParts(array $parts, array &$data)
+	{
+		$data['address'] = $data['town'] = $data['zip'] = $data['_country_label'] = '';
+		foreach (array(2, 0, 1) as $index) {
+			if (!empty($parts[$index])) $data['address'] .= ($index === 0 ? $parts[$index] : str_replace(' | ', "\n", trim($parts[$index])))."\n";
+		}
+		$data['address'] = trim($data['address']);
+		foreach (array(3 => 'town', 5 => 'zip', 6 => '_country_label') as $index => $field) {
+			if (isset($parts[$index])) $data[$field] = $parts[$index];
+		}
+	}
+
+	/**
+	 * Prefer HOME for people; companies retain their WORK-or-first-address fallback.
+	 * @param object $card Parsed vCard
+	 * @param array $data Native replacement fields
+	 * @param string $type Native object code
+	 * @return void
+	 */
+	private function _parseCardAddress($card, array &$data, $type)
+	{
+		$preferred = $type === 'th' ? 'WORK' : 'HOME';
+		$hasHome = false;
+		if ($preferred === 'HOME') {
+			foreach ($card->select('ADR') as $candidate) {
+				if (isset($this->_getPropertyTypes($candidate)['HOME'])) $hasHome = true;
+			}
+		}
+		foreach ($card->select('ADR') as $address) {
+			$types = $this->_getPropertyTypes($address);
+			if (isset($types[$preferred]) || (!$hasHome && $data['address'] === '')) $this->_parseCardAddressParts($address->getParts(), $data);
+		}
+	}
+
+	/**
+	 * Apply shared communication replacements, retaining the company URL dialect.
+	 * @param object $card Parsed vCard
+	 * @param array $data Native replacement fields
+	 * @param string $type Native object code
+	 * @return void
+	 */
+	private function _parseCardCommunications($card, array &$data, $type)
+	{
+		$this->_parseCardTelephones($card, $data, $type);
+		foreach ($card->select('EMAIL') as $email) {
+			if ($data['email'] === '' || $this->_isPreferredProperty($email)) $data['email'] = (string) $email;
+		}
+		if (isset($card->URL)) $data['url'] = $type === 'th' ? (string) $card->URL : trim((string) $card->URL);
+		$this->_parseCardAddress($card, $data, $type);
+		$this->_storeSocialNetworks($data, $this->_extractSocialNetworks($card));
+	}
+
+	/**
+	 * Resolve a native country through the existing Dolibarr dictionary API.
+	 * @param array $data Parsed native fields
+	 * @param string $field Contact/company fk_pays or member country
+	 * @return void
+	 */
+	private function _parseCardCountry(array &$data, $field)
+	{
+		if (isset($data['_country_label']) && $data['_country_label'] !== '') $data[$field] = $this->_getCountryIdFromLabel($data['_country_label']);
+	}
+
+	/**
+	 * Retain personal organization, validated birthday and plain note semantics.
+	 * @param object $card Parsed vCard
+	 * @param array $data Native replacement fields
+	 * @param string $birthdayField Native birthday field
+	 * @param string $countryField Native country field
+	 * @return void
+	 */
+	private function _parsePersonalCardExtras($card, array &$data, $birthdayField, $countryField)
+	{
+		$data['_organization'] = isset($card->ORG) ? trim((string) $card->ORG, " ;\r\n\t") : '';
+		$birthday = isset($card->BDAY) ? trim((string) $card->BDAY) : '';
+		if (preg_match('/^(\d{4})-?(\d{2})-?(\d{2})/', $birthday, $parts) && checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1])) {
+			$data[$birthdayField] = $parts[1].'-'.$parts[2].'-'.$parts[3];
+		}
+		if (isset($card->NOTE)) $data['note_public'] = trim((string) $card->NOTE);
+		$this->_parseCardCountry($data, $countryField);
+	}
+
+	/**
+	 * Replace every mapped contact field; absent values remain explicit removals.
+	 * @param string $cardData vCard3 or vCard4 input
+	 * @param string $mode Creation or update mode
+	 * @return array Native contact fields
 	 */
 	protected function _parseDataContact($cardData, $mode) {
 
 		debug_log('_parseDataContact('.strlen((string) $cardData).' bytes)');
 
-		// A CardDAV PUT replaces the complete vCard. Initializing every mapped
-		// field is essential: removing a phone or email on a client must clear it
-		// in Dolibarr instead of resurrecting the old value on the next sync.
-		$rdata = array(
-			'lastname' => '', 'firstname' => '', 'civility' => '', 'poste' => '', 'priv' => 0,
-			'phone' => '', 'phone_perso' => '', 'phone_mobile' => '', 'fax' => '',
-			'email' => '', 'url' => '', 'address' => '', 'town' => '', 'zip' => '',
-			'fk_pays' => 0, 'socialnetworks' => '', 'birthday' => null,
-			'note_public' => '', 'photo' => '',
-		);
-
-		$vCard = $this->_readVCard($cardData);
-		$rdata['_category_labels'] = $this->_extractCategoryLabels($vCard);
-
-		// debug_log("_parseData__converted( ".$vCard->PHOTO." )");
-
-		$rdata['_uid'] = isset($vCard->UID) ? trim((string) $vCard->UID) : '';
-		$this->_validateCardUid($rdata['_uid']);
-		if(isset($vCard->PHOTO) && strpos(substr($vCard->PHOTO,0,10),'://')===false) // exist and not uri
-		{
-			$rdata['_photo_bin'] = (string)$vCard->PHOTO;
-		}
-		else
-			$rdata['_photo_bin'] = false;
-
-		$names = isset($vCard->N) ? $vCard->N->getParts() : array();
-		if(isset($names[0]) && trim((string)$names[0])!='')
-			$rdata['lastname'] = (string)$names[0];
-		if($rdata['lastname']=='' && isset($vCard->FN) && trim((string)$vCard->FN)!='')
-			$rdata['lastname'] = (string)$vCard->FN;
-		if($rdata['lastname']=='' && isset($names[1]) && trim((string)$names[1])!='')
-			$rdata['lastname'] = (string)$names[1];
-		if($rdata['lastname']=='')
-			$rdata['lastname'] = "Contact ".date('Y-m-d H:i:s');
-
-		if(isset($names[1]))
-			$rdata['firstname'] = (string)$names[1];
-
-		if(isset($names[3]))
-			$rdata['civility'] = $this->_getCivilityCode((string)$names[3]);
-
-		if(isset($vCard->TITLE))
-			$rdata['poste'] = (string)$vCard->TITLE;
-
-		if(isset($vCard->CLASS) && ((string)strtoupper($vCard->CLASS))=='PRIVATE')
-			$rdata['priv'] = 1;
-		else
-			$rdata['priv'] = 0;
-
-		if(isset($vCard->TEL))
-		{
-			foreach($vCard->TEL as $tel)
-			{
-				$teltype = $this->_getPropertyTypes($tel);
-
-				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
-					$rdata['phone'] = (string)$tel;
-
-				if(isset($teltype['HOME']) && (isset($teltype['VOICE']) || count($teltype)==1))
-					$rdata['phone_perso'] = (string)$tel;
-
-				if(isset($teltype['CELL']))
-					$rdata['phone_mobile'] = (string)$tel;
-
-				if(isset($teltype['HOME']) && isset($teltype['FAX']))
-					$rdata['fax'] = (string)$tel;
-				elseif(isset($teltype['FAX']) && $rdata['fax'] === '')
-					$rdata['fax'] = (string)$tel;
-				elseif (!$teltype && $rdata['phone'] === '')
-					$rdata['phone'] = (string) $tel;
-			}
-		}
-
-		if(isset($vCard->EMAIL))
-		{
-			foreach($vCard->EMAIL as $email)
-			{
-				if($rdata['email'] === '')
-					$rdata['email'] = (string)$email;
-				if($this->_isPreferredProperty($email))
-					$rdata['email'] = (string)$email;
-			}
-		}
-
-		if (isset($vCard->URL))
-			$rdata['url'] = trim((string) $vCard->URL);
-
-		if(isset($vCard->ADR))
-		{
-			$hasHomeAddress = false;
-			foreach ($vCard->ADR as $candidateAddress) {
-				if (isset($this->_getPropertyTypes($candidateAddress)['HOME'])) {
-					$hasHomeAddress = true;
-					break;
-				}
-			}
-			foreach($vCard->ADR as $adr)
-			{
-				$adrtype = $this->_getPropertyTypes($adr);
-				$adrparts = $adr->getParts();
-				// debug_log("adrparts:\n".print_r($adrtype, true).print_r($adrparts, true));
-				if(isset($adrtype['HOME']) || (!$hasHomeAddress && $rdata['address'] === ''))
-				{
-					$rdata['address'] = '';
-					$rdata['town'] = '';
-					$rdata['zip'] = '';
-					$rdata['_country_label'] = '';
-					if(isset($adrparts[2]) && !empty($adrparts[2]))
-						$rdata['address'].= str_replace(' | ',"\n",trim($adrparts[2]))."\n";
-					if(isset($adrparts[0]) && !empty($adrparts[0]))
-						$rdata['address'].= $adrparts[0]."\n";
-					if(isset($adrparts[1]) && !empty($adrparts[1]))
-						$rdata['address'].= str_replace(' | ',"\n",trim($adrparts[1]))."\n";
-					$rdata['address'] = trim($rdata['address']);
-					if(isset($adrparts[3]))
-						$rdata['town'] = $adrparts[3];
-					if(isset($adrparts[5]))
-						$rdata['zip'] = $adrparts[5];
-					if(isset($adrparts[6]))
-						$rdata['_country_label'] = $adrparts[6];
-				}
-			}
-		}
-
-		$socialNetworks = $this->_extractSocialNetworks($vCard);
-		$this->_storeSocialNetworks($rdata, $socialNetworks);
-		$rdata['_organization'] = isset($vCard->ORG) ? trim((string) $vCard->ORG, " ;\r\n\t") : '';
-
-		$bday = '';
-		if( isset($vCard->BDAY))
-			$bday = trim((string)$vCard->BDAY);
-		if (preg_match('/^(\d{4})-?(\d{2})-?(\d{2})/', $bday, $birthdayParts)
-			&& checkdate((int) $birthdayParts[2], (int) $birthdayParts[3], (int) $birthdayParts[1]))
-			$rdata['birthday'] = $birthdayParts[1].'-'.$birthdayParts[2].'-'.$birthdayParts[3];
-
-		if(isset($vCard->NOTE))
-			$rdata['note_public'] = trim((string)$vCard->NOTE);
-
-		if(isset($rdata['_country_label']) && $rdata['_country_label']!='')
-		{
-			$rdata['fk_pays'] = $this->_getCountryIdFromLabel($rdata['_country_label']);
-		}
-
-		debug_log('parsed contact UID '.$rdata['_uid']);
-
-		return $rdata;
+		$data = array('lastname' => '', 'firstname' => '', 'civility' => '', 'poste' => '', 'priv' => 0,
+			'phone' => '', 'phone_perso' => '', 'phone_mobile' => '', 'fax' => '', 'email' => '', 'url' => '',
+			'address' => '', 'town' => '', 'zip' => '', 'fk_pays' => 0, 'socialnetworks' => '', 'birthday' => null, 'note_public' => '', 'photo' => '');
+		$card = $this->_readVCard($cardData);
+		$data += $this->_parseCardIdentity($card, true);
+		$data = array_replace($data, $this->_parsePersonalNames($card, 'Contact'));
+		if (isset($card->TITLE)) $data['poste'] = (string) $card->TITLE;
+		$data['priv'] = isset($card->CLASS) && strtoupper((string) $card->CLASS) === 'PRIVATE' ? 1 : 0;
+		$this->_parseCardCommunications($card, $data, 'ct');
+		$this->_parsePersonalCardExtras($card, $data, 'birthday', 'fk_pays');
+		debug_log('parsed contact UID '.$data['_uid']);
+		return $data;
 	}
 
-	/*
-	 * parse vcard data to dolibarr table fields
-	 * @param cardData : string vcard
-	 * @param mode : C=create / U=update
+	/**
+	 * Parse a member without importing contact privacy, job title or fax fields.
+	 * @param string $cardData vCard3 or vCard4 input
+	 * @param string $mode Creation or update mode
+	 * @return array Native member fields
 	 */
 	protected function _parseDataMember($cardData, $mode) {
 
 		debug_log('_parseDataMember('.strlen((string) $cardData).' bytes)');
 
-		$rdata = array(
-			'lastname' => '', 'firstname' => '', 'civility' => '', 'phone' => '', 'phone_perso' => '',
-			'phone_mobile' => '', 'email' => '', 'url' => '', 'socialnetworks' => '',
-			'address' => '', 'town' => '', 'zip' => '', 'country' => 0,
-			'birth' => null, 'note_public' => '', 'photo' => '',
-		);
-
-		$vCard = $this->_readVCard($cardData);
-		$rdata['_category_labels'] = $this->_extractCategoryLabels($vCard);
-
-		// debug_log("_parseData__converted( ".$vCard->PHOTO." )");
-
-		$rdata['_uid'] = isset($vCard->UID) ? trim((string) $vCard->UID) : '';
-		$this->_validateCardUid($rdata['_uid']);
-		if(isset($vCard->PHOTO) && strpos(substr($vCard->PHOTO,0,10),'://')===false) // exist and not uri
-		{
-			$rdata['_photo_bin'] = (string)$vCard->PHOTO;
-		}
-		else
-			$rdata['_photo_bin'] = false;
-
-		$names = isset($vCard->N) ? $vCard->N->getParts() : array();
-		if(isset($names[0]) && trim((string)$names[0])!='')
-			$rdata['lastname'] = (string)$names[0];
-		if($rdata['lastname']=='' && isset($vCard->FN) && trim((string)$vCard->FN)!='')
-			$rdata['lastname'] = (string)$vCard->FN;
-		if($rdata['lastname']=='' && isset($names[1]) && trim((string)$names[1])!='')
-			$rdata['lastname'] = (string)$names[1];
-		if($rdata['lastname']=='')
-			$rdata['lastname'] = "Member ".date('Y-m-d H:i:s');
-
-		if(isset($names[1]))
-			$rdata['firstname'] = (string)$names[1];
-
-		if(isset($names[3]))
-			$rdata['civility'] = $this->_getCivilityCode((string)$names[3]);
-
-		/*if(isset($vCard->TITLE))
-			$rdata['poste'] = (string)$vCard->TITLE;*/
-
-		if(isset($vCard->TEL))
-		{
-			foreach($vCard->TEL as $tel)
-			{
-				$teltype = $this->_getPropertyTypes($tel);
-
-				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
-					$rdata['phone'] = (string)$tel;
-
-				if(isset($teltype['HOME']) && (isset($teltype['VOICE']) || count($teltype)==1))
-					$rdata['phone_perso'] = (string)$tel;
-
-				if(isset($teltype['CELL']))
-					$rdata['phone_mobile'] = (string)$tel;
-				elseif (!$teltype && $rdata['phone'] === '')
-					$rdata['phone'] = (string) $tel;
-			}
-		}
-
-		if(isset($vCard->EMAIL))
-		{
-			foreach($vCard->EMAIL as $email)
-			{
-				if($rdata['email'] === '')
-					$rdata['email'] = (string)$email;
-				if($this->_isPreferredProperty($email))
-					$rdata['email'] = (string)$email;
-			}
-		}
-
-		if (isset($vCard->URL))
-			$rdata['url'] = trim((string) $vCard->URL);
-
-		if(isset($vCard->ADR))
-		{
-			$hasHomeAddress = false;
-			foreach ($vCard->ADR as $candidateAddress) {
-				if (isset($this->_getPropertyTypes($candidateAddress)['HOME'])) {
-					$hasHomeAddress = true;
-					break;
-				}
-			}
-			foreach($vCard->ADR as $adr)
-			{
-				$adrtype = $this->_getPropertyTypes($adr);
-				$adrparts = $adr->getParts();
-				// debug_log("adrparts:\n".print_r($adrtype, true).print_r($adrparts, true));
-				if(isset($adrtype['HOME']) || (!$hasHomeAddress && $rdata['address'] === ''))
-				{
-					$rdata['address'] = '';
-					$rdata['town'] = '';
-					$rdata['zip'] = '';
-					$rdata['_country_label'] = '';
-					if(isset($adrparts[2]) && !empty($adrparts[2]))
-						$rdata['address'].= str_replace(' | ',"\n",trim($adrparts[2]))."\n";
-					if(isset($adrparts[0]) && !empty($adrparts[0]))
-						$rdata['address'].= $adrparts[0]."\n";
-					if(isset($adrparts[1]) && !empty($adrparts[1]))
-						$rdata['address'].= str_replace(' | ',"\n",trim($adrparts[1]))."\n";
-					$rdata['address'] = trim($rdata['address']);
-					if(isset($adrparts[3]))
-						$rdata['town'] = $adrparts[3];
-					if(isset($adrparts[5]))
-						$rdata['zip'] = $adrparts[5];
-					if(isset($adrparts[6]))
-						$rdata['_country_label'] = $adrparts[6];
-				}
-			}
-		}
-
-		$this->_storeSocialNetworks($rdata, $this->_extractSocialNetworks($vCard));
-		$rdata['_organization'] = isset($vCard->ORG) ? trim((string) $vCard->ORG, " ;\r\n\t") : '';
-
-		$bday = '';
-		if( isset($vCard->BDAY))
-			$bday = trim((string)$vCard->BDAY);
-		if (preg_match('/^(\d{4})-?(\d{2})-?(\d{2})/', $bday, $birthdayParts)
-			&& checkdate((int) $birthdayParts[2], (int) $birthdayParts[3], (int) $birthdayParts[1]))
-			$rdata['birth'] = $birthdayParts[1].'-'.$birthdayParts[2].'-'.$birthdayParts[3];
-
-		if(isset($vCard->NOTE))
-			$rdata['note_public'] = trim((string)$vCard->NOTE);
-
-		if(isset($rdata['_country_label']) && $rdata['_country_label']!='')
-		{
-			$rdata['country'] = $this->_getCountryIdFromLabel($rdata['_country_label']);
-		}
-
-		debug_log('parsed member UID '.$rdata['_uid']);
-
-		return $rdata;
+		$data = array('lastname' => '', 'firstname' => '', 'civility' => '', 'phone' => '', 'phone_perso' => '',
+			'phone_mobile' => '', 'email' => '', 'url' => '', 'socialnetworks' => '', 'address' => '', 'town' => '', 'zip' => '',
+			'country' => 0, 'birth' => null, 'note_public' => '', 'photo' => '');
+		$card = $this->_readVCard($cardData);
+		$data += $this->_parseCardIdentity($card, true);
+		$data = array_replace($data, $this->_parsePersonalNames($card, 'Member'));
+		$this->_parseCardCommunications($card, $data, 'mb');
+		$this->_parsePersonalCardExtras($card, $data, 'birth', 'country');
+		debug_log('parsed member UID '.$data['_uid']);
+		return $data;
 	}
 
-
-	/*
-	 * parse vcard data to dolibarr table fields
-	 * @param cardData : string vcard
-	 * @param mode : C=create / U=update
+	/**
+	 * Parse company names and technical business-note markers independently of people.
+	 * @param string $cardData vCard3 or vCard4 input
+	 * @param string $mode Creation or update mode
+	 * @return array Native third-party fields
 	 */
 	protected function _parseDataThirdparty($cardData, $mode) {
 
 		debug_log('_parseDataThirdparty('.strlen((string) $cardData).' bytes)');
 
-		$rdata = array(
-			'name_alias' => '', 'phone' => '', 'phone_mobile' => '', 'fax' => '',
-			'email' => '', 'url' => '', 'address' => '', 'town' => '', 'zip' => '',
-			'fk_pays' => 0, 'socialnetworks' => '', 'note_public' => '',
-		);
-
-		$vCard = $this->_readVCard($cardData);
-		$rdata['_category_labels'] = $this->_extractCategoryLabels($vCard);
-
-		// debug_log("_parseData__converted( ".$vCard->PHOTO." )");
-
-		$rdata['_uid'] = isset($vCard->UID) ? trim((string) $vCard->UID) : '';
-		$this->_validateCardUid($rdata['_uid']);
-
-		if($mode=='C')
-			$rdata['status']=1;
-
-		if(isset($vCard->FN) && !empty((string)$vCard->FN))
-			$rdata['nom'] = (string)$vCard->FN;
-		else
-		{
-			$rdata['nom']='';
-			$names = isset($vCard->N) ? $vCard->N->getParts() : array();
-			if(!empty($names[0]))
-				$rdata['nom'].= (string)$names[0];
-			if(!empty($names[1]))
-				$rdata['nom'] = trim($rdata['nom']." ".(string)$names[1]);
-			if(!empty($names[2]))
-				$rdata['nom'] = trim($rdata['nom']." ".(string)$names[2]);
-			if(!empty($names[3]))
-				$rdata['nom'] = trim((string)$names[3]." ".$rdata['nom']);
-			if(empty($rdata['nom']))
-				$rdata['nom'] = "New ".date('Y-m-d H:i:s');
+		$data = array('name_alias' => '', 'phone' => '', 'phone_mobile' => '', 'fax' => '', 'email' => '', 'url' => '',
+			'address' => '', 'town' => '', 'zip' => '', 'fk_pays' => 0, 'socialnetworks' => '', 'note_public' => '');
+		$card = $this->_readVCard($cardData);
+		$data += $this->_parseCardIdentity($card, false);
+		if ($mode === 'C') $data['status'] = 1;
+		if (isset($card->FN) && !empty((string) $card->FN)) {
+			$data['nom'] = (string) $card->FN;
+		} else {
+			$names = isset($card->N) ? $card->N->getParts() : array();
+			$data['nom'] = !empty($names[0]) ? (string) $names[0] : '';
+			foreach (array(1, 2) as $index) if (!empty($names[$index])) $data['nom'] = trim($data['nom'].' '.(string) $names[$index]);
+			if (!empty($names[3])) $data['nom'] = trim((string) $names[3].' '.$data['nom']);
+			if (empty($data['nom'])) $data['nom'] = 'New '.date('Y-m-d H:i:s');
 		}
-
-		if(isset($vCard->{'NICKNAME'}))
-			$rdata['name_alias'] = (string)$vCard->{'NICKNAME'};
-
-		if(isset($vCard->TEL))
-		{
-			foreach($vCard->TEL as $tel)
-			{
-				$teltype = $this->_getPropertyTypes($tel);
-
-				if(isset($teltype['WORK']) && (isset($teltype['VOICE']) || count($teltype)==1))
-					$rdata['phone'] = (string)$tel;
-				if(isset($teltype['CELL']))
-					$rdata['phone_mobile'] = (string)$tel;
-
-				if(isset($teltype['FAX']))
-					$rdata['fax'] = (string)$tel;
-				elseif (!$teltype && $rdata['phone'] === '')
-					$rdata['phone'] = (string) $tel;
-			}
-		}
-
-		if(isset($vCard->EMAIL))
-		{
-			foreach($vCard->EMAIL as $email)
-			{
-				if($rdata['email'] === '')
-					$rdata['email'] = (string)$email;
-				if($this->_isPreferredProperty($email))
-					$rdata['email'] = (string)$email;
-			}
-		}
-
-		if(isset($vCard->URL))
-			$rdata['url'] = (string)$vCard->URL;
-
-		if(isset($vCard->ADR))
-		{
-			foreach($vCard->ADR as $adr)
-			{
-				$adrtype = $this->_getPropertyTypes($adr);
-				$adrparts = $adr->getParts();
-				// debug_log("adrparts:\n".print_r($adrtype, true).print_r($adrparts, true));
-				if(isset($adrtype['WORK']) || $rdata['address'] === '')
-				{
-					$rdata['address'] = '';
-					$rdata['town'] = '';
-					$rdata['zip'] = '';
-					$rdata['_country_label'] = '';
-					if(isset($adrparts[2]) && !empty($adrparts[2]))
-						$rdata['address'].= str_replace(' | ',"\n",trim($adrparts[2]))."\n";
-					if(isset($adrparts[0]) && !empty($adrparts[0]))
-						$rdata['address'].= $adrparts[0]."\n";
-					if(isset($adrparts[1]) && !empty($adrparts[1]))
-						$rdata['address'].= str_replace(' | ',"\n",trim($adrparts[1]))."\n";
-					$rdata['address'] = trim($rdata['address']);
-					if(isset($adrparts[3]))
-						$rdata['town'] = $adrparts[3];
-					if(isset($adrparts[5]))
-						$rdata['zip'] = $adrparts[5];
-					if(isset($adrparts[6]))
-						$rdata['_country_label'] = $adrparts[6];
+		if (isset($card->NICKNAME)) $data['name_alias'] = (string) $card->NICKNAME;
+		$this->_parseCardCommunications($card, $data, 'th');
+		if (isset($card->NOTE)) {
+			$notes = array();
+			foreach (explode("\n", (string) $card->NOTE) as $line) {
+				if (mb_strpos($line, '💼', 0, 'UTF-8') !== 0 && mb_strpos($line, '??', 0, 'UTF-8') !== 0
+					&& mb_strpos($line, '*DOLIBARR-', 0, 'UTF-8') === false) {
+					$notes[] = preg_replace('/[\x{10000}-\x{10FFFF}]/u', "\xEF\xBF\xBD", $line);
 				}
 			}
+			$data['note_public'] = trim(implode("\n", $notes));
 		}
+		$this->_parseCardCountry($data, 'fk_pays');
+		debug_log('parsed third-party UID '.$data['_uid']);
+		return $data;
+	}
 
-		$this->_storeSocialNetworks($rdata, $this->_extractSocialNetworks($vCard));
-
-
-		if(isset($vCard->NOTE))
-		{
-			$tmp 	= (string)$vCard->NOTE;
-			$arrNote = array();
-			$arrTmp = explode("\n", $tmp);
-			foreach($arrTmp as $line)
-			{
-				if (mb_strpos($line, '💼', 0, 'UTF-8')!==0
-					&& mb_strpos($line, '??', 0, 'UTF-8')!==0				// 💼 could be converted in ?? if utf8 char is truncated on 2 VCal lines
-					&& mb_strpos($line, '*DOLIBARR-', 0, 'UTF-8')===false)
-				{
-					$noteline = preg_replace('/[\x{10000}-\x{10FFFF}]/u', "\xEF\xBF\xBD",$line); // remove utf8mb4 chars
-					$arrNote[] = $noteline;
-				}
-			}
-			$rdata['note_public'] = trim(implode("\n", $arrNote));
-		}
-
-		if(isset($rdata['_country_label']) && $rdata['_country_label']!='')
-		{
-			$rdata['fk_pays'] = $this->_getCountryIdFromLabel($rdata['_country_label']);
-		}
-
-		debug_log('parsed third-party UID '.$rdata['_uid']);
-
-		return $rdata;
+	/**
+	 * Fetch an existing card and its authorized native object before a mutation.
+	 * Contact::fetch additionally receives the authenticated native user.
+	 * @param int $addressbookId Native address book
+	 * @param string $cardUri Stable vCard URI
+	 * @param string $type Contact, company or member code
+	 * @return array Existing representation and native object
+	 */
+	protected function loadCardForMutation($addressbookId, $cardUri, $type)
+	{
+		$definitions = array('ct' => array('/contact/class/contact.class.php', 'Contact', 'Contact'),
+			'th' => array('/societe/class/societe.class.php', 'Societe', 'Third party'),
+			'mb' => array('/adherents/class/adherent.class.php', 'Adherent', 'Member'));
+		list($file, $class, $label) = $definitions[$type];
+		$existing = $this->getCard($addressbookId, $cardUri);
+		if ($existing === false) throw new \Sabre\DAV\Exception\NotFound($label.' not found');
+		require_once DOL_DOCUMENT_ROOT.$file;
+		$object = new $class($this->db);
+		$id = (int) $existing['id'];
+		$loaded = $type === 'ct' ? $object->fetch($id, $this->user) : $object->fetch($id);
+		if ($loaded <= 0) throw new \Sabre\DAV\Exception\NotFound($label.' not found');
+		$this->_assertCardObjectAccess($type, $object);
+		return array($existing, $object);
 	}
 
 	/**
@@ -2672,18 +2382,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
 		{
 			$rdata = $this->_parseDataContact($cardData, 'U');
-			$existing = $this->getCard($addressbookId, $cardUri);
-			if ($existing === false) {
-				throw new \Sabre\DAV\Exception\NotFound('Contact not found');
-			}
+				list($existing, $contact) = $this->loadCardForMutation($addressbookId, $cardUri, 'ct');
 				$contactid = (int) $existing['id'];
-
-				require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
-				$contact = new \Contact($this->db);
-				if ($contact->fetch($contactid, $this->user) <= 0) {
-					throw new \Sabre\DAV\Exception\NotFound('Contact not found');
-				}
-				$this->_assertCardObjectAccess('ct', $contact);
 				if ($this->_assertCardBusinessUpdate('ct', $contact, $existing['carddata'], $cardData)) {
 					if (!$this->db->commit()) {
 						throw new \Sabre\DAV\Exception('Unable to commit the unchanged CardDAV contact');
@@ -2723,18 +2423,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'write'))
 		{
 			$rdata = $this->_parseDataThirdparty($cardData, 'U');
-			$existing = $this->getCard($addressbookId, $cardUri);
-			if ($existing === false) {
-				throw new \Sabre\DAV\Exception\NotFound('Third party not found');
-			}
+				list($existing, $thirdParty) = $this->loadCardForMutation($addressbookId, $cardUri, 'th');
 				$socid = (int) $existing['id'];
-
-				require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
-				$thirdParty = new \Societe($this->db);
-				if ($thirdParty->fetch($socid) <= 0) {
-					throw new \Sabre\DAV\Exception\NotFound('Third party not found');
-				}
-				$this->_assertCardObjectAccess('th', $thirdParty);
 				$this->_assertCardBusinessUpdate('th', $thirdParty, $existing['carddata'], $cardData);
 				$this->_assertCardUidAvailable('th', $rdata['_uid'], $socid);
 				$rdata['socialnetworks'] = json_encode(
@@ -2760,18 +2450,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($gdim !== false) {
 					$rdata['photo'] = 'cdavimage.jpg';
 				}
-			$existing = $this->getCard($addressbookId, $cardUri);
-			if ($existing === false) {
-				throw new \Sabre\DAV\Exception\NotFound('Member not found');
-			}
+				list($existing, $member) = $this->loadCardForMutation($addressbookId, $cardUri, 'mb');
 				$adhid = (int) $existing['id'];
-
-				require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent.class.php';
-				$member = new \Adherent($this->db);
-				if ($member->fetch($adhid) <= 0) {
-					throw new \Sabre\DAV\Exception\NotFound('Member not found');
-				}
-				$this->_assertCardObjectAccess('mb', $member);
 				$this->_assertCardBusinessUpdate('mb', $member, $existing['carddata'], $cardData);
 				if ($gdim === false && !empty($member->photo)) {
 					$obsoletePhoto = array($this->_photoFilePath('member', $adhid, $member->photo), $member);
@@ -2811,105 +2491,50 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
-	 * Deletes a card
-	 *
-	 * @param mixed $addressBookId
-	 * @param string $cardUri
-	 * @return bool
+	 * Deactivate a native object, preserving its business relations and physical record.
+	 * @param int $addressbookId Native address book
+	 * @param string $cardUri Stable vCard URI
+	 * @return bool Whether the native transaction committed
 	 */
-	function deleteCard($addressbookId, $cardUri) {
-
+	public function deleteCard($addressbookId, $cardUri)
+	{
 		debug_log("deleteContactObject( $addressbookId , $cardUri )");
 		$this->_validateCardUri($cardUri);
-		// Security policy: DAV deletion only changes the native Dolibarr status.
-		// Physical deletion of business records is deliberately unavailable here.
-		if (!$this->db->begin()) {
-			throw new \Sabre\DAV\Exception('Unable to start the CardDAV delete transaction');
-		}
-			try {
+		if (!$this->db->begin()) throw new \Sabre\DAV\Exception('Unable to start the CardDAV delete transaction');
+		try {
 			$this->_lockAddressBookOwner($addressbookId);
 			$this->_lockCardBusinessObject($addressbookId, $cardUri);
 			$this->_assertCardVersion($addressbookId, $cardUri);
-
-			if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'delete'))
-		{
-			$existing = $this->getCard($addressbookId, $cardUri);
-			if ($existing === false) {
-				throw new \Sabre\DAV\Exception\NotFound('Contact not found');
+			if ((int) $addressbookId < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'delete')) {
+				$type = 'ct';
+			} elseif (CDAV_THIRD_SYNC > 0 && (int) $addressbookId >= CDAV_ADDRESSBOOK_ID_SHIFT
+				&& (int) $addressbookId < 2 * CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'delete')) {
+				$type = 'th';
+			} elseif (CDAV_MEMBER_SYNC > 0 && (int) $addressbookId >= 2 * CDAV_ADDRESSBOOK_ID_SHIFT
+				&& (int) $addressbookId < 3 * CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('adherent', 'delete')) {
+				$type = 'mb';
+			} else {
+				throw new Forbidden('Not allowed to delete cards from this address book');
 			}
-			$contactid = (int) $existing['id'];
-
-			require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
-			$contact = new \Contact($this->db);
-				if ($contact->fetch($contactid, $this->user) <= 0) {
-					throw new \Sabre\DAV\Exception\NotFound('Contact not found');
-				}
-				$this->_assertCardObjectAccess('ct', $contact);
-				if (!empty($contact->user_id)) {
-					throw new Forbidden('Contacts linked to a Dolibarr user must be deactivated in Dolibarr');
-				}
-				if ($contact->setstatus(0) < 0) {
-					throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact: '.$contact->error);
-				}
-			if (!$this->db->commit()) {
-				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV contact deletion');
+			list($existing, $object) = $this->loadCardForMutation($addressbookId, $cardUri, $type);
+			if ($type === 'ct') {
+				$contact = $object;
+				if (!empty($contact->user_id)) throw new Forbidden('Contacts linked to a Dolibarr user must be deactivated in Dolibarr');
+				if ($contact->setstatus(0) < 0) throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact: '.$contact->error);
+			} elseif ($type === 'th') {
+				$thirdParty = $object;
+				$thirdParty->status = 0;
+				if ($thirdParty->update((int) $existing['id'], $this->user) < 0) throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr third party: '.$thirdParty->error);
+			} else {
+				$member = $object;
+				if ($member->resiliate($this->user) < 0) throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr member: '.$member->error);
 			}
+			$labels = array('ct' => 'contact', 'th' => 'third-party', 'mb' => 'member');
+			if (!$this->db->commit()) throw new \Sabre\DAV\Exception('Unable to commit the CardDAV '.$labels[$type].' deletion');
 			return true;
-		}
-
-		if (CDAV_THIRD_SYNC > 0 && intval($addressbookId) >= CDAV_ADDRESSBOOK_ID_SHIFT && intval($addressbookId) < (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('societe', 'delete'))
-		{
-
-			$existing = $this->getCard($addressbookId, $cardUri);
-			if ($existing === false) {
-				throw new \Sabre\DAV\Exception\NotFound('Third party not found');
-			}
-			$socid = (int) $existing['id'];
-
-			require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
-			$thirdParty = new \Societe($this->db);
-			if ($thirdParty->fetch($socid) <= 0) {
-				throw new \Sabre\DAV\Exception\NotFound('Third party not found');
-			}
-				$this->_assertCardObjectAccess('th', $thirdParty);
-			$thirdParty->status = 0;
-			if ($thirdParty->update($socid, $this->user) < 0) {
-				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr third party: '.$thirdParty->error);
-			}
-			if (!$this->db->commit()) {
-				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV third-party deletion');
-			}
-			return true;
-		}
-
-		if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'delete'))
-		{
-
-			$existing = $this->getCard($addressbookId, $cardUri);
-			if ($existing === false) {
-				throw new \Sabre\DAV\Exception\NotFound('Member not found');
-			}
-			$adhid = (int) $existing['id'];
-
-			require_once DOL_DOCUMENT_ROOT.'/adherents/class/adherent.class.php';
-			$member = new \Adherent($this->db);
-			if ($member->fetch($adhid) <= 0) {
-				throw new \Sabre\DAV\Exception\NotFound('Member not found');
-			}
-				$this->_assertCardObjectAccess('mb', $member);
-			if ($member->resiliate($this->user) < 0) {
-				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr member: '.$member->error);
-			}
-			if (!$this->db->commit()) {
-				throw new \Sabre\DAV\Exception('Unable to commit the CardDAV member deletion');
-			}
-			return true;
-		}
-
-		throw new Forbidden('Not allowed to delete cards from this address book');
-		} catch (\Throwable $e) {
+		} catch (\Throwable $error) {
 			$this->db->rollback();
-			throw $e;
+			throw $error;
 		}
 	}
 

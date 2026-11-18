@@ -2,6 +2,8 @@
 
 namespace Dolibarr\CDav;
 
+require_once __DIR__.'/CDavMultiGetReport.php';
+
 /** CalDAV compatibility fixes layered on Dolibarr's bundled Sabre plugin. */
 class CalDAVPlugin extends \Sabre\CalDAV\Plugin
 {
@@ -82,20 +84,9 @@ class CalDAVPlugin extends \Sabre\CalDAV\Plugin
 	{
 		$needsJson = 'application/calendar+json' === $report->contentType;
 		$timeZones = array();
-		$paths = array_map(array($this->server, 'calculateUri'), $report->hrefs);
-		$propertiesByPath = $this->server->getPropertiesForMultiplePaths($paths, $report->properties);
 		$propertyList = array();
 
-		foreach ($paths as $path) {
-			if (!isset($propertiesByPath[$path])) {
-				$missingProperties = $report->properties ?: array('{DAV:}getetag');
-				$propertyList[] = array(
-					'href' => $path,
-					404 => array_fill_keys($missingProperties, null),
-				);
-				continue;
-			}
-			$properties = $propertiesByPath[$path];
+		foreach (MultiGetReport::properties($this->server, $report) as $path => $properties) {
 			if (($needsJson || $report->expand) && isset($properties[200]['{'.self::NS_CALDAV.'}calendar-data'])) {
 				$vObject = \Sabre\VObject\Reader::read($properties[200]['{'.self::NS_CALDAV.'}calendar-data']);
 				if ($report->expand) {
@@ -121,10 +112,6 @@ class CalDAVPlugin extends \Sabre\CalDAV\Plugin
 			$propertyList[] = $properties;
 		}
 
-		$prefer = $this->server->getHTTPPrefer();
-		$this->server->httpResponse->setStatus(207);
-		$this->server->httpResponse->setHeader('Content-Type', 'application/xml; charset=utf-8');
-		$this->server->httpResponse->setHeader('Vary', 'Brief,Prefer');
-		$this->server->httpResponse->setBody($this->server->generateMultiStatus($propertyList, 'minimal' === $prefer['return']));
+		MultiGetReport::respond($this->server, $propertyList);
 	}
 }

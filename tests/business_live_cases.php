@@ -545,7 +545,16 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 			'Refusing a second member left the original membership detached or duplicated');
 		liveAssert((array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'societe WHERE rowid = '.$companyId) === $company,
 			'A rejected membership creation altered the company');
-		liveOk('BL17-BL18 member creation and updates preserve native company data and cannot steal an existing membership relationship');
+		liveHttpStatus($http('DELETE', $memberPath), array(200, 204), 'BL18 member retirement through native CardDAV lifecycle');
+		$retiredMember = liveRow($db, 'SELECT fk_soc, fk_adherent_type, statut FROM '.MAIN_DB_PREFIX.'adherent WHERE rowid = '.$memberId);
+		liveAssert($retiredMember !== null && (int) $retiredMember->statut === Adherent::STATUS_RESILIATED
+			&& (int) $retiredMember->fk_soc === (int) $memberState->fk_soc
+			&& (int) $retiredMember->fk_adherent_type === (int) $memberState->fk_adherent_type,
+			'CardDAV DELETE physically removed a member or changed its native business links');
+		liveHttpStatus($http('GET', $memberPath), array(404), 'BL18 retired member hidden from CardDAV');
+		liveAssert((array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'societe WHERE rowid = '.$companyId) === $company,
+			'Retiring a member altered its linked native company');
+		liveOk('BL17-BL18 member creation, updates and retirement preserve native company data and membership relationships');
 
 		$limitedContactPath = liveDavPath(array('addressbooks', $context['limited_login'], 'default'), true)
 			.rawurlencode($linkedContactId.'-ct-'.$key);

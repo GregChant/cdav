@@ -26,7 +26,7 @@ fi
 
 cdav_cpd_options=(--config .jscpd.json --workers 2 --no-colors --no-tips --fail-on-empty)
 case "$cdav_cpd_mode" in
-    check) cdav_cpd_options+=(--baseline .jscpd-baseline.json --fail-on-new-clones 0) ;;
+    check) cdav_cpd_options+=(--baseline .jscpd-baseline.json --fail-on-new-clones 0 --threshold 0) ;;
     report) ;;
     tests) cdav_cpd_options=(--config tests/jscpd-tests.json --workers 2 --no-colors --no-tips --fail-on-empty) ;;
     update-baseline) cdav_cpd_options+=(--baseline .jscpd-baseline.json --update-baseline) ;;
