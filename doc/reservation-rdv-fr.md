@@ -96,7 +96,12 @@ les mêmes limites, vérifiées à nouveau au moment de confirmer.
 Le champ **Tiers lié** est facultatif. Après l'avoir choisi, utiliser
 **Afficher les projets du tiers**, puis choisir éventuellement un projet.
 Cet affichage conserve les réglages saisis sans enregistrer le profil.
-Un projet doit appartenir au tiers sélectionné et à l'entité courante.
+Un projet doit être ouvert, appartenir au tiers sélectionné et à l'entité
+courante. Le sélecteur exclut les projets brouillons et fermés ; la même règle
+est vérifiée côté serveur à l'enregistrement et à la réservation.
+Si un projet lié à un ancien profil est fermé, son rattachement reste conservé.
+Il faut choisir un autre projet ouvert ou confirmer explicitement le retrait
+du lien. Les rendez-vous déjà créés restent dans l'Agenda.
 Les modules natifs Tiers et Projets, ainsi que les droits de lecture du
 collaborateur sur les objets liés, sont nécessaires pour ces rattachements.
 

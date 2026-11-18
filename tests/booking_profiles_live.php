@@ -331,7 +331,13 @@ function profilesLiveBusiness(string $label, int $targetEntity, int $thirdpartyI
 			$object->public = $public ? 1 : 0;
 			$object->status = 1;
 			$id = $object->create($admin);
-			if ($id > 0) $projectIds[$id] = $targetEntity;
+			if ($id > 0) {
+				$projectIds[$id] = $targetEntity;
+				profilesLiveCheck($object->fetch($id) > 0, 'Cannot reload native project fixture before opening');
+				if ((int) $object->status !== Project::STATUS_VALIDATED) {
+					profilesLiveCheck($object->setValid($admin) > 0, 'Cannot open native project fixture for booking');
+				}
+			}
 		} else {
 			$object = new Societe($db);
 			$object->name = $label;

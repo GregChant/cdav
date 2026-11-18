@@ -31,6 +31,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/class/html.form.class.php';
 require_once DOL_DOCUMENT_ROOT.'/core/class/html.formprojet.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
 require_once dirname(__DIR__).'/class/CDavBookingService.php';
 
 $langs->loadLangs(array('admin', 'agenda', 'companies', 'projects', 'cdav@cdav'));
@@ -75,6 +76,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 			$bookingPostedNotice = array('value' => GETPOST('notice', 'none'),
 				'unit' => GETPOSTISSET('notice_unit') ? GETPOST('notice_unit', 'none') : 'minutes');
 			$bookingPostedMetadata = array();
+			$bookingPostedMetadata['clear_project_link'] = GETPOSTINT('clear_project_link') === 1;
 			if (array_key_exists('profile_label', $_POST)) $bookingPostedMetadata['label'] = $_POST['profile_label'];
 			foreach (array('thirdparty_id', 'project_id') as $bookingMetadataField) {
 				if (!GETPOSTISSET($bookingMetadataField)) continue;
@@ -131,7 +133,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 		}
 	} catch (Throwable $bookingException) {
 		dol_syslog('CDav booking administration: '.get_class($bookingException), LOG_ERR);
-		setEventMessages($langs->trans('CDavBookingSaveError'), null, 'errors');
+		$bookingSaveErrorKey = $bookingException instanceof \Dolibarr\CDav\BookingException
+			&& in_array($bookingException->getMessage(), array('CDavBookingProjectNotOpen', 'CDavBookingProjectClearRequired'), true)
+			? $bookingException->getMessage() : 'CDavBookingSaveError';
+		setEventMessages($langs->trans($bookingSaveErrorKey), null, 'errors');
 	}
 }
 
@@ -180,6 +185,13 @@ if ($bookingThirdpartyId > 0 && ($bookingThirdparty->fetch($bookingThirdpartyId)
 }
 $bookingProjectId = $bookingThirdpartyId > 0 ? (int) $bookingMetadata['project_id'] : 0;
 if ($action === 'refresh_profile') $bookingProjectId = 0;
+$bookingCurrentProjectUnavailable = false;
+if (!empty($bookingProfile['project_id'])) {
+	$bookingCurrentProject = new Project($db);
+	$bookingCurrentProjectUnavailable = $bookingCurrentProject->fetch((int) $bookingProfile['project_id']) <= 0
+		|| (int) $bookingCurrentProject->entity !== (int) $conf->entity || (int) $bookingCurrentProject->status !== Project::STATUS_VALIDATED;
+	if ($bookingCurrentProjectUnavailable && $bookingProjectId === (int) $bookingProfile['project_id']) $bookingProjectId = 0;
+}
 
 try {
 	if (!\Dolibarr\CDav\BookingAvailability::hasWeeklySlot($bookingConfig)) {
@@ -247,10 +259,18 @@ print '</td></tr>';
 print '<tr><td><label for="project_id">'.dol_escape_htmltag($langs->trans('CDavBookingProject')).'</label></td><td>';
 if (isModEnabled('project') && $bookingThirdpartyId > 0) {
 	$bookingFormProject = new FormProjets($db);
-	print $bookingFormProject->select_projects($bookingThirdpartyId, (string) $bookingProjectId, 'project_id', 0, 0, 1, 0, 0, 0, 0, '', 1, 0,
-		'minwidth200 maxwidth400', 'project_id', 'p.fk_soc = '.$bookingThirdpartyId);
+	// The native AJAX wrapper does not forward arbitrary filters. This native
+	// list keeps Select2 while applying exact company and validated-status rules.
+	print $bookingFormProject->select_projects_list($bookingThirdpartyId, $bookingProjectId, 'project_id', 0, 0, 1, 1, 0, 0, 0, '', 1, 0,
+		'project_id', 'minwidth200 maxwidth400', 'p.fk_soc = '.$bookingThirdpartyId.' AND p.fk_statut = '.Project::STATUS_VALIDATED);
+	print '<br><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectOpenOnly')).'</span>';
 } else {
 	print '<input type="hidden" name="project_id" value="0"><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectHelp')).'</span>';
+}
+if ($bookingCurrentProjectUnavailable) {
+	print '<div id="booking-project-unavailable" class="warning" role="status">'.dol_escape_htmltag($langs->trans('CDavBookingProjectUnavailable')).'</div>';
+	print '<label for="clear_project_link"><input type="checkbox" id="clear_project_link" name="clear_project_link" value="1"'
+		.(!empty($bookingPostedMetadata['clear_project_link']) ? ' checked' : '').'> '.dol_escape_htmltag($langs->trans('CDavBookingClearProjectLink')).'</label>';
 }
 print '</td></tr>';
 print '<tr><td colspan="2" class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingLinksPrivate')).'</td></tr>';

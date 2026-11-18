@@ -9,11 +9,12 @@ rg --files -g '*.php' -0 | while IFS= read -r -d '' cdav_qa_file; do
     "$cdav_qa_php" -l "$cdav_qa_file" > /dev/null
 done
 printf '%s\n' 'PHP lint passed.'
-for cdav_qa_suite in run freebusy contact_photos attachments business_policy contact_business calendar_policy calendar_description booking booking_calendar booking_multi booking_identity booking_details booking_notification booking_validity booking_ui; do
+for cdav_qa_suite in run freebusy contact_photos attachments business_policy contact_business calendar_policy calendar_description booking booking_projects booking_calendar booking_multi booking_identity booking_details booking_notification booking_validity booking_ui; do
     "$cdav_qa_php" "tests/$cdav_qa_suite.php"
 done
 node --check js/booking.js
 node --check js/booking_admin.js
+node --check tests/booking_browser.cjs
 node tests/booking_selection_js.cjs
 if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
     phpcs --standard="$CDAV_PHPCS_STANDARD" \
@@ -22,7 +23,7 @@ if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
         class/CDavBookingSchema.php class/CDavBookingNotification.php public/booking.php lib/cdav_transport.lib.php \
         class/CDavBusinessPolicy.php class/CDavCalendarWritePolicy.php class/CDavCalDAVPlugin.php class/CDavSchedulingPlugin.php \
         admin/booking.php tpl/booking.tpl.php \
-        tests/bootstrap.php tests/booking.php tests/booking_calendar.php tests/booking_multi.php \
+        tests/bootstrap.php tests/booking.php tests/booking_projects.php tests/booking_calendar.php tests/booking_multi.php \
         tests/booking_identity.php tests/booking_details.php tests/booking_notification.php tests/booking_validity.php tests/booking_ui.php \
         tests/business_policy.php tests/contact_business.php tests/calendar_policy.php tests/calendar_description.php \
         tests/business_live_cases.php tests/business_delete_rollback_cases.php tests/business_project_acl_cases.php \

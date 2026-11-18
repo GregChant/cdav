@@ -123,6 +123,9 @@ remain protected. See the [French business protection guide](doc/protection-meti
 Calendar descriptions also group appointment notes, client/contact details and
 project information into readable plain-text sections, with a verified booking
 reference in the footer. Native notes remain authoritative on a round trip.
+Booking profiles offer only open projects from the chosen third party. Native
+status checks also protect saves and public reservations; removing an older
+closed-project link requires explicit confirmation.
 
 Version 6.2.1 lets administrators enter minimum notice in minutes or days, with
 automatic conversion when switching units. One day is 24 hours; the booking

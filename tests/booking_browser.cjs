@@ -1,6 +1,7 @@
 /** Browser checks for a disposable fixture created by booking_browser.php. */
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 if (process.env.CDAV_LIVE_TEST !== '1' || !process.env.CDAV_BOOKING_BROWSER_FIXTURE) {
   throw new Error('Run tests/booking_browser.php against an explicitly isolated test instance.');
@@ -17,6 +18,15 @@ const secrets = new Set([fixture.key, fixture.password]);
 
 function check(value, message) {
   if (!value) throw new Error(message);
+}
+
+function nativeFixture(action, profileId = 0, value = '') {
+  const response = execFileSync(fixture.php_bin, [fixture.fixture_runner], {
+    encoding: 'utf8',
+    env: {...process.env, CDAV_BOOKING_BROWSER_ACTION: action,
+      CDAV_BOOKING_BROWSER_PROFILE_ID: String(profileId), CDAV_BOOKING_BROWSER_ACTION_VALUE: String(value)},
+  });
+  return JSON.parse(response);
 }
 
 function safe(text) {
@@ -427,6 +437,120 @@ async function checkBranding(page) {
       check(!text.includes(fixture.private_thirdparty_name) && !text.includes(fixture.private_project_name)
         && await namedPage.locator('[name=thirdparty_id], [name=project_id], [name=profile_id]').count() === 0,
         'Public calendar names do not expose private business-context names or selectors');
+    }
+
+    if (fixture.project_id) {
+      const projectForm = () => admin.locator('form:has(input[name=action][value=save_profile])');
+      const projectAdminUrl = fixture.admin_url + '?owner_id=' + fixture.owner_id + '&profile_id=' + namedFirst.id;
+      const openIds = [fixture.project_id, fixture.replacement_project_id].sort((left, right) => left - right);
+      for (const searchMode of [0, 1]) {
+        nativeFixture('project_selector', 0, searchMode);
+        await admin.goto(projectAdminUrl);
+        const offered = await projectForm().locator('select[name=project_id] option').evaluateAll(options =>
+          options.map(option => Number(option.value)).filter(value => value > 0).sort((left, right) => left - right));
+        check(JSON.stringify(offered) === JSON.stringify(openIds),
+          'The native project selector offers only open projects of the selected company, including global search mode ' + searchMode);
+        const select2 = admin.locator('#select2-project_id-container');
+        check(await select2.isVisible(), 'The filtered native project list retains its Select2 widget');
+        await select2.click();
+        const dropdown = admin.locator('.select2-dropdown');
+        await dropdown.waitFor({state: 'visible'});
+        const labels = await dropdown.textContent();
+        check(labels.includes(fixture.project_names.open) && labels.includes(fixture.project_names.replacement)
+          && !labels.includes(fixture.project_names.draft) && !labels.includes(fixture.project_names.closed)
+          && !labels.includes(fixture.project_names.other), 'Select2 results preserve the native open-project and company filter');
+        await admin.keyboard.press('Escape');
+      }
+      nativeFixture('project_selector', 0, 0);
+      results.push({case: 'Only open company projects in native HTML and Select2', globalSearchModes: [0, 1],
+        excludedDraftClosedAndOtherCompany: true});
+
+      for (const forgedId of [fixture.draft_project_id, fixture.closed_project_id, fixture.other_project_id]) {
+        await admin.goto(projectAdminUrl);
+        const before = nativeFixture('profile_snapshot', namedFirst.id);
+        await projectForm().locator('input[name=duration]').fill('83');
+        await projectForm().locator('select[name=project_id]').evaluate((select, value) => {
+          select.appendChild(new Option('Forged inaccessible project', String(value), true, true));
+          select.value = String(value);
+        }, forgedId);
+        await follow(admin, () => projectForm().locator('button.button-save').click());
+        check(await admin.locator('.error').first().isVisible(), 'A forged nonopen or unrelated project produces a native administration error');
+        check(nativeFixture('profile_snapshot', namedFirst.id).fingerprint === before.fingerprint,
+          'Rejecting a forged project preserves the entire previously saved profile');
+      }
+      results.push({case: 'Forged draft closed or unrelated project save rejected', nativeErrors: true, profileUnchanged: true});
+
+      const profileUrl = new URL(namedFirst.link);
+      profileUrl.searchParams.set('date', fixture.validity_date);
+      profileUrl.searchParams.set('format', 'json');
+      const originalForm = await desktop.request.get(profileUrl.href);
+      check(originalForm.status() === 200, 'An open linked project provides a public booking ticket');
+      const originalData = await originalForm.json();
+      secrets.add(originalData.token); secrets.add(originalData.request);
+      check(originalData.slots.length > 0, 'The linked open-project fixture has a real available period');
+      const beforeClose = nativeFixture('profile_snapshot', namedFirst.id);
+      nativeFixture('close_project');
+      check((await desktop.request.get(profileUrl.href)).status() === 404, 'Closing the native project immediately disables its linked public calendar');
+      const stale = await desktop.request.post(fixture.booking_url, {form: {
+        key: new URL(namedFirst.link).searchParams.get('key'), token: originalData.token, request: originalData.request,
+        date: fixture.validity_date, start: String(originalData.slots[0].start),
+        name: 'Closed project rejected fixture', email: 'closed-project@example.test', phone: '', website: '',
+        subject: 'A closed project cannot create this appointment', address: fixture.client_address, format: 'json',
+      }});
+      check(stale.status() === 404, 'A previously issued public form cannot reserve a project that has since closed');
+      const afterClosedPost = nativeFixture('profile_snapshot', namedFirst.id);
+      check(afterClosedPost.fingerprint === beforeClose.fingerprint && afterClosedPost.events === beforeClose.events
+        && afterClosedPost.receipts === beforeClose.receipts, 'Closed-project rejection creates no event or receipt and does not rewrite the profile');
+      nativeFixture('open_project');
+      check((await desktop.request.get(profileUrl.href)).status() === 200
+        && nativeFixture('profile_snapshot', namedFirst.id).fingerprint === beforeClose.fingerprint,
+        'Reopening the native project restores the existing public key without resaving or detaching the profile');
+      results.push({case: 'Native project closure blocks a stale public reservation', closedGet: 404, closedPost: 404,
+        noEventOrReceipt: true, reopenRestoresExistingKey: true});
+
+      nativeFixture('close_project');
+      await admin.goto(projectAdminUrl);
+      check(await admin.locator('#booking-project-unavailable[role=status]').isVisible()
+        && await projectForm().locator('#clear_project_link').count() === 1,
+        'An existing nonopen project is explained outside the selectable project list');
+      check(await projectForm().locator('select[name=project_id]').inputValue() === '0'
+        && await projectForm().locator('select[name=project_id] option[value="' + fixture.project_id + '"]').count() === 0,
+        'A closed legacy project is not silently reintroduced into the open-project dropdown');
+      const beforeSilentSave = nativeFixture('profile_snapshot', namedFirst.id);
+      await follow(admin, () => projectForm().locator('button.button-save').click());
+      check(await admin.locator('.error').first().isVisible()
+        && nativeFixture('profile_snapshot', namedFirst.id).fingerprint === beforeSilentSave.fingerprint,
+        'Saving an empty filtered selector without explicit consent cannot silently detach its original project');
+      await admin.goto(projectAdminUrl);
+      await projectForm().locator('select[name=project_id]').selectOption(String(fixture.replacement_project_id));
+      await follow(admin, () => projectForm().locator('button.button-save').click());
+      check(nativeFixture('profile_snapshot', namedFirst.id).project_id === fixture.replacement_project_id
+        && await admin.locator('#booking-project-unavailable').count() === 0,
+        'Choosing another open project explicitly replaces a legacy closed-project link');
+      results.push({case: 'Closed legacy project warning and explicit replacement', outsideDropdown: true,
+        silentDetachRejected: true, openReplacementSaved: true});
+
+      nativeFixture('open_project');
+      await admin.goto(projectAdminUrl);
+      await projectForm().locator('select[name=project_id]').selectOption(String(fixture.project_id));
+      await follow(admin, () => projectForm().locator('button.button-save').click());
+      nativeFixture('close_project');
+      await admin.goto(projectAdminUrl);
+      await projectForm().locator('#clear_project_link').check();
+      await follow(admin, () => projectForm().locator('button.button-save').click());
+      const cleared = nativeFixture('profile_snapshot', namedFirst.id);
+      check(cleared.project_id === 0 && cleared.thirdparty_id === fixture.thirdparty_id,
+        'The explicit clear checkbox removes only the project while preserving the selected company');
+      check((await desktop.request.get(profileUrl.href)).status() === 200, 'An explicitly cleared profile can book against its company without a project');
+      nativeFixture('open_project');
+      await admin.goto(projectAdminUrl);
+      await projectForm().locator('select[name=project_id]').selectOption(String(fixture.project_id));
+      await follow(admin, () => projectForm().locator('button.button-save').click());
+      check(nativeFixture('profile_snapshot', namedFirst.id).project_id === fixture.project_id,
+        'The native project can be linked again after it reopens');
+      await capture(admin, 'booking-ui-open-project-selector.png');
+      results.push({case: 'Explicit project unlink preserves the company', explicitCheckbox: true,
+        companyRetained: true, genericProfileAvailable: true, reopenedProjectRelinked: true});
     }
     await checkNamedProfile(namedFirst);
     await checkNamedProfile(namedSecond);

@@ -165,15 +165,33 @@ class BookingService
 			if (!isModEnabled('project')) throw new BookingException('CDavBookingInvalid', 422);
 			require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
 			if ($lock) {
-				$row = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$projectId.' AND entity = '.$this->entity.' AND fk_soc = '.$thirdpartyId.' FOR UPDATE'));
-				if (!$row) throw new BookingException('CDavBookingInvalid', 422);
+				$row = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$projectId.' AND entity = '.$this->entity.' AND fk_soc = '.$thirdpartyId.' AND fk_statut = '.\Project::STATUS_VALIDATED.' FOR UPDATE'));
+				if (!$row) throw new BookingException('CDavBookingProjectNotOpen', 422);
 			}
 			$project = new \Project($this->db);
 			if ($project->fetch($projectId) <= 0 || (int) $project->entity !== $this->entity || (int) $project->socid !== $thirdpartyId
 				|| $project->restrictedProjectArea($owner, 'read') <= 0) {
 				throw new BookingException('CDavBookingInvalid', 422);
 			}
+			if ((int) $project->status !== \Project::STATUS_VALIDATED) throw new BookingException('CDavBookingProjectNotOpen', 422);
 		}
+	}
+
+	/**
+	 * An unavailable selected project disappears from native pickers, not from the profile.
+	 * @param int $existingProjectId Previously saved project
+	 * @param int $replacementProjectId Explicit new choice, or zero
+	 * @param bool $confirmed Whether the administrator explicitly confirms detachment
+	 * @return void
+	 */
+	private function assertProjectRemovalConfirmed(int $existingProjectId, int $replacementProjectId, bool $confirmed): void
+	{
+		if ($existingProjectId <= 0 || $replacementProjectId > 0 || $confirmed) return;
+		require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
+		// The native fetch API has no locking variant. Read the current status under
+		// the same transaction that will save the profile, before accepting its blank.
+		$row = $this->db->fetch_object($this->query('SELECT rowid, fk_statut FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$existingProjectId.' AND entity = '.$this->entity.' FOR UPDATE'));
+		if (!$row || (int) $row->fk_statut !== \Project::STATUS_VALIDATED) throw new BookingException('CDavBookingProjectClearRequired', 422);
 	}
 
 	/**
@@ -182,12 +200,13 @@ class BookingService
 	 * @param array $config Settings
 	 * @param bool $enabled Profile activation
 	 * @param int|null $profileId Null updates the first legacy profile, zero creates, positive targets one profile
-	 * @param array $metadata Optional public label and internal thirdparty_id/project_id
+	 * @param array $metadata Optional label, native links and explicit clear_project_link confirmation
 	 * @return array Profile
 	 */
 	public function saveProfile($ownerId, array $config, $enabled, $profileId = null, array $metadata = array())
 	{
 		$this->manager();
+		if (array_key_exists('clear_project_link', $metadata) && !is_bool($metadata['clear_project_link'])) throw new BookingException('CDavBookingInvalid', 422);
 		$nativeOwner = $this->owner($ownerId);
 		if ($profileId !== null && (!is_int($profileId) || $profileId < 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
 		$config = BookingAvailability::validateConfig($config);
@@ -212,6 +231,7 @@ class BookingService
 				if (!is_int($value) || $value < 0 || $value > 2147483647) throw new BookingException('CDavBookingInvalid', 422);
 				$links[$field] = $value;
 			}
+			$this->assertProjectRemovalConfirmed((int) ($existing['project_id'] ?? 0), $links['project_id'], $metadata['clear_project_link'] ?? false);
 			$this->validateBusinessLinks($links['thirdparty_id'], $links['project_id'], $nativeOwner, true);
 			if ($existing) {
 				$id = $existing['id'];

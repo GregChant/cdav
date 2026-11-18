@@ -30,6 +30,7 @@ define('NOCSRFCHECK', 1); // CLI fixtures only; browser requests use native CSRF
 $_SERVER['SERVER_NAME'] = (string) $parsed['host'];
 $_SERVER['HTTP_HOST'] = $parsed['host'].(isset($parsed['port']) ? ':'.$parsed['port'] : '');
 $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+$_SERVER['QUERY_STRING'] = '';
 chdir($root);
 require $root.'/main.inc.php';
 date_default_timezone_set('Europe/Zurich');
@@ -86,6 +87,70 @@ function bookingBrowserImage($path, $bytes)
 	}
 }
 
+// The browser may request narrow native fixture mutations through a child CLI
+// process. Nothing is installed as an HTTP endpoint or exposed to the product.
+$browserAction = (string) getenv('CDAV_BOOKING_BROWSER_ACTION');
+if ($browserAction !== '') {
+	try {
+		$fixtureFile = (string) getenv('CDAV_BOOKING_BROWSER_FIXTURE');
+		$resolvedFixture = realpath($fixtureFile);
+		if ($resolvedFixture !== $fixtureFile || !preg_match('#^'.preg_quote(realpath(sys_get_temp_dir()), '#').'/cdav-browser-[a-f0-9]{16}/fixture\.json$#D', $fixtureFile)) {
+			throw new RuntimeException('Native browser actions require their private fixture file');
+		}
+		$actionFixture = json_decode((string) file_get_contents($fixtureFile), true, 512, JSON_THROW_ON_ERROR);
+		$actionOwner = new User($db);
+		if (empty($actionFixture['isolated']) || $actionOwner->fetch((int) ($actionFixture['owner_id'] ?? 0)) <= 0
+			|| strpos((string) $actionOwner->login, 'cdav-browser-') !== 0 || $actionOwner->login !== ($actionFixture['login'] ?? '')) {
+			throw new RuntimeException('Native browser actions require their isolated fixture owner');
+		}
+		$actionEntity = (int) $conf->entity;
+		$actionResult = array();
+		if ($browserAction === 'profile_snapshot') {
+			$actionProfileId = (string) getenv('CDAV_BOOKING_BROWSER_PROFILE_ID');
+			if (!preg_match('/^[1-9][0-9]*$/D', $actionProfileId)) throw new RuntimeException('A native fixture profile identifier is required');
+			$actionRow = $db->fetch_object(bookingBrowserQuery('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE rowid = '.((int) $actionProfileId)
+				.' AND entity = '.$actionEntity.' AND fk_user = '.((int) $actionOwner->id)));
+			if (!$actionRow) throw new RuntimeException('Native browser actions cannot read another collaborator profile');
+			$actionEvents = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm WHERE entity = '.$actionEntity
+				.' AND fk_user_action = '.((int) $actionOwner->id)));
+			$actionReceipts = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_booking_request WHERE fk_profile = '.((int) $actionRow->rowid)));
+			$actionResult = array('fingerprint' => hash('sha256', json_encode($actionRow, JSON_THROW_ON_ERROR)),
+				'project_id' => (int) ($actionRow->fk_project ?? 0), 'thirdparty_id' => (int) ($actionRow->fk_soc ?? 0),
+				'events' => (int) $actionEvents->nb, 'receipts' => (int) $actionReceipts->nb);
+		} elseif ($browserAction === 'project_selector') {
+			$actionValue = (string) getenv('CDAV_BOOKING_BROWSER_ACTION_VALUE');
+			if (!in_array($actionValue, array('0', '1'), true)
+				|| dolibarr_set_const($db, 'PROJECT_USE_SEARCH_TO_SELECT', $actionValue, 'chaine', 0, '', $actionEntity) <= 0) {
+				throw new RuntimeException('Unable to select the native fixture project search mode');
+			}
+			$actionResult = array('project_search_mode' => (int) $actionValue);
+		} elseif (in_array($browserAction, array('close_project', 'open_project'), true)) {
+			$actionAdminRow = $db->fetch_object(bookingBrowserQuery('SELECT rowid FROM '.MAIN_DB_PREFIX.'user WHERE admin = 1 AND statut = 1 AND entity IN (0, '.$actionEntity.') ORDER BY rowid LIMIT 1'));
+			$actionAdmin = new User($db);
+			if (!$actionAdminRow || $actionAdmin->fetch((int) $actionAdminRow->rowid) <= 0 || $actionAdmin->loadRights() < 0) {
+				throw new RuntimeException('A native fixture administrator is required');
+			}
+			$GLOBALS['user'] = $actionAdmin;
+			$actionProject = new Project($db);
+			if ($actionProject->fetch((int) ($actionFixture['project_id'] ?? 0)) <= 0 || (int) $actionProject->entity !== $actionEntity
+				|| (int) $actionProject->socid !== (int) ($actionFixture['thirdparty_id'] ?? 0)) {
+				throw new RuntimeException('Native browser actions cannot alter another project');
+			}
+			$actionStatus = $browserAction === 'close_project' ? Project::STATUS_CLOSED : Project::STATUS_VALIDATED;
+			if ((int) $actionProject->status !== $actionStatus) {
+				$actionChanged = $browserAction === 'close_project' ? $actionProject->setClose($actionAdmin) : $actionProject->setValid($actionAdmin);
+				if ($actionChanged <= 0) throw new RuntimeException('Unable to change the native fixture project lifecycle');
+			}
+			$actionResult = array('project_id' => (int) $actionProject->id, 'status' => $actionStatus);
+		} else throw new RuntimeException('Unsupported native browser action');
+		fwrite(STDOUT, json_encode($actionResult, JSON_THROW_ON_ERROR).PHP_EOL);
+		exit(0);
+	} catch (Throwable $actionError) {
+		fwrite(STDERR, 'Native browser fixture action failed: '.get_class($actionError).PHP_EOL);
+		exit(1);
+	}
+}
+
 $entity = (int) $conf->entity;
 $agendaSnapshot = $db->fetch_object(bookingBrowserQuery('SELECT COALESCE(MAX(id),0) AS last_id FROM '.MAIN_DB_PREFIX.'actioncomm'));
 $automaticScope = ' FROM '.MAIN_DB_PREFIX.'actioncomm a INNER JOIN '.MAIN_DB_PREFIX
@@ -105,7 +170,8 @@ $GLOBALS['user'] = $admin;
 $settingSnapshots = array();
 foreach (array('CDAV_BOOKING_ENABLED', 'CDAV_BOOKING_ALLOW_LOCAL_HTTP',
 	'MAIN_INFO_SOCIETE_NOM', 'MAIN_INFO_SOCIETE_LOGO', 'MAIN_INFO_SOCIETE_LOGO_SMALL',
-	'MAIN_INFO_SOCIETE_LOGO_SQUARRED', 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_SMALL', 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_MINI') as $setting) {
+	'MAIN_INFO_SOCIETE_LOGO_SQUARRED', 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_SMALL', 'MAIN_INFO_SOCIETE_LOGO_SQUARRED_MINI',
+	'PROJECT_USE_SEARCH_TO_SELECT') as $setting) {
 	$settingSnapshots[$setting] = $db->fetch_object(bookingBrowserQuery('SELECT * FROM '.MAIN_DB_PREFIX.'const'
 		." WHERE name = '".$db->escape($setting)."' AND entity = ".$entity));
 }
@@ -116,6 +182,9 @@ $mappingSnapshot = $db->fetch_object(bookingBrowserQuery('SELECT COUNT(*) AS nb 
 $ownerId = 0;
 $thirdpartyId = 0;
 $projectId = 0;
+$projectIds = array();
+$thirdpartyIds = array();
+$draftProjectId = $replacementProjectId = $closedProjectId = $otherProjectId = 0;
 $privateThirdpartyName = 'CDav Browser Private Thirdparty '.bin2hex(random_bytes(5));
 $privateProjectName = 'CDav Browser Private Project '.bin2hex(random_bytes(5));
 $temporaryDirectory = '';
@@ -147,6 +216,7 @@ try {
 		$thirdparty->name = $privateThirdpartyName;
 		$thirdpartyId = $thirdparty->create($admin);
 		if ($thirdpartyId <= 0) throw new RuntimeException('Unable to create the isolated native third party');
+		$thirdpartyIds[] = $thirdpartyId;
 		$project = new Project($db);
 		$project->entity = $entity;
 		$project->ref = 'CDAV-BROWSER-'.bin2hex(random_bytes(6));
@@ -155,7 +225,31 @@ try {
 		$project->public = 1;
 		$projectId = $project->create($admin);
 		if ($projectId <= 0) throw new RuntimeException('Unable to create the isolated native project');
+		$projectIds[] = $projectId;
 		if ($project->setValid($admin) <= 0) throw new RuntimeException('Unable to open the isolated native project for selection');
+		$otherThirdparty = new Societe($db);
+		$otherThirdparty->entity = $entity;
+		$otherThirdparty->name = $privateThirdpartyName.' other';
+		$otherThirdpartyId = (int) $otherThirdparty->create($admin);
+		if ($otherThirdpartyId <= 0) throw new RuntimeException('Unable to create the second native browser company');
+		$thirdpartyIds[] = $otherThirdpartyId;
+		foreach (array('draft' => 0, 'replacement' => 1, 'closed' => 2, 'other' => 1) as $kind => $status) {
+			$extraProject = new Project($db);
+			$extraProject->entity = $entity;
+			$extraProject->ref = 'CDAV-BROWSER-'.bin2hex(random_bytes(6));
+			$extraProject->title = $privateProjectName.' '.$kind;
+			$extraProject->socid = $kind === 'other' ? $otherThirdpartyId : $thirdpartyId;
+			$extraProject->public = 1;
+			$extraId = (int) $extraProject->create($admin);
+			if ($extraId <= 0) throw new RuntimeException('Unable to create a native browser project lifecycle fixture');
+			$projectIds[] = $extraId;
+			if ($status > 0 && $extraProject->setValid($admin) <= 0) throw new RuntimeException('Unable to open a native browser project lifecycle fixture');
+			if ($status === 2 && $extraProject->setClose($admin) <= 0) throw new RuntimeException('Unable to close the native browser project fixture');
+			if ($kind === 'draft') $draftProjectId = $extraId;
+			elseif ($kind === 'replacement') $replacementProjectId = $extraId;
+			elseif ($kind === 'closed') $closedProjectId = $extraId;
+			else $otherProjectId = $extraId;
+		}
 	}
 	$password = 'Browser!'.bin2hex(random_bytes(16)).'7aA';
 	$passwordResult = $owner->setPassword($admin, $password, 0, 0, 1);
@@ -250,6 +344,11 @@ try {
 		'profile_id' => $profile['id'], 'profile_label' => $profileLabel,
 		'secondary_profile_label' => $secondaryProfileLabel, 'tertiary_profile_label' => $tertiaryProfileLabel,
 		'thirdparty_id' => $thirdpartyId, 'project_id' => $projectId,
+		'draft_project_id' => $draftProjectId, 'replacement_project_id' => $replacementProjectId,
+		'closed_project_id' => $closedProjectId, 'other_project_id' => $otherProjectId,
+		'project_names' => array('open' => $privateProjectName, 'replacement' => $privateProjectName.' replacement',
+			'draft' => $privateProjectName.' draft', 'closed' => $privateProjectName.' closed', 'other' => $privateProjectName.' other'),
+		'php_bin' => PHP_BINARY, 'fixture_runner' => __FILE__,
 		'private_thirdparty_name' => $privateThirdpartyName, 'private_project_name' => $privateProjectName,
 		'date' => $openDay->format('Y-m-d'), 'closed_date' => $closedDay->format('Y-m-d'),
 		'contiguous_date' => $contiguousDay->format('Y-m-d'),
@@ -379,16 +478,16 @@ try {
 		fwrite(STDERR, 'Native browser fixture cleanup failed: '.get_class($cleanupFailure).PHP_EOL);
 	}
 	try {
-		if ($projectId > 0) {
+		foreach (array_reverse($projectIds) as $cleanupProjectId) {
 			$project = new Project($db);
-			if ($project->fetch($projectId) > 0 && $project->delete($admin) <= 0) throw new RuntimeException('Native browser project cleanup failed');
+			if ($project->fetch($cleanupProjectId) > 0 && $project->delete($admin) <= 0) throw new RuntimeException('Native browser project cleanup failed');
 		}
-		if ($thirdpartyId > 0) {
+		foreach (array_reverse($thirdpartyIds) as $cleanupThirdpartyId) {
 			$thirdparty = new Societe($db);
-			if ($thirdparty->fetch($thirdpartyId) > 0) {
+			if ($thirdparty->fetch($cleanupThirdpartyId) > 0) {
 				// Societe's raw Agenda cascade omits resources. Remove only this
 				// fixture's new history natively and avoid recreating deletion history.
-				$companyEvents = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_soc = '.$thirdpartyId
+				$companyEvents = bookingBrowserQuery('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE fk_soc = '.$cleanupThirdpartyId
 					.' AND id > '.((int) $agendaSnapshot->last_id));
 				$companyIds = array();
 				while ($row = $db->fetch_object($companyEvents)) $companyIds[] = (int) $row->id;
@@ -396,7 +495,7 @@ try {
 					$event = new ActionComm($db);
 					if ($event->fetch($eventId) <= 0 || $event->delete($admin) <= 0) throw new RuntimeException('Native browser company history cleanup failed');
 				}
-				if ($thirdparty->delete($thirdpartyId, $admin, 0) <= 0) throw new RuntimeException('Native browser third-party cleanup failed');
+				if ($thirdparty->delete($cleanupThirdpartyId, $admin, 0) <= 0) throw new RuntimeException('Native browser third-party cleanup failed');
 			}
 		}
 	} catch (Throwable $cleanupFailure) {
