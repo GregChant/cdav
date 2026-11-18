@@ -127,4 +127,118 @@ foreach (array(0, 1, '0', '1', null, array(), new stdClass()) as $invalid) {
 	projectBookingRejects(static fn() => $service->saveProfile(1, array(), true, 4, array('clear_project_link' => $invalid)), 'CDavBookingInvalid');
 	projectBookingAssert($db->queries === array(), 'Explicit unlink confirmation must be a real boolean before owner or profile queries');
 }
-fwrite(STDOUT, "Native project status, unavailable selector values and explicit detachment regressions passed.\n");
+
+require $root.'/core/lib/functions.lib.php';
+require $root.'/core/db/mysqli.class.php';
+require $root.'/core/class/html.formprojet.class.php';
+
+/** Native picker API fixture; sanitization comes from the real Dolibarr driver. */
+class BookingProjectPickerDatabase
+{
+	public $nativeDriver;
+	public $sql = '';
+	/** Prepare a driver without opening any connection. */
+	public function __construct()
+	{
+		$this->nativeDriver = (new ReflectionClass('DoliDBMysqli'))->newInstanceWithoutConstructor();
+	}
+	/** @return string Native prefix */
+	public function prefix()
+	{
+		return MAIN_DB_PREFIX;
+	}
+	/**
+	 * Delegate to the exact native sanitization used by select_projects_list.
+	 * @param string $value SQL fragment
+	 * @param int $quotes Allow quotes
+	 * @param int $equals Allow equals
+	 * @return string Sanitized fragment
+	 */
+	public function sanitize($value, $quotes = 0, $equals = 0)
+	{
+		return $this->nativeDriver->sanitize($value, $quotes, $equals);
+	}
+	/**
+	 * Supply native rows already scoped to their requested company.
+	 * @param string $sql Actual native query
+	 * @return object Cursor
+	 */
+	public function query($sql)
+	{
+		$this->sql = $sql;
+		$rows = array();
+		foreach (array(1 => Project::STATUS_VALIDATED, 2 => Project::STATUS_DRAFT, 3 => Project::STATUS_CLOSED) as $id => $status) {
+			$rows[] = (object) array('rowid' => $id, 'ref' => 'PROJECT-'.$id, 'title' => 'Project '.$id, 'fk_soc' => 7,
+				'fk_statut' => $status, 'public' => 1, 'name' => 'Client', 'name_alias' => '');
+		}
+		return (object) array('rows' => $rows);
+	}
+	// phpcs:disable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
+	/**
+	 * Native cursor length.
+	 * @param object $result Cursor
+	 * @return int Length
+	 */
+	public function num_rows($result)
+	{
+		return count($result->rows);
+	}
+	/**
+	 * Consume one native row.
+	 * @param object $result Cursor
+	 * @return object|null Row
+	 */
+	public function fetch_object($result)
+	{
+		return array_shift($result->rows);
+	}
+	// phpcs:enable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
+	/**
+	 * Discard a consumed test cursor.
+	 * @param object $result Cursor
+	 * @return void
+	 */
+	public function free($result)
+	{
+	}
+}
+
+$db = new BookingProjectPickerDatabase();
+$conf = (object) array('entity' => 1, 'global' => new stdClass(), 'use_javascript_ajax' => 0);
+$user = new class {
+	/**
+	 * Grant native picker read access for this status-boundary test.
+	 * @param string ...$rights Permission path
+	 * @return bool Authorized
+	 */
+	public function hasRight(...$rights)
+	{
+		return true;
+	}
+};
+$langs = new class {
+	/**
+	 * Retain native labels without translation fixtures.
+	 * @param string $key Translation
+	 * @return string Label
+	 */
+	public function trans($key)
+	{
+		return $key;
+	}
+};
+projectBookingAssert($db->sanitize('p.fk_soc=7', 0, 1) === 'p.fk_soc=7', 'The native picker filter must survive real DoliDB sanitization');
+projectBookingAssert($db->sanitize('(p.fk_soc=7)AND(p.fk_statut=1)', 0, 1) === 'p.fk_soc=7ANDp.fk_statut=1',
+	'Parentheses and SQL keyword boundaries cannot be passed through native morefilter sanitization');
+$nativeOptions = (new FormProjets($db))->select_projects_list(7, 0, 'project_id', 0, 0, 1, 1, 0, 0, 1, '', 1, 0,
+	'project_id', 'minwidth200 maxwidth400', 'p.fk_soc=7');
+projectBookingAssert(str_contains($db->sql, ' AND (p.fk_soc=7) ORDER BY'), 'The native query must retain an exact single-company predicate');
+$options = array();
+foreach ($nativeOptions as $option) {
+	if (empty($option['disabled'])) $options[$option['key']] = $option['labelx'];
+}
+projectBookingAssert(array_keys($options) === array(1), 'Native closed exclusion and draft disabled flags must leave only open projects');
+$html = Form::selectarray('project_id', $options, 1, 1);
+projectBookingAssert(str_contains($html, 'name="project_id"') && str_contains($html, '<option value="1" selected>')
+	&& !str_contains($html, 'PROJECT-2') && !str_contains($html, 'PROJECT-3'), 'Native form rendering must expose only the selected open project');
+fwrite(STDOUT, "Native project status, picker sanitization/rendering and explicit detachment regressions passed.\n");

@@ -39,6 +39,31 @@ async function capture(page, filename) {
   if (output) await page.screenshot({path: path.join(output, filename), fullPage: true});
 }
 
+async function requireNativeProjectSelector(page, form, phase) {
+  const selector = form.locator('select[name=project_id]');
+  if (await selector.count() === 1) return selector;
+  // Capture only the project row of the authenticated fake fixture. Login
+  // pages, hidden credentials, public links and executable scripts are excluded.
+  const row = form.locator('label[for=project_id]').locator('xpath=ancestor::tr[1]');
+  if (output && new URL(page.url()).pathname.endsWith('/admin/booking.php')
+    && await page.locator('input[type=password]').count() === 0 && await row.count() === 1) {
+    for (const value of await page.locator('input[name=token], input[name=request]').evaluateAll(inputs => inputs.map(input => input.value))) {
+      if (value) secrets.add(value);
+    }
+    const html = await row.evaluate(element => {
+      const copy = element.cloneNode(true);
+      copy.querySelectorAll('script, input[type=hidden], input[type=password], a, iframe').forEach(node => node.remove());
+      copy.querySelectorAll('input').forEach(input => {
+        if (!['project_id', 'clear_project_link'].includes(input.name)) input.setAttribute('value', '[redacted]');
+      });
+      return copy.outerHTML;
+    });
+    fs.writeFileSync(path.join(output, 'booking-ui-missing-project-selector.html'), safe(html) + '\n');
+    await row.screenshot({path: path.join(output, 'booking-ui-missing-project-selector.png')});
+  }
+  throw new Error('The native project selector was not rendered after ' + phase + '; see the isolated project-row diagnostic.');
+}
+
 function publicUrl(date, language = 'en', extra = {}) {
   return fixture.booking_url + '?' + new URLSearchParams({key: fixture.key, date, lang: language, ...extra});
 }
@@ -399,7 +424,8 @@ async function checkBranding(page) {
         check(await form.locator('#profile_label').inputValue() === label
           && await form.locator('input[name=duration]').inputValue() === String(duration),
           'Refreshing projects preserves the pending name and booking settings');
-        await form.locator('select[name=project_id]').selectOption(String(fixture.project_id));
+        const projectSelector = await requireNativeProjectSelector(admin, form, 'refreshing the selected company projects');
+        await projectSelector.selectOption(String(fixture.project_id));
       }
       await follow(admin, () => form.locator('button.button-save').click());
       const id = Number(await form.locator('input[name=profile_id]').inputValue());
@@ -513,7 +539,7 @@ async function checkBranding(page) {
       check(await admin.locator('#booking-project-unavailable[role=status]').isVisible()
         && await projectForm().locator('#clear_project_link').count() === 1,
         'An existing nonopen project is explained outside the selectable project list');
-      check(await projectForm().locator('select[name=project_id]').inputValue() === '0'
+      check(['', '-1', '0'].includes(await projectForm().locator('select[name=project_id]').inputValue())
         && await projectForm().locator('select[name=project_id] option[value="' + fixture.project_id + '"]').count() === 0,
         'A closed legacy project is not silently reintroduced into the open-project dropdown');
       const beforeSilentSave = nativeFixture('profile_snapshot', namedFirst.id);

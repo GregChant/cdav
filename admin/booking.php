@@ -259,10 +259,17 @@ print '</td></tr>';
 print '<tr><td><label for="project_id">'.dol_escape_htmltag($langs->trans('CDavBookingProject')).'</label></td><td>';
 if (isModEnabled('project') && $bookingThirdpartyId > 0) {
 	$bookingFormProject = new FormProjets($db);
-	// The native AJAX wrapper does not forward arbitrary filters. This native
-	// list keeps Select2 while applying exact company and validated-status rules.
-	print $bookingFormProject->select_projects_list($bookingThirdpartyId, $bookingProjectId, 'project_id', 0, 0, 1, 1, 0, 0, 0, '', 1, 0,
-		'project_id', 'minwidth200 maxwidth400', 'p.fk_soc = '.$bookingThirdpartyId.' AND p.fk_statut = '.Project::STATUS_VALIDATED);
+	// Native morefilter sanitization removes SQL whitespace. Keep one exact
+	// company predicate and omit the native disabled (draft) entries in array mode.
+	$bookingProjectList = $bookingFormProject->select_projects_list($bookingThirdpartyId, 0, 'project_id', 0, 0, 1, 1, 0, 0, 1, '', 1, 0,
+		'project_id', 'minwidth200 maxwidth400', 'p.fk_soc='.$bookingThirdpartyId);
+	$bookingProjectOptions = array();
+	if (is_array($bookingProjectList)) {
+		foreach ($bookingProjectList as $bookingProjectOption) {
+			if (empty($bookingProjectOption['disabled'])) $bookingProjectOptions[$bookingProjectOption['key']] = $bookingProjectOption['labelx'];
+		}
+	}
+	print Form::selectarray('project_id', $bookingProjectOptions, $bookingProjectId, 1, 0, 0, '', 0, 0, 0, '', 'minwidth200 maxwidth400');
 	print '<br><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectOpenOnly')).'</span>';
 } else {
 	print '<input type="hidden" name="project_id" value="0"><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectHelp')).'</span>';
