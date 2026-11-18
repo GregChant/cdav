@@ -567,8 +567,10 @@ Texte de référence pour l'objectif :
   sans changer le délai stocké en minutes ni les anciennes signatures.
 - [x] Définir un jour comme 24 heures écoulées, conserver la précision minute
   et les bornes de 0 à 30 jours, sans arrondi silencieux d'une fraction de minute.
-- [ ] Qualifier la saisie et la sauvegarde natives, les régressions sur la
-  matrice, le ZIP reproductible et la publication sur les branches autorisées.
+- [x] Qualifier les régressions sur les quatre combinaisons et 34 contrôles
+  natifs ciblés sur 23/PHP 8.4 et 24/PHP 8.5, dont la seconde depuis le ZIP.
+- [x] Préparer le ZIP reproductible et la publication sur `master` et `23.0`,
+  conserver les preuves et retirer les deux instances jetables.
 
 ## Références locales
 

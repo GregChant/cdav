@@ -665,7 +665,23 @@ natif passent sur les quatre combinaisons Dolibarr 23/24 × PHP 8.4/8.5.
 La revue indépendante de l'administration et du script confirme le chargement
 natif, la conservation des champs et l'absence de sauvegarde automatique.
 
-La qualification native ciblée, le paquet reproductible et sa publication sont
-consignés dans `dist/qa/notice-validation/` et le manifeste local de livraison.
+La qualification native ciblée passe sur 23/PHP 8.4 et 24/PHP 8.5 : 34 contrôles
+avec le vrai Select2, conversions, sauvegarde et relecture, limites, six rejets
+sans mutation par version et rafraîchissements incomplets. Les vingt GET publics
+donnent les mêmes créneaux pour des préavis équivalents en jours ou en minutes.
+Aucun POST public de réservation, rendez-vous, reçu ou email n'est créé.
+La seconde combinaison sert directement le ZIP candidat `d522c04`, SHA-256
+`70067397f244ea1a33f38526f73dea0a3994337c071a09fe4e4c971b1710eb8e`.
+Les 102 fichiers correspondent aux sources et à l'extrait. Les quatre jobs CI
+du candidat passent également.
+
+Les preuves sont dans `dist/qa/notice-validation/`, notamment `native-summary.json`,
+`archive-equivalence.json` et les captures. Les deux bases et serveurs ont été
+supprimés après restauration des fixtures ; aucun orphelin ni diagnostic PHP du
+module n'est relevé. Le port 8023, les configurations des cœurs partagés et le
+cache Chromium sont préservés, comme le prouve `teardown.json`.
+L'archive finale ajoute seulement cette clôture Markdown au candidat exécuté.
+Son empreinte reproductible est consignée dans le manifeste local de livraison.
+
 Aucune migration SQL supplémentaire n'est nécessaire depuis 6.2.0 ; le moteur
 de disponibilité, les liaisons, les transactions et les emails restent inchangés.
