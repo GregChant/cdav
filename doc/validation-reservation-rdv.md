@@ -599,6 +599,44 @@ utilise le nom `localhost` résolu en loopback : le transport Dolibarr refuse
 l'IP réservée littérale avant connexion. Aucun email de qualification ne sort
 vers un serveur de production. Le sink rejette DATA sans destinataire accepté.
 
-La qualification du ZIP final sur toute la matrice, les captures, les résidus,
-les diagnostics natifs et le retrait des instances sont consignés dans le
-manifeste local de livraison.
+Le paquet natif `564ec25`, SHA-256
+`6bb15eb64cf0a80eebe376c728337f7a5e1fbed9b2d9aa803fa0ba3e3c1ffcd1`,
+est qualifié depuis son extrait sur les quatre combinaisons : seize suites HTTP
+(DAV, simple, groupes et profils), 92 parcours navigateur, aucune violation axe,
+et 144 contrôles des dix-huit scripts développeur en GET et POST, tous `404`
+avec un corps vide. Chaque combinaison vérifie les deux messages SMTP réels,
+les liens CRM, la concurrence entre profils et les dates facultatives.
+
+Un premier lancement parallèle du test de barrière a manqué un worker sur
+24/PHP 8.5, avec deux réponses `201` sur des créneaux distincts. Le rejeu isolé
+de cette combinaison réussit les suites simple, groupes, DAV et navigateur.
+Les assertions de concurrence et le nombre de workers exigés restent inchangés.
+
+La CI a également révélé une hypothèse de chemin dans la seule fixture de
+notifications : son checkout nommé `module` ne reproduisait pas le répertoire
+natif `cdav` nécessaire à `Translate`. Le correctif `a920805`, SHA-256
+`901ffe18ea45e5f0204985405d28829c36111d15aa50128f016b644912f3ce2e`,
+ajoute un répertoire temporaire privé et son lien, retirés même après exception.
+La comparaison des ZIP prouve que seul `tests/booking_notification.php` change ;
+tout le code de production et les suites HTTP/navigateur restent identiques.
+Les douze suites PHP et les contrôles JS sont relancés depuis cet extrait sur
+les quatre combinaisons : 48 suites PHP, quatre suites JS, 488 rendus FR/EN,
+lint et PHPCS natif passent. Les quatre jobs CI corrigés passent également.
+
+Les preuves sont dans `dist/qa/profiles-validation/`, notamment
+`archive-native-matrix.json`, `archive-fixture-equivalence.json`,
+`final-package-quick-matrix.json` et les rapports SMTP, résidus et captures.
+Les données Agenda, CRM, projets, profils, reçus et correspondances sont
+restaurées ; aucun résidu de branding ni orphelin ne subsiste. Aucun diagnostic
+PHP du module n'est relevé. Les avertissements natifs `QUERY_STRING` de
+`main.inc.php` dus au serveur PHP de développement sont enregistrés séparément.
+
+L'archive finale ajoute uniquement la clôture Markdown au candidat corrigé. Elle
+correspond aux blobs Git et conserve tous ses fichiers hors Markdown inchangés.
+Son empreinte reproductible et les résultats CI sont enregistrés dans
+`dist/qa/booking-release-manifest.json`.
+
+Les quatre bases et serveurs, le SMTP local et le répertoire privé ont été
+supprimés après clôture. Les cinq ports de qualification sont fermés ; le port
+8023, les configurations des cœurs partagés et le cache Chromium sont préservés.
+La preuve finale est `dist/qa/profiles-validation/teardown.json`.

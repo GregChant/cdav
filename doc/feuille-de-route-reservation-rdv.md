@@ -555,8 +555,11 @@ Texte de référence pour l'objectif :
   validité, en complément de l'horizon et du préavis.
 - [x] Vérifier la migration 6.1.3 et l'installation neuve sur les quatre
   combinaisons, y compris anciens liens, reçus et formulaires encore valides.
-- [ ] Terminer la qualification HTTP, navigateur et SMTP local, la revue qualité,
-  l'archive reproductible et la publication sur les branches autorisées.
+- [x] Qualifier les quatre combinaisons : 48 suites PHP et quatre JS, 488 rendus,
+  seize suites HTTP, 92 parcours navigateur et 144 protections HTTP des scripts.
+- [x] Clore la revue qualité et la correction de fixture CI, puis préparer
+  l'archive reproductible pour `master` et `23.0` ; conserver les preuves dans
+  `dist/qa/profiles-validation/` avant retrait des instances jetables.
 
 ## Références locales
 
