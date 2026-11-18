@@ -640,3 +640,32 @@ Les quatre bases et serveurs, le SMTP local et le répertoire privé ont été
 supprimés après clôture. Les cinq ports de qualification sont fermés ; le port
 8023, les configurations des cœurs partagés et le cache Chromium sont préservés.
 La preuve finale est `dist/qa/profiles-validation/teardown.json`.
+
+## Préavis en minutes ou jours — 6.2.1
+
+L'administration propose une unité de préavis par profil. Le calcul conserve
+le champ historique `notice` en minutes entières ; seul le choix d'affichage
+en jours ajoute la préférence facultative `notice_unit`. L'unité minutes reste
+absente du JSON canonique pour préserver les anciennes signatures. Un jour
+vaut 1 440 minutes, soit 24 heures écoulées, indépendamment du changement d'heure.
+Le maximum de 43 200 minutes reste identique à celui de 30 jours.
+
+Le formulaire convertit la valeur lors du changement d'unité, avec les événements
+du combobox natif. Son script est chargé via `llxHeader`, avec l'URL et le nonce
+natifs. Les anciennes valeurs non multiples d'un jour, comme 90 minutes, restent
+représentables en jours décimaux. La validation refuse les fractions de minute
+réelles et tolère seulement l'imprécision d'un aller-retour d'affichage à dix
+décimales. Afficher les projets du tiers conserve un préavis encore incomplet
+sans tenter d'enregistrer ; la sauvegarde valide toujours la valeur originale.
+
+Les cas A15 contrôlent conversions, précision, valeurs limites, entrées invalides,
+égalité des anciens JSON et comportement aux changements d'heure. Les douze
+suites PHP, le test JS existant, les deux lints JS, le lint PHP complet et PHPCS
+natif passent sur les quatre combinaisons Dolibarr 23/24 × PHP 8.4/8.5.
+La revue indépendante de l'administration et du script confirme le chargement
+natif, la conservation des champs et l'absence de sauvegarde automatique.
+
+La qualification native ciblée, le paquet reproductible et sa publication sont
+consignés dans `dist/qa/notice-validation/` et le manifeste local de livraison.
+Aucune migration SQL supplémentaire n'est nécessaire depuis 6.2.0 ; le moteur
+de disponibilité, les liaisons, les transactions et les emails restent inchangés.

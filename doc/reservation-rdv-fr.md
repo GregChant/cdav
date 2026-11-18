@@ -1,6 +1,6 @@
 # Réservation de rendez-vous avec CDav
 
-CDav 6.2.0 propose un calendrier mensuel de réservation relié directement à
+CDav 6.2.1 propose un calendrier mensuel de réservation relié directement à
 l'Agenda Dolibarr, avec un horizon réglable jusqu'à six mois. Les clients
 choisissent un jour disponible, puis un ou plusieurs créneaux si le profil
 l'autorise. La confirmation crée les rendez-vous natifs affectés au
@@ -59,7 +59,7 @@ Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
 | Durée du rendez-vous ou du créneau de base | 30 minutes | 5 à 480 minutes |
 | Espacement des débuts proposés | 30 minutes | 5 à 240 minutes |
 | Marge avant / après | 0 / 0 minute | 0 à 240 minutes chacune |
-| Préavis minimum | 1 440 minutes, soit 24 h | 0 à 43 200 minutes |
+| Préavis minimum | 1 440 minutes, soit 1 jour | 0 à 43 200 minutes ou 0 à 30 jours |
 | Horizon de réservation | 60 jours | 1 à 180 jours ou 1 à 6 mois calendaires |
 | Regrouper des créneaux consécutifs | Non | Autorisation indépendante par profil |
 | Réserver des plages séparées ou plusieurs jours | Non | Autorisation indépendante par profil |
@@ -104,6 +104,15 @@ Chaque partie du rendez-vous est liée nativement au tiers et au projet choisis.
 Les noms et les listes des tiers/projets restent dans l'administration ; la page
 publique affiche seulement le nom du profil choisi par l'administrateur.
 Une modification du contexte invalide les formulaires précédemment ouverts.
+
+Le préavis minimum peut être saisi en **minutes** ou en **jours**. Changer
+l'unité convertit la valeur automatiquement : 1 440 minutes deviennent 1 jour,
+2 jours correspondent à 2 880 minutes. Un jour représente exactement 24 heures
+écoulées, y compris lors d'un changement d'heure. Les jours décimaux permettent
+de conserver les valeurs existantes : 90 minutes valent 0,0625 jour. La précision
+reste d'une minute et le maximum de 30 jours reste inchangé. L'unité choisie est
+conservée sur le profil ; les anciens profils restent affichés en minutes.
+Cette évolution 6.2.1 ne nécessite aucune migration supplémentaire depuis 6.2.0.
 
 L'horizon en mois conserve le jour et l'heure locaux, en ramenant le jour au
 dernier jour valide du mois d'arrivée : six mois après le 31 août donnent le

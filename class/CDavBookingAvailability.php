@@ -101,7 +101,42 @@ class BookingAvailability
 		if (isset($result['valid_from'], $result['valid_until']) && $result['valid_from'] > $result['valid_until']) {
 			throw new \InvalidArgumentException('Reversed booking validity dates');
 		}
+		$noticeUnit = array_key_exists('notice_unit', $config) ? $config['notice_unit'] : 'minutes';
+		if (!in_array($noticeUnit, array('minutes', 'days'), true)) throw new \InvalidArgumentException('Invalid booking notice unit');
+		// The notice itself remains canonical minutes. Omit its default display
+		// unit so existing profile JSON and signed form tickets remain unchanged.
+		if ($noticeUnit === 'days') $result['notice_unit'] = 'days';
 		return $result;
+	}
+
+	/**
+	 * Convert an administration value into the existing whole-minute notice.
+	 * One day is exactly 1440 minutes, independently of calendar/DST boundaries.
+	 * @param int|string $value Original form value in the selected display unit
+	 * @param string $unit Minutes or days
+	 * @return int Canonical notice between zero and thirty days, in minutes
+	 */
+	public static function noticeMinutes($value, $unit): int
+	{
+		if (!in_array($unit, array('minutes', 'days'), true) || (!is_int($value) && !is_string($value))) {
+			throw new \InvalidArgumentException('Invalid booking notice input');
+		}
+		$number = (string) $value;
+		if ($unit === 'minutes') {
+			if (!preg_match('/^[0-9]{1,6}$/D', $number) || (int) $number > 43200) {
+				throw new \InvalidArgumentException('Invalid booking notice minutes');
+			}
+			return (int) $number;
+		}
+		if (!preg_match('/^[0-9]{1,6}(?:\.[0-9]{1,10})?$/D', $number) || (float) $number > 30) {
+			throw new \InvalidArgumentException('Invalid booking notice days');
+		}
+		$minutes = (float) $number * 1440;
+		$rounded = (int) round($minutes);
+		// Accept a minute rendered as days to ten decimal places, without
+		// silently rounding a genuinely fractional-minute requested notice.
+		if (abs($minutes - $rounded) > 0.0000001) throw new \InvalidArgumentException('Booking notice requires whole minutes');
+		return $rounded;
 	}
 
 	/**

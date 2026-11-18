@@ -13,6 +13,7 @@ for cdav_qa_suite in run freebusy contact_photos attachments booking booking_cal
     "$cdav_qa_php" "tests/$cdav_qa_suite.php"
 done
 node --check js/booking.js
+node --check js/booking_admin.js
 node tests/booking_selection_js.cjs
 if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
     phpcs --standard="$CDAV_PHPCS_STANDARD" \

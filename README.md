@@ -112,6 +112,11 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.2.1 lets administrators enter minimum notice in minutes or days, with
+automatic conversion when switching units. One day is 24 hours; the booking
+engine retains whole minutes and existing profile settings remain unchanged.
+No additional schema migration is needed from 6.2.0.
+
 Version 6.2.0 adds multiple named booking profiles per collaborator, optional
 native third-party/project links, automatic checkbox selection with a manual
 fallback, and separate native confirmation emails to the visitor and collaborator.

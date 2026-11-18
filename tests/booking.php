@@ -6,7 +6,7 @@ if (PHP_SAPI !== 'cli') {
 	exit;
 }
 
-/** Booking business regressions A01–A14; no database or HTTP server required. */
+/** Booking business regressions A01–A15; no database or HTTP server required. */
 date_default_timezone_set('Europe/Zurich');
 error_reporting(E_ALL);
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
@@ -482,6 +482,60 @@ bookingCheck(bookingHours(BookingAvailability::slots($calendarConfig, array(), $
 bookingCheck(BookingAvailability::slots($calendarConfig, array(), bookingStamp('2027-03-01 00:00'),
 	bookingStamp('2027-03-02 00:00'), $calendarNow) === array(), 'A14: dates after six calendar months remain closed');
 fwrite(STDOUT, "[OK] A14 legacy day horizons, six calendar months, month-end clamping, leap years and local DST deadlines\n");
+
+$legacyNotice = BookingAvailability::validateConfig(array('notice' => 1440));
+$explicitMinuteNotice = BookingAvailability::validateConfig(array('notice' => 1440, 'notice_unit' => 'minutes'));
+bookingCheck($legacyNotice === $explicitMinuteNotice && !array_key_exists('notice_unit', $legacyNotice)
+	&& hash('sha256', json_encode($legacyNotice)) === hash('sha256', json_encode($explicitMinuteNotice)),
+	'A15: the default minutes unit does not change legacy canonical settings or signed form hashes');
+$dayNotice = BookingAvailability::validateConfig(array('notice' => 2880, 'notice_unit' => 'days'));
+bookingCheck($dayNotice['notice'] === 2880 && $dayNotice['notice_unit'] === 'days'
+	&& BookingAvailability::validateConfig($dayNotice) === $dayNotice,
+	'A15: a day display preference remains stable while the stored notice stays in minutes');
+foreach (array(array('0', 'minutes', 0), array(2, 'minutes', 2), array('43200', 'minutes', 43200),
+	array('0', 'days', 0), array('2', 'days', 2880), array(30, 'days', 43200), array('30.0000000000', 'days', 43200),
+	array('0.0625', 'days', 90), array('0.5', 'days', 720), array('1.5', 'days', 2160)) as $noticeCase) {
+	bookingCheck(BookingAvailability::noticeMinutes($noticeCase[0], $noticeCase[1]) === $noticeCase[2],
+		'A15: explicit notice inputs preserve their complete duration and inclusive limits');
+}
+foreach (array(1, 2, 7, 15, 30, 59, 61, 90, 1439, 1440, 1441, 43199, 43200) as $noticeMinutes) {
+	$displayDays = rtrim(rtrim(number_format($noticeMinutes / 1440, 10, '.', ''), '0'), '.');
+	bookingCheck(BookingAvailability::noticeMinutes($displayDays, 'days') === $noticeMinutes,
+		'A15: switching the display to days never silently changes an existing minute value');
+}
+foreach (array('hours', '', null, true, 1, array(), "days\n") as $invalidNoticeUnit) {
+	bookingThrows(static function () use ($invalidNoticeUnit) {
+		BookingAvailability::validateConfig(array('notice_unit' => $invalidNoticeUnit));
+	}, 'A15: unknown or malformed notice display units fail closed');
+	bookingThrows(static function () use ($invalidNoticeUnit) {
+		BookingAvailability::noticeMinutes('2', $invalidNoticeUnit);
+	}, 'A15: conversion never coerces an unsupported notice unit');
+}
+foreach (array(-1, 1.5, NAN, INF, -INF, true, false, null, array(), '', ' 2', '2 ', '+2', '-1', '2e0', '1,5', "2\n", '<b>2</b>') as $invalidNoticeValue) {
+	foreach (array('minutes', 'days') as $noticeUnit) {
+		bookingThrows(static function () use ($invalidNoticeValue, $noticeUnit) {
+			BookingAvailability::noticeMinutes($invalidNoticeValue, $noticeUnit);
+		}, 'A15: notice conversion rejects invalid, nonfinite, injected and coerced inputs');
+	}
+}
+foreach (array(array('43201', 'minutes'), array('1.5', 'minutes'), array('31', 'days'), array('30.0000000001', 'days'),
+	array('0.3333', 'days'), array('0.0003472222', 'days'), array('0.0000000001', 'days'), array('0.00069444444', 'days')) as $invalidNoticeCase) {
+	bookingThrows(static function () use ($invalidNoticeCase) {
+		BookingAvailability::noticeMinutes($invalidNoticeCase[0], $invalidNoticeCase[1]);
+	}, 'A15: out-of-range values and fractional-minute days are rejected without truncation');
+}
+foreach (array('2026-03-28 09:00', '2026-10-24 09:00') as $noticeClock) {
+	$noticeNow = bookingStamp($noticeClock);
+	$noticeStart = (new DateTimeImmutable('@'.$noticeNow))->setTimezone(new DateTimeZone('Europe/Zurich'))->setTime(0, 0)->getTimestamp();
+	$noticeEnd = (new DateTimeImmutable('@'.$noticeStart))->setTimezone(new DateTimeZone('Europe/Zurich'))->modify('+4 days')->getTimestamp();
+	$minuteConfig = array('notice' => 1440, 'weekly' => array_fill(1, 7, array(array('00:00', '24:00'))));
+	$dayConfig = array_replace($minuteConfig, array('notice_unit' => 'days'));
+	$minuteSlots = BookingAvailability::slots($minuteConfig, array(), $noticeStart, $noticeEnd, $noticeNow);
+	bookingCheck($minuteSlots === BookingAvailability::slots($dayConfig, array(), $noticeStart, $noticeEnd, $noticeNow)
+		&& $minuteSlots[0]['start'] === $noticeNow + 1440 * 60,
+		'A15: one notice day remains twenty-four elapsed hours through both local DST transitions');
+}
+fwrite(STDOUT, "[OK] A15 notice minute/day inputs, lossless display, strict limits, legacy hashes and elapsed-day DST behavior\n");
 
 if (getenv('CDAV_BOOKING_BENCHMARK') === '1') {
 	$load = array();

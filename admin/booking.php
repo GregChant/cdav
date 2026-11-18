@@ -60,6 +60,7 @@ if ($action === 'save_profile' && GETPOSTINT('refresh_projects') === 1) $action 
 $bookingNewKey = '';
 $bookingPostedConfig = null;
 $bookingPostedMetadata = null;
+$bookingPostedNotice = null;
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 	try {
@@ -71,6 +72,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 			$conf->global->CDAV_BOOKING_ENABLED = $bookingEnabled;
 			setEventMessages($langs->trans('CDavBookingSaved'), null, 'mesgs');
 		} elseif ($action === 'save_profile' || $action === 'refresh_profile') {
+			$bookingPostedNotice = array('value' => GETPOST('notice', 'none'),
+				'unit' => GETPOSTISSET('notice_unit') ? GETPOST('notice_unit', 'none') : 'minutes');
 			$bookingPostedMetadata = array();
 			if (array_key_exists('profile_label', $_POST)) $bookingPostedMetadata['label'] = $_POST['profile_label'];
 			foreach (array('thirdparty_id', 'project_id') as $bookingMetadataField) {
@@ -103,11 +106,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 					}
 				}
 			}
+			try {
+				$bookingPostedConfig['notice'] = \Dolibarr\CDav\BookingAvailability::noticeMinutes($bookingPostedNotice['value'], $bookingPostedNotice['unit']);
+				if ($bookingPostedNotice['unit'] === 'days') $bookingPostedConfig['notice_unit'] = 'days';
+			} catch (InvalidArgumentException $bookingNoticeException) {
+				// Refreshing optional projects must accept an unfinished form.
+				if ($action !== 'refresh_profile') throw $bookingNoticeException;
+			}
 			if ($action === 'save_profile') {
 				$bookingSavedProfile = $bookingService->saveProfile($bookingOwnerId, $bookingPostedConfig,
 					GETPOSTINT('profile_enabled') === 1, $bookingProfileId, $bookingPostedMetadata);
 				$bookingProfileId = $bookingSavedProfile['id'];
-				$bookingPostedConfig = $bookingPostedMetadata = null;
+				$bookingPostedConfig = $bookingPostedMetadata = $bookingPostedNotice = null;
 				setEventMessages($langs->trans('CDavBookingSaved'), null, 'mesgs');
 			}
 		} elseif ($action === 'rotate_token') {
@@ -180,7 +190,7 @@ try {
 	// An invalid submitted profile already has its native error message above.
 }
 
-llxHeader('', $langs->trans('CDavBooking'));
+llxHeader('', $langs->trans('CDavBooking'), '', '', 0, 0, array('/cdav/js/booking_admin.js'));
 print load_fiche_titre($langs->trans('CDavBooking'), '', 'calendar');
 print '<p>'.dol_escape_htmltag($langs->trans('CDavBookingAdminHelp')).'</p>';
 print '<form method="post" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
@@ -264,14 +274,30 @@ $bookingNumericFields = array(
 	'notice' => array('CDavBookingNotice', 0, 43200, 'CDavBookingMinutes'),
 	'horizon' => array('CDavBookingHorizon', 1, 180, 'CDavBookingDays'),
 );
+$bookingNoticeUnit = ($bookingPostedNotice['unit'] ?? $bookingConfig['notice_unit'] ?? 'minutes') === 'days' ? 'days' : 'minutes';
 foreach ($bookingNumericFields as $bookingField => $bookingFieldSpec) {
+	$bookingNumericValue = (string) ((int) $bookingConfig[$bookingField]);
+	$bookingNumericStep = '1';
+	if ($bookingField === 'notice') {
+		if ($bookingNoticeUnit === 'days') {
+			$bookingFieldSpec[2] = 30;
+			$bookingNumericStep = 'any';
+			$bookingNumericValue = rtrim(rtrim(number_format($bookingConfig['notice'] / 1440, 10, '.', ''), '0'), '.');
+		}
+		if (is_string($bookingPostedNotice['value'] ?? null)) $bookingNumericValue = $bookingPostedNotice['value'];
+	}
 	print '<tr><td><label for="'.$bookingField.'">'.dol_escape_htmltag($langs->trans($bookingFieldSpec[0])).'</label></td><td>';
-	print '<input class="maxwidth100" type="number" required name="'.$bookingField.'" id="'.$bookingField.'" min="'.$bookingFieldSpec[1].'" max="'.$bookingFieldSpec[2].'" value="'.((int) $bookingConfig[$bookingField]).'"> ';
+	print '<input class="maxwidth100" type="number" required name="'.$bookingField.'" id="'.$bookingField.'" min="'.$bookingFieldSpec[1].'" max="'.$bookingFieldSpec[2].'" step="'.$bookingNumericStep.'" value="'.dol_escape_htmltag($bookingNumericValue).'"> ';
 	if ($bookingField === 'horizon') {
 		print '<label for="horizon_unit">'.dol_escape_htmltag($langs->trans('CDavBookingHorizonUnit')).'</label> ';
 		print Form::selectarray('horizon_unit', array('days' => $langs->trans('CDavBookingDays'), 'months' => $langs->trans('CDavBookingMonths')),
 			$bookingConfig['horizon_unit'] ?? 'days', 0, 0, 0, 'required');
 		print '<br><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingHorizonHelp')).'</span>';
+	} elseif ($bookingField === 'notice') {
+		print '<label for="notice_unit">'.dol_escape_htmltag($langs->trans('CDavBookingNoticeUnit')).'</label> ';
+		print Form::selectarray('notice_unit', array('minutes' => $langs->trans('CDavBookingMinutes'), 'days' => $langs->trans('CDavBookingDays')),
+			$bookingNoticeUnit, 0, 0, 0, 'required');
+		print '<br><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingNoticeHelp')).'</span>';
 	} else {
 		print dol_escape_htmltag($langs->trans($bookingFieldSpec[3]));
 	}

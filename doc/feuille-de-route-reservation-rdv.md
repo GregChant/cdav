@@ -561,6 +561,15 @@ Texte de référence pour l'objectif :
   l'archive reproductible pour `master` et `23.0` ; conserver les preuves dans
   `dist/qa/profiles-validation/` avant retrait des instances jetables.
 
+## Unité du préavis — 6.2.1
+
+- [x] Choisir minutes ou jours par profil et convertir la valeur à l'affichage,
+  sans changer le délai stocké en minutes ni les anciennes signatures.
+- [x] Définir un jour comme 24 heures écoulées, conserver la précision minute
+  et les bornes de 0 à 30 jours, sans arrondi silencieux d'une fraction de minute.
+- [ ] Qualifier la saisie et la sauvegarde natives, les régressions sur la
+  matrice, le ZIP reproductible et la publication sur les branches autorisées.
+
 ## Références locales
 
 - [Guide actuel : disponibilités, documents et photos](disponibilites-documents-photos-fr.md).
