@@ -126,6 +126,9 @@ reference in the footer. Native notes remain authoritative on a round trip.
 Booking profiles offer only open projects from the chosen third party. Native
 status checks also protect saves and public reservations; removing an older
 closed-project link requires explicit confirmation.
+The [6.3 qualification report](doc/validation-protection-metier-dav.md) records
+the native HTTP, browser, migration and code-quality checks on all four
+Dolibarr 23/24 and PHP 8.4/8.5 combinations.
 
 Version 6.2.1 lets administrators enter minimum notice in minutes or days, with
 automatic conversion when switching units. One day is 24 hours; the booking

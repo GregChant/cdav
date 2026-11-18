@@ -585,15 +585,20 @@ Texte de référence pour l'objectif :
 - [x] Protéger les rattachements, catégories, statuts, confidentialité et UID
   CardDAV ; traiter les contacts liés à un utilisateur et les synchronisations
   indirectes des adhérents avec les mécanismes natifs disponibles.
-- [ ] Limiter la sélection aux projets ouverts du tiers, contrôler ce statut
+- [x] Limiter la sélection aux projets ouverts du tiers, contrôler ce statut
   côté serveur et préserver les anciens rattachements jusqu'à un remplacement
   ou un retrait explicite.
-- [ ] Qualifier les tests métier, les migrations et les écritures HTTP natives
+- [x] Qualifier les tests métier, les migrations et les écritures HTTP natives
   sur Dolibarr 23/24 × PHP 8.4/8.5, puis clore la revue indépendante.
-- [ ] Générer le paquet reproductible, publier sur `master` et `23.0` et retirer
+- [x] Générer le paquet reproductible, publier sur `master` et `23.0` et retirer
   les quatre instances jetables après conservation des preuves.
 
 Voir le [guide de protection métier](protection-metier-dav-fr.md).
+Qualification 6.3.0 : 68 suites PHP, 12 suites HTTP, 112 cas navigateur et
+migrations sur les quatre combinaisons ; voir le
+[rapport de validation](validation-protection-metier-dav.md). Les preuves
+locales, l'empreinte du paquet et la publication sont référencées dans
+`dist/qa/booking-release-manifest.json`.
 
 ### Compléments à prévoir
 

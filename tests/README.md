@@ -25,7 +25,12 @@ pour rendre visibles les incompatibilités propres à une combinaison.
 | `freebusy.php` | Suppression des données privées sans changer les occupations, récurrences, exceptions et fuseaux |
 | `contact_photos.php` | Photo personnelle, logo du tiers, repli, entité propriétaire, ETag et limites des fichiers, avec fichiers temporaires et doublure SQL ciblée |
 | `attachments.php` | Décodage et limites des pièces jointes, contenu interdit, accès aux documents, traversée de chemin et nettoyage différé des fichiers |
+| `business_policy.php` | Provenance native ou CalDAV, protection par défaut, ancien schéma et migration idempotente |
+| `contact_business.php` | Conservation des tiers, catégories, statuts, confidentialité et identifiants, contacts liés à un utilisateur |
+| `calendar_policy.php` | Déplacements à durée constante, propriétés protégées, descriptions réimportées et rappels natifs conservés |
+| `calendar_description.php` | Sections lisibles, texte riche natif conservé, contexte client/projet, reçu vérifié et absence de données privées dans l'export anonyme |
 | `booking.php` | Créneaux réellement libres, bornes, marges, pauses, journées entières, récurrences, changements d’heure, préavis, horizon et validation des profils |
+| `booking_projects.php` | Statuts projet natifs, conservation des liens indisponibles, retrait explicite et véritable sanitisation/rendu du sélecteur Dolibarr |
 | `booking_calendar.php` | Vue mensuelle, correspondance jours/créneaux, une lecture Agenda par mois, navigation bornée, années bissextiles et confidentialité |
 | `booking_multi.php` | Permissions indépendantes, regroupement, pauses, limites, refus des chevauchements, marges et horaires locaux |
 | `booking_identity.php` | Coordonnées publiques, logo natif, photo et miniature, bornes des images et isolation des fichiers utilisateur |
@@ -62,6 +67,11 @@ explicitement nommée comme base de test ; ils ne sont pas lancés par la CI rap
 Leurs commandes et les résultats de qualification sont dans le
 [guide de réservation](../doc/reservation-rdv-fr.md#contrôles-de-qualité) et le
 [rapport de validation](../doc/validation-reservation-rdv.md).
+La qualification 6.3 des protections métier, des descriptions et des projets
+ouverts est détaillée dans son
+[rapport dédié](../doc/validation-protection-metier-dav.md). Les cas HTTP
+BL01–BL27 sont appelés par `live_integration.php`, avec de vrais objets,
+verrous natifs, droits, rappels et refus de suppression transactionnelle.
 
 La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
 sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.
