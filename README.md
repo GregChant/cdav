@@ -118,7 +118,8 @@ Outlook CalDav Synchronizer's availability hints. Global state changes require
 native owner or all-agenda permissions; attendee replies remain personal.
 Cancellation retains business links, frees assigned calendars and removes only
 pending reminders. Reactivate CDav after updating to install the native field
-and trigger. See the [appointment state guide](doc/etats-rendez-vous-fr.md).
+and trigger. See the [appointment state guide](doc/etats-rendez-vous-fr.md) and
+the [native qualification report](doc/validation-etats-rendez-vous.md).
 
 Version 6.3.3 reduces repeated calendar serialization during CalDAV discovery,
 filtering and REPORT responses. A bounded read cache lives only for the current

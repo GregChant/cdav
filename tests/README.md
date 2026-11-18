@@ -99,6 +99,8 @@ rendez-vous depuis le vrai formulaire Agenda et les écritures DAV. Les cas
 couvrent les permissions, les réponses et disponibilités des participants,
 les révisions et renvois identiques, l'annulation avec rappels, les journées
 entières au changement d'heure et les champs historiques vides.
+La [qualification 6.4.0](../doc/validation-etats-rendez-vous.md) documente les
+104 exécutions PHP, 12 suites HTTP, 304 gardes et contrôles natifs complémentaires.
 
 La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
 sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.

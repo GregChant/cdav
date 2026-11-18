@@ -663,10 +663,12 @@ La vérification du délai sur l'hébergement réel suit l'installation du paque
   modification de tous les agendas, avec contrôle sous verrou et ETags.
 - [x] Préserver dates, durée, liens métier et réponses des autres participants ;
   libérer les affectations et supprimer les seuls rappels à venir à l'annulation.
-- [ ] Qualifier le paquet sur Dolibarr 23/24 et PHP 8.4/8.5, avec tests du
+- [x] Qualifier le paquet sur Dolibarr 23/24 et PHP 8.4/8.5, avec tests du
   formulaire Agenda natif, contrôle PHPCS et absence de duplication de production.
 
 Voir le [guide des états de rendez-vous](etats-rendez-vous-fr.md).
+La [qualification 6.4.0](validation-etats-rendez-vous.md) détaille les 104
+exécutions PHP, 12 suites HTTP, 304 gardes HTTP et le contrôle des formulaires.
 
 ### Compléments à prévoir
 
