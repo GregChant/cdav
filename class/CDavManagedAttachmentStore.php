@@ -385,15 +385,27 @@ class ManagedAttachmentStore
 		return $deferredRows;
 	}
 
-	public function removeAllForEvent($eventId)
+	/**
+	 * Remove technical metadata while optionally retaining bytes until native commit.
+	 *
+	 * @param int $eventId Native appointment identifier
+	 * @param bool $deferFileRemoval Whether the enclosing transaction owns file cleanup
+	 * @return array<object> Deferred physical files
+	 */
+	public function removeAllForEvent($eventId, $deferFileRemoval = false)
 	{
-		if (!$this->isAvailable()) return;
+		if (!$this->isAvailable()) return array();
 		$result = $this->db->query('SELECT managed_id FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment'
 			.' WHERE entity = '.$this->entity().' AND fk_actioncomm = '.((int) $eventId));
 		if (!$result) throw new \RuntimeException('Unable to inspect event managed attachments');
 		$ids = array();
 		while ($row = $this->db->fetch_object($result)) $ids[] = (string) $row->managed_id;
-		foreach ($ids as $id) $this->remove($id, (int) $eventId, false);
+		$deferred = array();
+		foreach ($ids as $id) {
+			if ($deferFileRemoval) $deferred[] = $this->getById($id, (int) $eventId, false);
+			$this->remove($id, (int) $eventId, false, !$deferFileRemoval);
+		}
+		return $deferred;
 	}
 
 	public function readable($managedId)

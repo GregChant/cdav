@@ -109,6 +109,20 @@ try {
 	$transactionalDb->commit();
 	$transactionalStore->discardCreatedFiles($pendingDeletes);
 	attachmentAssert($transactionalDb->row === null && !is_file($managedPath), 'Committed removal must clear metadata and previous bytes');
+
+	// A native DELETE that rolls back must retain the same readable document.
+	$transactionalDb->row = $metadata;
+	file_put_contents($managedPath, 'previous attachment bytes');
+	$transactionalDb->begin();
+	$pendingDeletes = $transactionalStore->removeAllForEvent(123, true);
+	attachmentAssert(count($pendingDeletes) === 1 && is_file($managedPath), 'An uncommitted appointment deletion must retain attachment bytes');
+	$transactionalDb->rollback();
+	attachmentAssert($transactionalDb->row !== null && is_file($managedPath), 'A failed native appointment deletion must restore readable attachment metadata and bytes');
+	$transactionalDb->begin();
+	$pendingDeletes = $transactionalStore->removeAllForEvent(123, true);
+	$transactionalDb->commit();
+	$transactionalStore->discardCreatedFiles($pendingDeletes);
+	attachmentAssert($transactionalDb->row === null && !is_file($managedPath), 'Only a committed appointment deletion may remove attachment bytes');
 } finally {
 	if (isset($managedPath) && is_file($managedPath)) unlink($managedPath);
 	unlink($directory.'/123/linked.txt');

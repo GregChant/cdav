@@ -41,6 +41,7 @@ $parsedUrl = parse_url($davBaseUrl);
 $_SERVER['SERVER_NAME'] = (string) ($parsedUrl['host'] ?? '127.0.0.1');
 $_SERVER['HTTP_HOST'] = $_SERVER['SERVER_NAME'].(isset($parsedUrl['port']) ? ':'.$parsedUrl['port'] : '');
 $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+$_SERVER['QUERY_STRING'] = '';
 
 chdir($dolibarrRoot);
 require $dolibarrRoot.'/main.inc.php';
@@ -316,7 +317,7 @@ try {
 	$GLOBALS['user'] = $admin;
 
 	foreach (array(
-		'CDAV_THIRD_SYNC' => '2', 'CDAV_CONTACT_TAG' => '', 'CDAV_SYNC_PAST' => '3650',
+		'CDAV_THIRD_SYNC' => '2', 'CDAV_MEMBER_SYNC' => '1', 'CDAV_CONTACT_TAG' => '', 'CDAV_SYNC_PAST' => '3650',
 		'CDAV_SYNC_FUTURE' => '3650', 'CDAV_ALLOW_INSECURE_HTTP' => '0',
 		'CDAV_MAX_REQUEST_MB' => '16', 'CDAV_TRUSTED_PROXY_IPS' => '',
 		'CDAV_NATIVE_REMINDERS' => '1', 'AGENDA_REMINDER_BROWSER' => '1',
@@ -324,6 +325,7 @@ try {
 		'CDAV_MANAGED_ATTACHMENTS' => '1', 'CDAV_MANAGED_ATTACHMENT_MAX_MB' => '1',
 		'CDAV_MANAGED_ATTACHMENT_MAX_COUNT' => '3', 'CDAV_MANAGED_ATTACHMENT_QUOTA_MB' => '2',
 		'CDAV_SYNC_RETENTION_DAYS' => '180', 'CDAV_SCHEDULING_RETENTION_DAYS' => '30',
+		'CDAV_PROTECT_NATIVE_EVENTS' => '1',
 	) as $name => $value) {
 		$constantSnapshots[$name] = liveSnapshotConstant($db, $name, $entity);
 		liveAssert(dolibarr_set_const($db, $name, $value, 'chaine', 0, '', $entity) > 0, 'Unable to configure '.$name);
@@ -349,6 +351,7 @@ try {
 	// same explicit business permissions that a real DAV account requires.
 	liveAssert($testUser->addrights(0, 'societe', '', $entity) > 0, 'Unable to grant native third-party/contact rights');
 	liveAssert($testUser->addrights(0, 'agenda', '', $entity) > 0, 'Unable to grant native agenda rights');
+	liveAssert($testUser->addrights(0, 'adherent', '', $entity) > 0, 'Unable to grant native member rights');
 	liveAssert($testUser->fetch($userId) > 0 && $testUser->loadRights() >= 0, 'Unable to reload the isolated DAV user');
 	liveAssert($testUser->isAdmin(), 'The isolated DAV user does not have the required test rights');
 	liveAssert($testUser->hasRight('societe', 'contact', 'read') && $testUser->hasRight('agenda', 'myactions', 'write'), 'The isolated DAV user rights were not loaded');
@@ -504,7 +507,7 @@ try {
 	$contactRow = liveRow($db, 'SELECT firstname, email, phone, phone_mobile, url, fk_soc, photo FROM '.MAIN_DB_PREFIX.'socpeople WHERE rowid = '.$contactId);
 	liveAssert($contactRow !== null && (string) $contactRow->firstname === 'Alice Edited', 'Contact name update did not reach Dolibarr');
 	liveAssert((string) $contactRow->email === '' && (string) $contactRow->phone === '' && (string) $contactRow->phone_mobile === '' && (string) $contactRow->url === '', 'Removed vCard properties were not cleared in Dolibarr');
-	liveAssert(empty($contactRow->fk_soc), 'Removing ORG did not detach the native third-party link');
+	liveAssert((int) $contactRow->fk_soc === $linkCompanyId, 'Omitting ORG detached the native third-party link');
 	liveAssert((string) $contactRow->photo === '' && !is_file($contactPhotoFile), 'Removing PHOTO did not clean the native contact photo');
 	$contactAfterReplacement = liveHttp($davBaseUrl, $login, $password, 'GET', $contactPath);
 	liveAssert(!str_contains($contactAfterReplacement['body'], 'alice.secondary-'.$token.'@example.test')
@@ -1357,6 +1360,14 @@ try {
 	liveAssert((int) liveRow($db, 'SELECT statut FROM '.MAIN_DB_PREFIX.'socpeople WHERE rowid = '.$contactId)->statut === 1, 'Read-only authorization probes modified the native contact');
 	liveOk('BOLA/function authorization, metadata reconciliation and native-right calendar delegation');
 
+	require_once __DIR__.'/business_live_cases.php';
+	businessLiveCases($db, $testUser, $admin, array(
+		'base_url' => $davBaseUrl, 'login' => $login, 'password' => $password,
+		'prefix' => $prefix, 'token' => $token, 'company_id' => $linkCompanyId, 'entity' => $entity,
+		'calendar_path' => $calendarPath, 'addressbook_path' => $addressBookPath,
+		'limited_user_id' => $limitedUserId, 'limited_login' => $limitedLogin, 'limited_password' => $limitedPassword,
+		'limited_calendar_path' => $limitedCalendarPath,
+	));
 	$eventDelete = liveHttp($davBaseUrl, $login, $password, 'DELETE', $eventPath);
 	liveHttpStatus($eventDelete, array(200, 204), 'CalDAV appointment deletion');
 	$todoDelete = liveHttp($davBaseUrl, $login, $password, 'DELETE', $todoPath);

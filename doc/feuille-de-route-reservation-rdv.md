@@ -572,6 +572,26 @@ Texte de référence pour l'objectif :
 - [x] Préparer le ZIP reproductible et la publication sur `master` et `23.0`,
   conserver les preuves et retirer les deux instances jetables.
 
+## Protection métier CalDAV et CardDAV — 6.3
+
+- [x] Protéger par défaut les événements créés dans Dolibarr, les réservations
+  publiques et les événements historiques sans provenance certaine ; permettre
+  leur déplacement à durée constante et leur suppression selon les droits.
+- [x] Enregistrer l’origine uniquement à la création CalDAV, sans déduire cette
+  origine d’un mapping ancien ni la modifier lors d’un PUT.
+- [x] Conserver les liaisons tiers/projet/contacts, les ressources et les notes
+  natives lors des déplacements ; couvrir aussi les pièces jointes et les
+  effets de planification avant validation.
+- [x] Protéger les rattachements, catégories, statuts, confidentialité et UID
+  CardDAV ; traiter les contacts liés à un utilisateur et les synchronisations
+  indirectes des adhérents avec les mécanismes natifs disponibles.
+- [ ] Qualifier les tests métier, les migrations et les écritures HTTP natives
+  sur Dolibarr 23/24 × PHP 8.4/8.5, puis clore la revue indépendante.
+- [ ] Générer le paquet reproductible, publier sur `master` et `23.0` et retirer
+  les quatre instances jetables après conservation des preuves.
+
+Voir le [guide de protection métier](protection-metier-dav-fr.md).
+
 ## Références locales
 
 - [Guide actuel : disponibilités, documents et photos](disponibilites-documents-photos-fr.md).

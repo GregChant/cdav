@@ -11,7 +11,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-native-recurrence-v5';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-readable-business-description-v6';
 
 	private $db;
 
@@ -28,11 +28,15 @@ class CdavLib
 	/** @var bool|null Whether CalDAV recurrence projection metadata exists. */
 	private $hasRecurrenceTable = null;
 
+	/** @var bool|null Whether booking references can be verified against native event receipts. */
+	private $hasBookingReferenceTables = null;
+
 	function __construct($user, $db, $langs, $davDocumentUrls = false)
 	{
 		$this->user 	= $user;
 		$this->db 		= $db;
 		$this->langs 	= $langs;
+		$this->langs->loadLangs(array('main', 'companies', 'cdav@cdav'));
 		$this->davDocumentUrls = (bool) $davDocumentUrls;
 	}
 
@@ -115,16 +119,173 @@ class CdavLib
 		)), "\n");
 	}
 
-	private function addDescriptionPart(array &$parts, $prefix, $value, $repeatPrefix = false)
+	/**
+	 * Add one labeled native value without decorating every line of a paragraph.
+	 * @param array $lines Current section
+	 * @param string $key Native translation key
+	 * @param string $value Native value
+	 * @return void
+	 */
+	private function addDescriptionValue(array &$lines, $key, $value)
 	{
 		$value = $this->cleanDolibarrText($value);
-		if ($value === '') {
-			return;
+		if ($value !== '') $lines[] = $this->langs->transnoentitiesnoconv($key).' : '.$value;
+	}
+
+	/**
+	 * Confirm the exact technical header before displaying it as a booking footer.
+	 * The receipt is protocol state; arbitrary user notes never authorize stripping
+	 * a similar-looking line. Missing or expired receipts preserve the original note.
+	 * @param object $event Native export row
+	 * @param string $note Native plain-text note
+	 * @return string Verified reference, otherwise empty
+	 */
+	private function descriptionBookingReference($event, $note)
+	{
+		if (($event->elem_source ?? '') !== 'ev' || empty($event->id)
+			|| !preg_match('/\ACDav booking ([a-f0-9]{32})(?:\n|\z)/D', $note, $match)) return '';
+		if ($this->hasBookingReferenceTables === null) {
+			$this->hasBookingReferenceTables = (bool) $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_booking_request')
+				&& (bool) $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_booking_request_event');
 		}
-		if ($repeatPrefix) {
-			$value = str_replace("\n", "\n".$prefix, $value);
+		if (!$this->hasBookingReferenceTables) return '';
+		$result = $this->db->query('SELECT request.reference FROM '.MAIN_DB_PREFIX.'cdav_booking_request request LEFT JOIN '.MAIN_DB_PREFIX.'cdav_booking_request_event segment ON segment.request_hash = request.request_hash WHERE request.reference = \''.$this->db->escape($match[1]).'\' AND (request.fk_actioncomm = '.((int) $event->id)
+			.' OR segment.fk_actioncomm = '.((int) $event->id).') LIMIT 1');
+		$row = $result ? $this->db->fetch_object($result) : null;
+		return $row && hash_equals($match[1], (string) $row->reference) ? $match[1] : '';
+	}
+
+	/**
+	 * Read a native postal address as one clean multiline value.
+	 * @param object $row Native export row
+	 * @param string $prefix Field prefix
+	 * @return string Postal address
+	 */
+	private function descriptionAddress($row, $prefix = '')
+	{
+		$street = $this->cleanDolibarrText($row->{$prefix.'address'} ?? '');
+		$town = trim(($row->{$prefix.'zip'} ?? '').' '.($row->{$prefix.'town'} ?? ''));
+		$country = $this->cleanDolibarrText($row->{$prefix.'country_label'} ?? '');
+		return implode("\n", array_filter(array($street, $town, $country), static fn($value) => $value !== ''));
+	}
+
+	/**
+	 * Build ordinary iCalendar TEXT sections and a trusted editable-note envelope.
+	 * @param object $row Native event, task or intervention export row
+	 * @param string $subject Already selected native subject
+	 * @param string $location Already selected native location
+	 * @param string $note Native notes, cleaned or checklist-formatted by the caller
+	 * @param string $nativeNote Original SQL note, retained on a harmless client echo
+	 * @param string $publicNote Public parent-document note, outside the editable region
+	 * @return array<string,mixed> Text and trusted note boundaries
+	 */
+	private function calendarDescriptionParts($row, $subject, $location, $note, $nativeNote, $publicNote = '')
+	{
+		$reference = $this->descriptionBookingReference($row, $note);
+		$visitor = array();
+		if ($reference !== '') {
+			$header = 'CDav booking '.$reference;
+			$note = (string) substr($note, strlen($header));
+			if (str_starts_with($note, "\n")) $note = substr($note, 1);
+			$bookingLines = explode("\n", $note, 4);
+			if (count($bookingLines) === 4 && filter_var($bookingLines[1], FILTER_VALIDATE_EMAIL)) {
+				$this->addDescriptionValue($visitor, 'Name', $bookingLines[0]);
+				$this->addDescriptionValue($visitor, 'Email', $bookingLines[1]);
+				$this->addDescriptionValue($visitor, 'Phone', $bookingLines[2]);
+				$note = $bookingLines[3];
+				$generatedDetails = $this->langs->transnoentitiesnoconv('CDavBookingSubject').': '.$this->cleanDolibarrText($subject)
+					."\n".$this->langs->transnoentitiesnoconv('CDavBookingClientAddress').":\n".$this->cleanDolibarrText($location);
+				if ($note === $generatedDetails) $note = '';
+			}
 		}
-		$parts[] = $prefix.$value;
+		$sections = array();
+		$publicNote = $this->cleanDolibarrText($publicNote);
+
+		$client = $visitor;
+		$this->addDescriptionValue($client, 'ThirdParty', $row->soc_nom ?? '');
+		$this->addDescriptionValue($client, 'Contact', trim(($row->firstname ?? '').' '.($row->lastname ?? '')));
+		$this->addDescriptionValue($client, 'Contacts', $row->other_contacts ?? '');
+		$companyAddress = $this->descriptionAddress($row, 'soc_');
+		$contactAddress = $this->descriptionAddress($row);
+		$this->addDescriptionValue($client, 'Address', $companyAddress);
+		if ($contactAddress !== $companyAddress) $this->addDescriptionValue($client, 'Address', $contactAddress);
+		$this->addDescriptionValue($client, 'Phone', $row->soc_phone ?? '');
+		$this->addDescriptionValue($client, 'PhonePro', $row->phone ?? '');
+		$this->addDescriptionValue($client, 'PhonePerso', $row->phone_perso ?? '');
+		$this->addDescriptionValue($client, 'PhoneMobile', $row->phone_mobile ?? '');
+		$this->addDescriptionValue($client, 'Email', $row->soc_email ?? '');
+		$this->addDescriptionValue($client, 'Email', $row->contact_email ?? '');
+		if ($client) $sections[] = $this->langs->transnoentitiesnoconv('CDavCalendarClientContact')."\n".implode("\n", $client);
+
+		$project = array();
+		$projectRef = $this->cleanDolibarrText($row->proj_ref ?? '');
+		if (str_starts_with((string) ($row->elem_source ?? ''), 'p') && !empty($row->ref)) $projectRef .= '/'.$row->ref;
+		$projectTitle = trim(($projectRef !== '' ? '['.$projectRef.'] ' : '').$this->cleanDolibarrText($row->proj_title ?? ''));
+		if ($projectTitle !== '') $project[] = $projectTitle;
+		$projectNote = $this->cleanDolibarrText($row->proj_desc ?? '');
+		if ($projectNote !== '') $project[] = $projectNote;
+		if ($project) $sections[] = $this->langs->transnoentitiesnoconv('CDavCalendarProject')."\n".implode("\n\n", $project);
+		if ($reference !== '') $sections[] = $this->langs->transnoentitiesnoconv('CDavCalendarBookingReference').' : '.$reference;
+		$contextText = implode("\n\n", $sections);
+		$prefixFields = array('heading' => $this->langs->transnoentitiesnoconv('CDavCalendarAppointment'),
+			'subject_label' => $this->langs->transnoentitiesnoconv('CDavBookingSubject'),
+			'location_label' => $this->langs->transnoentitiesnoconv('CDavBookingClientAddress'),
+			'original_subject' => $this->cleanDolibarrText($subject), 'original_location' => $this->cleanDolibarrText($location),
+			'subject_editable' => ($row->elem_source ?? 'ev') !== 'fi', 'location_editable' => ($row->elem_source ?? 'ev') === 'ev',
+			'public_note' => $publicNote, 'note_present' => $note !== '', 'context_present' => $contextText !== '');
+		$prefix = $this->getCalendarDescriptionPrefixForFields(array('note_prefix_fields' => $prefixFields), $subject, $location);
+		$suffix = ($note !== '' && $contextText !== '' ? "\n\n" : '').$contextText;
+		return array('text' => $prefix.$note.$suffix, 'note_prefix' => $prefix, 'note_suffix' => $suffix,
+			'native_note' => (string) $nativeNote, 'notes_editable' => $reference === '', 'note_prefix_fields' => $prefixFields);
+	}
+
+	/**
+	 * Rebuild generated appointment fields when a client also updates their iCal fields.
+	 * Trusted structure preserves parent-document notes even when they contain the old
+	 * subject or address. CRM context and the editable note are never searched/replaced.
+	 * @param array<string,mixed> $parts Server-composed description metadata
+	 * @param string $subject New native appointment subject allowed by the caller
+	 * @param string $location New native appointment location allowed by the caller
+	 * @return string Trusted generated prefix for those explicit values
+	 */
+	public function getCalendarDescriptionPrefixForFields(array $parts, $subject, $location)
+	{
+		if (!isset($parts['note_prefix_fields'])) return (string) ($parts['note_prefix'] ?? '');
+		$fields = $parts['note_prefix_fields'];
+		$lines = array();
+		$subject = !empty($fields['subject_editable']) ? $this->cleanDolibarrText($subject) : $fields['original_subject'];
+		$location = !empty($fields['location_editable']) ? $this->cleanDolibarrText($location) : $fields['original_location'];
+		if ($subject !== '') $lines[] = $fields['subject_label'].' : '.$subject;
+		if ($location !== '') $lines[] = $fields['location_label'].' : '.$location;
+		if ($fields['public_note'] !== '') $lines[] = ($lines ? "\n" : '').$fields['public_note'];
+		$appointment = $lines || $fields['note_present'] ? $fields['heading']."\n".implode("\n", $lines) : '';
+		return $appointment.($appointment !== '' && ($fields['note_present'] || $fields['context_present']) ? "\n\n" : '');
+	}
+
+	/**
+	 * Provide the same server composition to the exporter and its guarded DAV import.
+	 * @param object $row Native database export row
+	 * @return array<string,mixed> Human-readable text and exact native note envelope
+	 */
+	public function getCalendarDescriptionParts($row)
+	{
+		$source = (string) ($row->elem_source ?? 'ev');
+		if (str_starts_with($source, 'p')) {
+			$nativeNote = (string) ($row->description ?? '');
+			return $this->calendarDescriptionParts($row, $row->label ?? '', '', $this->formatChecklistText($nativeNote),
+				$nativeNote, $row->note_public ?? '');
+		}
+		if ($source === 'fi') {
+			$nativeNote = (string) ($row->det_description ?? '');
+			$subject = trim((string) ($row->fi_description ?? ''));
+			if ($subject === '') $subject = trim((string) ($row->soc_nom ?? ''));
+			$subject = '['.trim((string) ($row->fi_ref ?? '')).'] '.$subject;
+			return $this->calendarDescriptionParts($row, $subject, '', $this->cleanDolibarrText($nativeNote),
+				$nativeNote, $row->fi_note_public ?? '');
+		}
+		$nativeNote = (string) ($row->note ?? '');
+		$note = (int) ($row->percent ?? -1) === -1 ? $this->cleanDolibarrText($nativeNote) : $this->formatChecklistText($nativeNote);
+		return $this->calendarDescriptionParts($row, $row->label ?? '', $row->location ?? '', $note, $nativeNote);
 	}
 
 	private function schedulingTableAvailable()
@@ -581,12 +742,14 @@ class CdavLib
 					sp.phone,
 					sp.phone_perso,
 					sp.phone_mobile,
+					sp.email AS contact_email,
 					s.nom AS soc_nom,
 					s.address soc_address,
 					s.zip soc_zip,
 					s.town soc_town,
 					cos.label soc_country_label,
 					s.phone soc_phone,
+					s.email soc_email,
 					p.ref proj_ref,
 					p.title proj_title,
 					p.description proj_desc,
@@ -752,7 +915,7 @@ class CdavLib
 		}
 
 		sort($tokens, SORT_STRING);
-		return sha1(CDAV_URI_KEY.'|'.self::CALENDAR_SERIALIZATION_VERSION.'|'.implode('|', $tokens));
+		return sha1(CDAV_URI_KEY.'|'.self::CALENDAR_SERIALIZATION_VERSION.'|'.$this->langs->getDefaultLang().'|'.implode('|', $tokens));
 	}
 	/**
 	 * Base sql request for project tasks
@@ -790,6 +953,7 @@ class CdavLib
 					s.town soc_town,
 					cos.label soc_country_label,
 					s.phone soc_phone,
+					s.email soc_email,
 					(SELECT GROUP_CONCAT(u.login) FROM '.MAIN_DB_PREFIX.'element_contact gec
 						LEFT JOIN '.MAIN_DB_PREFIX.'c_type_contact as gtc ON (gtc.rowid=gec.fk_c_type_contact AND gtc.element="project_task" AND gtc.source="internal")
 						LEFT OUTER JOIN '.MAIN_DB_PREFIX.'user AS u ON (u.rowid=gec.fk_socpeople)
@@ -857,6 +1021,7 @@ class CdavLib
 					s.town soc_town,
 					cos.label soc_country_label,
 					s.phone soc_phone,
+					s.email soc_email,
 					(SELECT GROUP_CONCAT(u.login) FROM '.MAIN_DB_PREFIX.'element_contact gec
 						LEFT JOIN '.MAIN_DB_PREFIX.'c_type_contact as gtc ON (gtc.rowid=gec.fk_c_type_contact AND gtc.element="fichinter" AND gtc.source="internal")
 						LEFT OUTER JOIN '.MAIN_DB_PREFIX.'user AS u ON (u.rowid=gec.fk_socpeople)
@@ -1020,28 +1185,12 @@ class CdavLib
 				$caldata.="PERCENT-COMPLETE:".$obj->percent."\n";
 			}
 
-			$descriptionParts = array();
-			if (!empty($obj->proj_ref))
-				$this->addDescriptionPart($descriptionParts, '💼📋 ', '['.$obj->proj_ref.'] '.$obj->proj_title);
-			if (!empty($obj->proj_desc))
-				$this->addDescriptionPart($descriptionParts, '💼⚠️ ', $obj->proj_desc, true);
-			if (!empty($obj->soc_town))
-				$this->addDescriptionPart($descriptionParts, '💼🏁 ', $obj->soc_town);
-			if (!empty($obj->soc_nom))
-				$this->addDescriptionPart($descriptionParts, '💼🏢 ', $obj->soc_nom);
-			if (!empty($obj->soc_phone))
-				$this->addDescriptionPart($descriptionParts, '💼☎️ ', $obj->soc_phone);
-			if (!empty($obj->firstname) || !empty($obj->lastname))
-				$this->addDescriptionPart($descriptionParts, '💼👨 ', trim($obj->firstname.' '.$obj->lastname));
-			if (!empty($obj->phone) || !empty($obj->phone_perso) || !empty($obj->phone_mobile))
-				$this->addDescriptionPart($descriptionParts, '💼📞 ', trim($obj->phone.' '.$obj->phone_perso.' '.$obj->phone_mobile));
-	// removed because unable to swap from one calendar to an other with extrenal client
-	//		if(strpos($obj->other_users,',')) // several
-	//			$this->addDescriptionPart($descriptionParts, '💼USR: ', $obj->other_users);
-			$note = $type == 'VEVENT' ? $this->cleanDolibarrText($obj->note) : $this->formatChecklistText($obj->note);
-			if ($note !== '')
-				$descriptionParts[] = $note;
-			$caldata.="DESCRIPTION:".$this->escapeICalendarText(implode("\n", $descriptionParts))."\n";
+			$description = '';
+			if (!$booking) {
+				$obj->_cdav_description = $this->getCalendarDescriptionParts($obj);
+				$description = $obj->_cdav_description['text'];
+			}
+			$caldata.="DESCRIPTION:".$this->escapeICalendarText($description)."\n";
 
 			$caldata.="END:".$type."\n";
 			if($bHeader) {
@@ -1124,31 +1273,12 @@ class CdavLib
 				$caldata.="PERCENT-COMPLETE:".$obj->progress."\n";
 			}
 
-			$descriptionParts = array();
-			if(!empty($obj->proj_desc))
-				$this->addDescriptionPart($descriptionParts, '💼⚠️ ', $obj->proj_desc, true);
-			if(!empty($obj->soc_town))
-				$this->addDescriptionPart($descriptionParts, '💼🏁 ', $obj->soc_town);
-			if(!empty($obj->soc_nom))
-				$this->addDescriptionPart($descriptionParts, '💼🏢 ', $obj->soc_nom);
-			if(!empty($obj->soc_phone))
-				$this->addDescriptionPart($descriptionParts, '💼☎️ ', $obj->soc_phone);
-			if(!empty($obj->other_contacts))
-				$this->addDescriptionPart($descriptionParts, '💼👨 ', $obj->other_contacts);
-			if(!empty($obj->proj_ref))
-				$this->addDescriptionPart($descriptionParts, '💼📋 ', '['.$obj->proj_ref.'/'.$obj->ref.'] '.$obj->proj_title);
-			if(!empty($obj->note_public))
-				$this->addDescriptionPart($descriptionParts, '💼📝 ', $obj->note_public, true);
-	//removed because unable to swap from one calendar to an other with external client
-	//		if(!empty($obj->note_private))
-	//			$this->addDescriptionPart($descriptionParts, '💼🔒 ', $obj->note_private, true);
-			$description = $this->formatChecklistText($obj->description);
-			if ($description !== '')
-				$descriptionParts[] = $description;
-	// removed because unable to swap from one calendar to an other with external client
-	//		if(strpos($obj->other_users,',')) // several
-	//			$this->addDescriptionPart($descriptionParts, '💼USR: ', $obj->other_users);
-			$caldata.="DESCRIPTION:".$this->escapeICalendarText(implode("\n", $descriptionParts))."\n";
+			$description = '';
+			if (!$booking) {
+				$obj->_cdav_description = $this->getCalendarDescriptionParts($obj);
+				$description = $obj->_cdav_description['text'];
+			}
+			$caldata.="DESCRIPTION:".$this->escapeICalendarText($description)."\n";
 
 			$caldata.="END:".$type."\n";
 			if($bHeader)
@@ -1203,24 +1333,12 @@ class CdavLib
 			$caldata.="TRANSP:OPAQUE\n";
 			$caldata.="STATUS:CONFIRMED\n";
 
-			$descriptionParts = array();
-			if(!empty($obj->proj_ref))
-				$this->addDescriptionPart($descriptionParts, '💼📋 ', '['.$obj->proj_ref.'] '.$obj->proj_title);
-			if(!empty($obj->proj_desc))
-				$this->addDescriptionPart($descriptionParts, '💼⚠️ ', $obj->proj_desc, true);
-			if(!empty($obj->soc_nom))
-				$this->addDescriptionPart($descriptionParts, '💼🏢 ', $obj->soc_nom);
-			if(!empty($obj->soc_town))
-				$this->addDescriptionPart($descriptionParts, '💼🏁 ', $obj->soc_town);
-			if(!empty($obj->soc_phone))
-				$this->addDescriptionPart($descriptionParts, '💼☎️ ', $obj->soc_phone);
-			if(!empty($obj->other_contacts))
-				$this->addDescriptionPart($descriptionParts, '💼👨 ', $obj->other_contacts);
-			if(!empty($obj->fi_note_public))
-				$this->addDescriptionPart($descriptionParts, '💼📝 ', $obj->fi_note_public, true);
-			if(!empty($obj->det_description))
-				$descriptionParts[] = $this->cleanDolibarrText($obj->det_description);
-			$caldata.="DESCRIPTION:".$this->escapeICalendarText(implode("\n", $descriptionParts))."\n";
+			$description = '';
+			if (!$booking) {
+				$obj->_cdav_description = $this->getCalendarDescriptionParts($obj);
+				$description = $obj->_cdav_description['text'];
+			}
+			$caldata.="DESCRIPTION:".$this->escapeICalendarText($description)."\n";
 
 			$caldata.="END:".$type."\n";
 			if($bHeader)

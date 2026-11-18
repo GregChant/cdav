@@ -355,7 +355,8 @@ $server->addPlugin(new \Dolibarr\CDav\CardDAVPlugin($maxRequestBytes));
 // llx_cdav_scheduling.calendardata is MEDIUMTEXT (2^24 - 1 bytes).
 $server->addPlugin(new \Dolibarr\CDav\CalDAVPlugin(
 	min($maxRequestBytes, 16777215),
-	(bool) getDolGlobalInt('CDAV_DELEGATION')
+	(bool) getDolGlobalInt('CDAV_DELEGATION'),
+	$caldavBackend
 ));
 $DAVACL_plugin = new \Sabre\DAVACL\Plugin();
 $DAVACL_plugin->allowUnauthenticatedAccess = false;

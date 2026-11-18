@@ -232,7 +232,7 @@ if ($action == 'setvalue') {
 									$db, "CDAV_TRUSTED_PROXY_IPS",
 									implode(',', array_keys($trustedProxyIps)), 'chaine', 0, '', $conf->entity
 	);
-	foreach (array('CDAV_NATIVE_REMINDERS', 'CDAV_DELEGATION', 'CDAV_SCHEDULING', 'CDAV_MANAGED_ATTACHMENTS') as $booleanSetting) {
+	foreach (array('CDAV_NATIVE_REMINDERS', 'CDAV_DELEGATION', 'CDAV_SCHEDULING', 'CDAV_MANAGED_ATTACHMENTS', 'CDAV_PROTECT_NATIVE_EVENTS') as $booleanSetting) {
 		dolibarr_set_const($db, $booleanSetting, GETPOSTINT($booleanSetting) ? 1 : 0, 'chaine', 0, '', $conf->entity);
 	}
 	$boundedSettings = array(
@@ -292,6 +292,7 @@ $CDAV_DELEGATION=getDolGlobalInt('CDAV_DELEGATION');
 $CDAV_SCHEDULING=getDolGlobalInt('CDAV_SCHEDULING');
 $CDAV_SCHEDULING_RETENTION_DAYS=getDolGlobalInt('CDAV_SCHEDULING_RETENTION_DAYS', 30);
 $CDAV_MANAGED_ATTACHMENTS=getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS');
+$CDAV_PROTECT_NATIVE_EVENTS=getDolGlobalInt('CDAV_PROTECT_NATIVE_EVENTS', 1);
 $CDAV_MANAGED_ATTACHMENT_MAX_MB=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_MAX_MB', 8);
 $CDAV_MANAGED_ATTACHMENT_MAX_COUNT=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_MAX_COUNT', 10);
 $CDAV_MANAGED_ATTACHMENT_QUOTA_MB=getDolGlobalInt('CDAV_MANAGED_ATTACHMENT_QUOTA_MB', 256);
@@ -336,6 +337,11 @@ print '<tr >';
 print '<td align=left><strong>'.$langs->trans("CDavMaxRequestSize").'</strong><br/>'.$langs->trans("CDavMaxRequestSizeHelp").'</td>';
 print '<td align=left><input size="6" type="number" min="1" max="64" class="flat" name="CDAV_MAX_REQUEST_MB" value="'.((int) $CDAV_MAX_REQUEST_MB).'"> MiB</td>';
 print '</tr>'."\n";
+
+print '<tr class="liste_titre"><td align="center" colspan="2">'.$langs->trans('CDavBusinessProtection').'</td></tr>';
+print '<tr><td><strong>'.$langs->trans('CDavProtectNativeEvents').'</strong><br>'.$langs->trans('CDavProtectNativeEventsHelp').'</td>';
+print '<td>'.$form->selectyesno('CDAV_PROTECT_NATIVE_EVENTS', $CDAV_PROTECT_NATIVE_EVENTS, 1).'</td></tr>';
+print '<tr><td colspan="2">'.$langs->trans('CDavContactBusinessProtectionHelp').'</td></tr>';
 
 print '<tr class="liste_titre"><td align="center" colspan="2">'.$langs->trans('CDavAdvancedDavFeatures').'</td></tr>';
 $yesNoSettings = array(

@@ -112,6 +112,18 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.3.0 protects appointments created in Dolibarr or by public booking:
+CalDAV can move them while preserving duration, or delete them according to
+native permissions. Other appointment information remains managed in Dolibarr.
+Protection is enabled by default; newly created CalDAV appointments retain normal
+editing. CardDAV preserves existing third-party links, categories, status and
+privacy, and protects contacts linked to a user account. Reactivate CDav once
+after updating to install immutable creation provenance; older ambiguous events
+remain protected. See the [French business protection guide](doc/protection-metier-dav-fr.md).
+Calendar descriptions also group appointment notes, client/contact details and
+project information into readable plain-text sections, with a verified booking
+reference in the footer. Native notes remain authoritative on a round trip.
+
 Version 6.2.1 lets administrators enter minimum notice in minutes or days, with
 automatic conversion when switching units. One day is 24 hours; the booking
 engine retains whole minutes and existing profile settings remain unchanged.

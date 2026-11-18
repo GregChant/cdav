@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '6.2.1';
+		$this->version = '6.3.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -148,6 +148,7 @@ class modCDav extends DolibarrModules
 			34 => array('CDAV_MANAGED_ATTACHMENT_QUOTA_MB', 'chaine', '256', 'Managed attachment quota per user',0,'current',0),
 			35 => array('CDAV_BOOKING_ENABLED', 'chaine', '0', 'Enable public appointment booking after explicit configuration',0,'current',0),
 			36 => array('CDAV_BOOKING_ALLOW_LOCAL_HTTP', 'chaine', '0', 'Allow loopback HTTP only for isolated public-booking tests',0,'current',0),
+			37 => array('CDAV_PROTECT_NATIVE_EVENTS', 'chaine', '1', 'Protect native Agenda appointments from DAV business-data changes',0,'current',0),
 		);
 
 		// Array to add new pages in new tabs
@@ -357,6 +358,11 @@ class modCDav extends DolibarrModules
 			require_once dirname(__DIR__, 2).'/class/CDavBookingSchema.php';
 			if (\Dolibarr\CDav\BookingSchema::migrate($this->db) < 0) {
 				$this->error = $langs->trans('CDavBookingUnavailable');
+				return 0;
+			}
+			require_once dirname(__DIR__, 2).'/class/CDavBusinessPolicy.php';
+			if (\Dolibarr\CDav\BusinessPolicy::migrate($this->db) < 0) {
+				$this->error = $langs->trans('CDavBusinessProtectionMigrationFailed');
 				return 0;
 			}
 		}

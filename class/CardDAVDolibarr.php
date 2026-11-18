@@ -624,6 +624,48 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 	}
 
+	/**
+	 * Serialize shared business objects before establishing a repeatable-read view.
+	 * Contacts appear in several users' address books; locking only the DAV owner
+	 * cannot protect their native links against another address book or native UI.
+	 *
+	 * @param int $addressbookId Authenticated virtual address book
+	 * @param string $cardUri Resource basename
+	 * @return void
+	 */
+	private function _lockCardBusinessObject($addressbookId, $cardUri)
+	{
+		$bookType = intdiv((int) $addressbookId - (int) $this->user->id, CDAV_ADDRESSBOOK_ID_SHIFT);
+		$types = array(0 => array('ct', 'socpeople', 'contact'), 1 => array('th', 'societe', 'societe'), 2 => array('mb', 'adherent', 'adherent'));
+		if (!isset($types[$bookType])) throw new Forbidden('Unknown Dolibarr address book');
+		list($type, $table, $feature) = $types[$bookType];
+		$queries = array();
+		$nativePattern = '/^(\d+)-'.$type.'-'.preg_quote(CDAV_URI_KEY, '/').'(?:\.vcf)?$/';
+		if (preg_match($nativePattern, (string) $cardUri, $matches)) {
+			$queries[] = 'SELECT obj.rowid FROM '.MAIN_DB_PREFIX.$table.' obj WHERE obj.rowid = '.((int) $matches[1])
+				.' AND obj.entity IN ('.getEntity($feature).') FOR UPDATE';
+		} else {
+			if ($this->_cardMappingTableAvailable()) {
+				// The unique URI hash selects a single mapping before locking its
+				// business row; an OR across joined tables would lock a directory scan.
+				$queries[] = 'SELECT obj.rowid FROM '.MAIN_DB_PREFIX.'cdav_cardmap cm INNER JOIN '.MAIN_DB_PREFIX.$table.' obj ON obj.rowid = cm.fk_object AND obj.entity = cm.entity WHERE cm.entity = '.$this->entity
+					.' AND cm.object_type = \''.$type.'\' AND cm.uuidhash = \''.hash('sha256', (string) $cardUri).'\' AND obj.entity IN ('.getEntity($feature).') FOR UPDATE';
+			}
+			$encodedUri = rtrim(strtr(base64_encode((string) $cardUri), '+/', '-_'), '=');
+			$queries[] = 'SELECT obj.rowid FROM '.MAIN_DB_PREFIX.$table.' obj WHERE obj.entity IN ('.getEntity($feature).') AND (obj.ref_ext = \'cdav:'.$this->db->escape((string) $cardUri)
+				.'\' OR obj.ref_ext LIKE \'cdav2:'.$this->db->escape($encodedUri).'.%\') FOR UPDATE';
+		}
+		// Visibility and native access are checked by getCard and the business API
+		// after locking; the lookup itself never reveals whether a row was found.
+		foreach ($queries as $sql) {
+			$result = $this->db->query($sql);
+			if (!$result) throw new \Sabre\DAV\Exception('Unable to lock the native CardDAV business object');
+			$found = false;
+			while ($this->db->fetch_object($result)) $found = true;
+			if ($found) return;
+		}
+	}
+
 	public function expectCardVersion($addressbookId, $cardUri, $etag)
 	{
 		$this->expectedCardEtags[((int) $addressbookId).'\n'.(string) $cardUri] = (string) $etag;
@@ -700,6 +742,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	/** Refuse two DAV resources that claim the same vCard UID. */
 	private function _assertCardUidAvailable($type, $sourceUid, $objectId = 0)
 	{
+		if (preg_match('/^(\d+)-'.preg_quote((string) $type, '/').'-'.preg_quote(CDAV_URI_KEY, '/').'(?:\.vcf)?$/', (string) $sourceUid, $matches)
+			&& (int) $matches[1] !== (int) $objectId) {
+			throw new \Sabre\DAV\Exception\Conflict('Native Dolibarr vCard identities cannot be reassigned to another object');
+		}
 		$this->_pruneOrphanCardMetadata();
 		if (!$this->_cardMappingTableAvailable()) {
 			return;
@@ -999,7 +1045,126 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		while ($row = $this->db->fetch_object($result)) {
 			$ids[] = (int) $row->rowid;
 		}
-		return count($ids) === 1 ? $ids[0] : 0;
+		if (count($ids) !== 1) {
+			return 0;
+		}
+		if (!function_exists('checkUserAccessToObject')) {
+			require_once DOL_DOCUMENT_ROOT.'/core/lib/security.lib.php';
+		}
+		if (!checkUserAccessToObject($this->user, array('societe'), $ids[0], 'societe')) {
+			throw new Forbidden('The vCard organization is not an accessible Dolibarr third party');
+		}
+		return $ids[0];
+	}
+
+	/**
+	 * Protect native identity, classification and organization on replacement PUTs.
+	 * Missing organizational properties are tolerated because mobile clients can
+	 * omit them. Their absence must never detach native business relationships.
+	 *
+	 * @param string $type Native card type
+	 * @param object $object Loaded native object
+	 * @param string $existingCardData Current server representation
+	 * @param string $cardData Incoming replacement
+	 * @return bool True only for a harmless echo of a contact linked to a user.
+	 */
+	private function _assertCardBusinessUpdate($type, $object, $existingCardData, $cardData)
+	{
+		$current = $this->_readVCard($existingCardData);
+		$incoming = $this->_readVCard($cardData);
+		if (count($incoming->select('UID')) !== 1 || count($current->select('UID')) !== 1
+			|| !hash_equals(trim((string) $current->UID), trim((string) $incoming->UID))) {
+			throw new Forbidden('A Dolibarr vCard identity cannot be changed');
+		}
+		if (in_array($type, array('ct', 'mb'), true) && isset($incoming->ORG)) {
+			$oldOrganization = isset($current->ORG) ? trim((string) $current->ORG, " ;\r\n\t") : '';
+			if (count($incoming->select('ORG')) !== 1
+				|| trim((string) $incoming->ORG, " ;\r\n\t") !== $oldOrganization) {
+				throw new Forbidden('Change the Dolibarr third-party relationship in Dolibarr');
+			}
+		}
+		if (isset($incoming->CATEGORIES)) {
+			$oldCategories = $this->_extractCategoryLabels($current);
+			$newCategories = $this->_extractCategoryLabels($incoming);
+			sort($oldCategories, SORT_STRING);
+			sort($newCategories, SORT_STRING);
+			if ($oldCategories !== $newCategories) {
+				throw new Forbidden('Change the Dolibarr business categories in Dolibarr');
+			}
+		}
+		if ($type === 'ct' && isset($incoming->CLASS)
+			&& (count($incoming->select('CLASS')) !== 1
+				|| strtoupper(trim((string) $incoming->CLASS)) !== strtoupper(trim((string) $current->CLASS)))) {
+			throw new Forbidden('Change the Dolibarr contact visibility in Dolibarr');
+		}
+		if ($type === 'ct' && !empty($object->user_id)) {
+			// Contact::update() synchronizes the linked User even when its documented
+			// nosyncuser argument is set on Dolibarr 23/24. Avoid that business write.
+			if ($this->_cardComparisonValues($current) !== $this->_cardComparisonValues($incoming)) {
+				throw new Forbidden('Contacts linked to a Dolibarr user must be edited in Dolibarr');
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Normalize harmless property ordering for read-only linked-user echoes.
+	 * @param object $card Parsed vCard
+	 * @return array<string>
+	 */
+	private function _cardComparisonValues($card)
+	{
+		$values = array();
+		foreach ($card->children() as $property) {
+			if ($property instanceof VObject\Property
+				&& !in_array(strtoupper($property->name), array('VERSION', 'PRODID', 'REV'), true)) {
+				$values[] = $property->serialize();
+			}
+		}
+		sort($values, SORT_STRING);
+		return $values;
+	}
+
+	/**
+	 * Reuse native entity and commercial access checks before business writes.
+	 * @param string $type Native card type
+	 * @param object $object Loaded native object
+	 * @return void
+	 */
+	private function _assertCardObjectAccess($type, $object)
+	{
+		if (!function_exists('checkUserAccessToObject')) {
+			require_once DOL_DOCUMENT_ROOT.'/core/lib/security.lib.php';
+		}
+		$feature = $type === 'ct' ? 'contact' : ($type === 'mb' ? 'adherent' : 'societe');
+		$table = $type === 'ct' ? 'socpeople&contact' : ($type === 'mb' ? 'adherent' : 'societe');
+		if (!checkUserAccessToObject($this->user, array($feature), $object, $table)) {
+			throw new Forbidden('This Dolibarr business object is not accessible');
+		}
+	}
+
+	/**
+	 * Do not let Adherent::setThirdPartyId detach an existing member.
+	 * @param int $thirdPartyId Initial relationship
+	 * @return void
+	 */
+	private function _assertInitialMemberThirdPartyAvailable($thirdPartyId)
+	{
+		if ((int) $thirdPartyId <= 0) return;
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'societe WHERE rowid = '.((int) $thirdPartyId)
+			.' AND entity IN ('.getEntity('societe').') AND status = 1 FOR UPDATE');
+		if (!$result || !$this->db->fetch_object($result)) {
+			throw new Forbidden('The initial member third party is not available');
+		}
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'adherent WHERE fk_soc = '.((int) $thirdPartyId)
+			.' AND entity = '.$this->entity.' LIMIT 1 FOR UPDATE');
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to verify the existing member third-party relationship');
+		}
+		if ($this->db->fetch_object($result)) {
+			throw new Forbidden('This Dolibarr third party is already linked to a member');
+		}
 	}
 
 	private function _syncCategories($type, $objectId, array $labels)
@@ -1145,6 +1310,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 */
 	protected function _getSqlContacts($sqlWhere='')
 	{
+		// Match checkUserAccessToObject's native contact/commercial restriction.
+		// A contact-only reader keeps the native public-contact visibility rules.
+		$companyScope = '';
+		if (isModEnabled('societe') && $this->_hasRight('societe', 'lire') && !$this->_hasRight('societe', 'client', 'voir')) {
+			$companyScope = ' AND (p.fk_soc IS NULL OR EXISTS (SELECT sc.fk_soc FROM '.MAIN_DB_PREFIX.'societe_commerciaux sc WHERE sc.fk_soc = p.fk_soc AND sc.fk_user = '.((int) $this->user->id).'))';
+		}
 		$hasMappingTable = $this->_cardMappingTableAvailable();
 		$mappingSelect = $hasMappingTable
 			? ', cm.uuidext AS cdav_uuidext, cm.sourceuid AS cdav_sourceuid, cm.tms AS cdav_mapping_tms'
@@ -1162,14 +1333,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				FROM '.MAIN_DB_PREFIX.'socpeople as p
 				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = p.fk_pays
-				LEFT JOIN '.MAIN_DB_PREFIX.'societe as s ON s.rowid = p.fk_soc
+				LEFT JOIN '.MAIN_DB_PREFIX.'societe as s ON s.rowid = p.fk_soc AND s.entity IN ('.getEntity('societe').')
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie_contact as cc ON cc.fk_socpeople = p.rowid
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie as cat ON cat.rowid = cc.fk_categorie
 				WHERE p.entity IN ('.getEntity('contact').')
 				AND p.statut=1
 				AND (p.priv=0 OR (p.priv=1 AND p.fk_user_creat='.$this->user->id.'))
-				'.$sqlWhere.'
+				'.$companyScope.$sqlWhere.'
 				GROUP BY p.rowid';
 
 		if(intval(CDAV_CONTACT_TAG)>0)
@@ -1201,7 +1372,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				FROM '.MAIN_DB_PREFIX.'adherent as p
 				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = p.country
-				LEFT JOIN '.MAIN_DB_PREFIX.'societe as s ON s.rowid = p.fk_soc
+				LEFT JOIN '.MAIN_DB_PREFIX.'societe as s ON s.rowid = p.fk_soc AND s.entity IN ('.getEntity('societe').')
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie_member as cc ON cc.fk_member = p.rowid
 				LEFT JOIN '.MAIN_DB_PREFIX.'categorie as cat ON cat.rowid = cc.fk_categorie
@@ -1994,15 +2165,21 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		return $rdata;
 	}
 
-	/** Populate Dolibarr's native Contact object from normalized vCard data. */
-	private function _applyContactData($contact, array $data)
+	/**
+	 * Populate Dolibarr's native Contact object from normalized vCard data.
+	 * @param object $contact Native Contact
+	 * @param array $data Parsed personal data
+	 * @param bool $existing Preserve all existing business fields
+	 * @return void
+	 */
+	private function _applyContactData($contact, array $data, $existing = false)
 	{
 		$contact->lastname = (string) $data['lastname'];
 		$contact->firstname = (string) $data['firstname'];
 		$contact->civility_code = (string) $data['civility'];
 		$contact->civility_id = (string) $data['civility'];
 		$contact->poste = (string) $data['poste'];
-		$contact->priv = (int) $data['priv'];
+		if (!$existing) $contact->priv = (int) $data['priv'];
 		$contact->phone_pro = (string) $data['phone'];
 		$contact->phone_perso = (string) $data['phone_perso'];
 		$contact->phone_mobile = (string) $data['phone_mobile'];
@@ -2017,6 +2194,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$contact->birthday = $data['birthday'] ? strtotime((string) $data['birthday']) : null;
 		$contact->note_public = (string) $data['note_public'];
 		$contact->photo = (string) $data['photo'];
+		if ($existing) return;
 		$contact->status = 1;
 		$contact->statut = 1;
 		// -1 is the native Contact sentinel for removing a third-party link.
@@ -2031,8 +2209,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 	}
 
-	/** Populate Dolibarr's native third-party object without touching accounting fields. */
-	private function _applyThirdPartyData($thirdParty, array $data)
+	/**
+	 * Populate a native third party without touching accounting fields.
+	 * @param object $thirdParty Native Societe
+	 * @param array $data Parsed contact data
+	 * @param bool $existing Preserve the existing lifecycle status
+	 * @return void
+	 */
+	private function _applyThirdPartyData($thirdParty, array $data, $existing = false)
 	{
 		$thirdParty->name = (string) $data['nom'];
 		$thirdParty->nom = (string) $data['nom'];
@@ -2048,11 +2232,17 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$thirdParty->country_id = (int) $data['fk_pays'];
 		$thirdParty->socialnetworks = $this->_decodeSocialNetworks($data['socialnetworks']);
 		$thirdParty->note_public = (string) $data['note_public'];
-		$thirdParty->status = 1;
+		if (!$existing) $thirdParty->status = 1;
 	}
 
-	/** Populate Dolibarr's native member object from normalized vCard data. */
-	private function _applyMemberData($member, array $data)
+	/**
+	 * Populate Dolibarr's native member object from normalized vCard data.
+	 * @param object $member Native Adherent
+	 * @param array $data Parsed personal data
+	 * @param bool $existing Preserve all existing business fields
+	 * @return void
+	 */
+	private function _applyMemberData($member, array $data, $existing = false)
 	{
 		$member->lastname = (string) $data['lastname'];
 		$member->firstname = (string) $data['firstname'];
@@ -2070,6 +2260,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$member->birth = $data['birth'] ? strtotime((string) $data['birth']) : null;
 		$member->note_public = (string) $data['note_public'];
 		$member->photo = (string) $data['photo'];
+		if ($existing) return;
 		$member->statut = 1;
 		$member->status = 1;
 		$member->socid = 0;
@@ -2320,6 +2511,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 			try {
 				$this->_lockAddressBookOwner($addressbookId);
+			if (preg_match('/^\d+-(?:ct|th|mb)-'.preg_quote(CDAV_URI_KEY, '/').'(?:\.vcf)?$/', (string) $cardUri)) {
+					throw new Forbidden('Native Dolibarr vCard resource names cannot be created by a client');
+			}
+			if ($this->getCard($addressbookId, $cardUri) !== false) {
+					throw new \Sabre\DAV\Exception\Conflict('The Dolibarr vCard already exists');
+			}
 
 				if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
 			{
@@ -2401,6 +2598,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				$member->typeid = $memberType['id'];
 				$member->morphy = $memberType['morphy'];
 				$member->ref_ext = $rdata['ref_ext'];
+				$initialThirdPartyId = (int) $member->socid;
+				$this->_assertInitialMemberThirdPartyAvailable($initialThirdPartyId);
+				// Adherent::create() otherwise synchronizes its personal fields into
+				// the company before the explicit native relationship is established.
+				$member->socid = 0;
+				$member->fk_soc = 0;
 				if (!getDolGlobalString('ADHERENT_LOGIN_NOT_REQUIRED')) {
 					$member->login = 'cdav-'.substr(hash('sha256', $cardUri.'|'.$rdata['_uid']), 0, 20);
 				}
@@ -2408,7 +2611,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($id <= 0) {
 					throw new \Sabre\DAV\Exception('Unable to create the Dolibarr member: '.$member->error);
 				}
-				if ($member->setThirdPartyId((int) $member->socid) < 0) {
+				if ($initialThirdPartyId > 0 && $member->setThirdPartyId($initialThirdPartyId) < 0) {
 					throw new \Sabre\DAV\Exception('Unable to save the Dolibarr member third-party link: '.$member->error);
 				}
 				$this->_storeCardMapping('mb', $id, $cardUri, $rdata['_uid']);
@@ -2463,6 +2666,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 			try {
 			$this->_lockAddressBookOwner($addressbookId);
+			$this->_lockCardBusinessObject($addressbookId, $cardUri);
 			$this->_assertCardVersion($addressbookId, $cardUri);
 
 			if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'write'))
@@ -2479,6 +2683,13 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($contact->fetch($contactid, $this->user) <= 0) {
 					throw new \Sabre\DAV\Exception\NotFound('Contact not found');
 				}
+				$this->_assertCardObjectAccess('ct', $contact);
+				if ($this->_assertCardBusinessUpdate('ct', $contact, $existing['carddata'], $cardData)) {
+					if (!$this->db->commit()) {
+						throw new \Sabre\DAV\Exception('Unable to commit the unchanged CardDAV contact');
+					}
+					return null;
+				}
 				$gdim = $this->_decodeVCardPhoto($this->_contactPhotoForImport($contact, $rdata['_photo_bin'], $existing['carddata']));
 				if ($gdim !== false) {
 					$rdata['photo'] = 'cdavimage.jpg';
@@ -2491,7 +2702,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					$this->_mergeSocialNetworks($contact->socialnetworks, $rdata['_socialnetworks_patch'] ?? array()),
 					JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 				);
-				$this->_applyContactData($contact, $rdata);
+				$this->_applyContactData($contact, $rdata, true);
 				if ($this->_decodeCardExternalRef((string) $contact->ref_ext) !== null) {
 					$contact->ref_ext = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
 				}
@@ -2504,7 +2715,6 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				}
 				$this->_storeCardMapping('ct', $contactid, $cardUri, $rdata['_uid']);
 				$this->vcardStore->save('ct', $contactid, $cardData);
-				$this->_syncCategories('contact', $contactid, $rdata['_category_labels'] ?? array());
 
 			// save photo with jpeg format
 			$this->_saveVCardPhoto($gdim, $this->_photoDirectory('contact', $contactid, $contact->entity ?? null), $rdata['photo'], $contact);
@@ -2524,12 +2734,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($thirdParty->fetch($socid) <= 0) {
 					throw new \Sabre\DAV\Exception\NotFound('Third party not found');
 				}
+				$this->_assertCardObjectAccess('th', $thirdParty);
+				$this->_assertCardBusinessUpdate('th', $thirdParty, $existing['carddata'], $cardData);
 				$this->_assertCardUidAvailable('th', $rdata['_uid'], $socid);
 				$rdata['socialnetworks'] = json_encode(
 					$this->_mergeSocialNetworks($thirdParty->socialnetworks, $rdata['_socialnetworks_patch'] ?? array()),
 					JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 				);
-				$this->_applyThirdPartyData($thirdParty, $rdata);
+					$this->_applyThirdPartyData($thirdParty, $rdata, true);
 				if ($this->_decodeCardExternalRef((string) $thirdParty->ref_ext) !== null) {
 					$thirdParty->ref_ext = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 255);
 				}
@@ -2539,7 +2751,6 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				}
 				$this->_storeCardMapping('th', $socid, $cardUri, $rdata['_uid']);
 				$this->vcardStore->save('th', $socid, $cardData);
-				$this->_syncCategories('thirdparty', $socid, $rdata['_category_labels'] ?? array());
 		}
 
 			if (CDAV_MEMBER_SYNC > 0 && intval($addressbookId) >= (2 * CDAV_ADDRESSBOOK_ID_SHIFT) && intval($addressbookId) < (3 * CDAV_ADDRESSBOOK_ID_SHIFT) && $this->_hasRight('adherent', 'write'))
@@ -2560,6 +2771,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($member->fetch($adhid) <= 0) {
 					throw new \Sabre\DAV\Exception\NotFound('Member not found');
 				}
+				$this->_assertCardObjectAccess('mb', $member);
+				$this->_assertCardBusinessUpdate('mb', $member, $existing['carddata'], $cardData);
 				if ($gdim === false && !empty($member->photo)) {
 					$obsoletePhoto = array($this->_photoFilePath('member', $adhid, $member->photo), $member);
 				}
@@ -2568,7 +2781,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					$this->_mergeSocialNetworks($member->socialnetworks, $rdata['_socialnetworks_patch'] ?? array()),
 					JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 				);
-				$this->_applyMemberData($member, $rdata);
+				$this->_applyMemberData($member, $rdata, true);
 				if ($this->_decodeCardExternalRef((string) $member->ref_ext) !== null) {
 					$member->ref_ext = $this->_encodeCardExternalRef($cardUri, $rdata['_uid'], 128);
 				}
@@ -2576,12 +2789,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($res < 0) {
 					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr member: '.$member->error);
 				}
-				if ($member->setThirdPartyId((int) $member->socid) < 0) {
-					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr member third-party link: '.$member->error);
-				}
 				$this->_storeCardMapping('mb', $adhid, $cardUri, $rdata['_uid']);
 				$this->vcardStore->save('mb', $adhid, $cardData);
-				$this->_syncCategories('member', $adhid, $rdata['_category_labels'] ?? array());
 				$this->_saveVCardPhoto($gdim, $this->_photoDirectory('member', $adhid), $rdata['photo'], $member);
 		}
 
@@ -2619,6 +2828,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 			try {
 			$this->_lockAddressBookOwner($addressbookId);
+			$this->_lockCardBusinessObject($addressbookId, $cardUri);
 			$this->_assertCardVersion($addressbookId, $cardUri);
 
 			if (intval($addressbookId) < CDAV_ADDRESSBOOK_ID_SHIFT && $this->_hasRight('societe', 'contact', 'delete'))
@@ -2631,7 +2841,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 
 			require_once DOL_DOCUMENT_ROOT.'/contact/class/contact.class.php';
 			$contact = new \Contact($this->db);
-			if ($contact->fetch($contactid, $this->user) <= 0 || $contact->setstatus(0) < 0) {
+				if ($contact->fetch($contactid, $this->user) <= 0) {
+					throw new \Sabre\DAV\Exception\NotFound('Contact not found');
+				}
+				$this->_assertCardObjectAccess('ct', $contact);
+				if (!empty($contact->user_id)) {
+					throw new Forbidden('Contacts linked to a Dolibarr user must be deactivated in Dolibarr');
+				}
+				if ($contact->setstatus(0) < 0) {
 				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr contact: '.$contact->error);
 			}
 			if (!$this->db->commit()) {
@@ -2654,6 +2871,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			if ($thirdParty->fetch($socid) <= 0) {
 				throw new \Sabre\DAV\Exception\NotFound('Third party not found');
 			}
+				$this->_assertCardObjectAccess('th', $thirdParty);
 			$thirdParty->status = 0;
 			if ($thirdParty->update($socid, $this->user) < 0) {
 				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr third party: '.$thirdParty->error);
@@ -2678,6 +2896,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			if ($member->fetch($adhid) <= 0) {
 				throw new \Sabre\DAV\Exception\NotFound('Member not found');
 			}
+				$this->_assertCardObjectAccess('mb', $member);
 			if ($member->resiliate($this->user) < 0) {
 				throw new \Sabre\DAV\Exception('Unable to deactivate the Dolibarr member: '.$member->error);
 			}

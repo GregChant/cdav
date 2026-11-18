@@ -25,6 +25,9 @@ use Sabre\CalDAV;
 use Sabre\DAV;
 use Sabre\DAV\Exception\Forbidden;
 
+require_once __DIR__.'/CDavBusinessPolicy.php';
+require_once __DIR__.'/CDavCalendarWritePolicy.php';
+
 class Dolibarr extends AbstractBackend implements SyncSupport {
 
 	/**
@@ -351,7 +354,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			return $calevent;
 
 		if($elem_source=='ev') // Calendar Events
-			$sql = $this->cdavLib->getSqlCalEvents($calid, $oid, $objectUri);
+			$sql = $this->cdavLib->getSqlCalEvents($calid, $oid, $internalObject !== null ? false : $objectUri).' ORDER BY a.id LIMIT 1';
 		elseif($elem_source=='fi') // Intervention card
 			$sql = $this->cdavLib->getSqlIntervEvents($calid, $oid);
 		else // Project Tasks
@@ -378,6 +381,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					'calendardata' => $calendardata,
 					'component' => strpos($calendardata, 'BEGIN:VEVENT') !== false ? 'vevent' : 'vtodo',
 				];
+				if (isset($obj->_cdav_description) && is_array($obj->_cdav_description)) {
+					$calevent['_cdav_description'] = $obj->_cdav_description;
+				}
 			}
 		}
 
@@ -464,10 +470,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$createdAttachments = array();
 		try {
 			$this->_lockCalendarOwner((int) $calendarId);
+			$this->_findActionCommByUri((string) $objectUri, true);
 			// One occurrence is stored. Recurrence rules remain attached to that DAV object.
 			foreach($calendarData['occurences'] as $iOccur => $occurence)
 			{
 			$oid = false;
+				$davCreated = false;
 			$elem_source = 'ev';
 			// check if it is existing event (if caldav client move it from a calendar to an other)
 			// objectUri Dolibarr sinon utilisation de $objectUri en tant que ref externe
@@ -552,21 +560,25 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					if ($oid <= 0) {
 						throw new \Sabre\DAV\Exception('Unable to create the Dolibarr event: '.$event->error);
 					}
+						$davCreated = true;
 					$this->_syncNativeRecurrence((int) $oid, $calendarData);
 					$this->_syncNativeReminders((int) $oid, (int) $calendarId, $calendarData['native_reminders'] ?? array());
 				// Dolibarr 23 casts RFC PARTSTAT strings to integers in ActionComm.
-				$this->_restoreActionCommResourceMetadata((int) $oid, $userAssignments);
+						$this->_restoreActionCommResourceMetadata((int) $oid, $userAssignments, $contactAssignments);
 				debug_log("    event $oid created through ActionComm");
 			}
 			elseif ($elem_source === 'ev')
 			{
+					if ($this->_isProtectedEvent((int) $oid)) {
+						throw new Forbidden('A protected Dolibarr appointment cannot be assigned to another calendar through CalDAV.');
+					}
 				$this->_updateActionCommFromCalendarData((int) $oid, $calendarData, (int) $calendarId);
 			}
 
 			if($elem_source == 'ev')
 			{
 				$storedObjectUri = $iOccur === 0 ? $objectUri : $oid.'-ev-'.CDAV_URI_KEY;
-				$this->_upsertCalendarMapping((int) $oid, $storedObjectUri, (string) $calendarData['uid']);
+					$this->_upsertCalendarMapping((int) $oid, $storedObjectUri, (string) $calendarData['uid'], $davCreated);
 				debug_log("    add user $calendarId to event $oid");
 				$this->_upsertEventResource(
 					(int) $oid,
@@ -662,10 +674,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$removedAttachments = array();
 		try {
 		$this->_lockCalendarOwner((int) $calendarId);
+			$lockedEventId = $this->_findActionCommByUri((string) $objectUri, true, (int) $calendarId);
 		$resolvedObject = $this->_resolveCalendarObject($calendarId, $objectUri);
 		if ($resolvedObject === null) {
 			throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
 		}
+			if ($resolvedObject['source'] === 'ev' && (int) $resolvedObject['id'] !== $lockedEventId) {
+				throw new \Sabre\DAV\Exception\PreconditionFailed('The native appointment identity changed while its row was being locked', 'If-Match');
+			}
 		$calendarData['id'] = $resolvedObject['id'];
 		$calendarData['elem_source'] = $resolvedObject['source'];
 		if ($calendarData['elem_source'] === 'ev') {
@@ -680,13 +696,26 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->_canModifySource($calendarData['elem_source'])) {
 			throw new Forbidden('Not allowed to modify this type of Dolibarr object');
 		}
-		if ($calendarData['elem_source'] === 'ev' && getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
-			$this->managedAttachmentStore->synchronizeCalendarData((int) $calendarData['id'], $origCalendarData, false);
-		}
+			$currentObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+			if (isset($currentObject['_cdav_description'])) {
+				$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($currentObject['_cdav_description'], $calendarData['label'], $calendarData['location']);
+				$calendarData['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($currentObject['_cdav_description'], $calendarData['description'], $replacementPrefix);
+				$calendarData['_native_note_resolved'] = true;
+			}
+			$protectedMove = $calendarData['elem_source'] === 'ev'
+			? $this->validateProtectedCalendarWrite((int) $calendarId, (string) $objectUri, $origCalendarData)
+			: false;
+			if ($protectedMove !== false) {
+				$calendarData = array_replace($calendarData, $protectedMove);
+				$this->_advanceProtectedCalendarSequence((int) $calendarData['id'], (int) $calendarId, (string) $objectUri, $protectedMove);
+			}
+			if ($calendarData['elem_source'] === 'ev' && $protectedMove === false && getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
+				$this->managedAttachmentStore->synchronizeCalendarData((int) $calendarData['id'], $origCalendarData, false);
+			}
 
 		if($calendarData['elem_source']=='ev')
 		{
-			$this->_updateActionCommFromCalendarData((int) $calendarData['id'], $calendarData, (int) $calendarId);
+				$this->_updateActionCommFromCalendarData((int) $calendarData['id'], $calendarData, (int) $calendarId, $protectedMove !== false);
 		}
 		elseif($calendarData['elem_source']=='pe')	// event
 		{
@@ -746,7 +775,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			throw new \Sabre\DAV\Exception\NotFound('Unsupported Dolibarr calendar object');
 		}
 
-		if ($calendarData['elem_source'] === 'ev') {
+			if ($calendarData['elem_source'] === 'ev' && $protectedMove === false) {
 			$this->_upsertEventResource(
 				(int) $calendarData['id'],
 				(int) $calendarId,
@@ -767,9 +796,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$this->_removeAdditionalSeriesObjects(
 				(int) $calendarId,
 				(string) $calendarData['uid'],
-				(int) $calendarData['id']
+				(int) $calendarData['id'],
+				$removedAttachments
 			);
-		}
+			}
 		if (!$this->db->commit()) {
 			throw new \Sabre\DAV\Exception('Unable to commit the CalDAV update');
 		}
@@ -1032,7 +1062,127 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$resolved = $this->_resolveCalendarObject((int) $calendarId, (string) $objectUri);
 		if ($resolved === null) throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
 		if ($resolved['source'] !== 'ev') throw new Forbidden('Managed attachments are supported only for Dolibarr Agenda events');
+		if ($this->_isProtectedEvent((int) $resolved['id'])) {
+			throw new Forbidden('Attachments of a protected appointment must be managed in Dolibarr.');
+		}
 		return (int) $resolved['id'];
+	}
+
+	/**
+	 * Validate before scheduling effects and again under the native transaction lock.
+	 *
+	 * @param int $calendarId Native calendar owner
+	 * @param string $objectUri Calendar resource basename
+	 * @param string $calendarData Client replacement calendar
+	 * @param bool $creating Whether this request would attach an existing object
+	 * @return array<string,int>|false Validated dates, or false for an editable object
+	 */
+	public function validateProtectedCalendarWrite($calendarId, $objectUri, $calendarData, $creating = false)
+	{
+		$existing = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+		$incoming = null;
+		if (isset($existing['_cdav_description'])) {
+			$incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
+			$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($existing['_cdav_description'], $incoming['label'], $incoming['location']);
+			\Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($existing['_cdav_description'], $incoming['description'], $replacementPrefix);
+		}
+		if ($creating && $existing === null) {
+			$targetId = $this->_findActionCommByUri((string) $objectUri);
+			if ($targetId > 0 && (!$this->_canAttachExistingObject((int) $calendarId, (string) $objectUri, 'ev', $targetId)
+				|| $this->_isProtectedEvent($targetId))) {
+				throw new Forbidden('A protected or inaccessible Dolibarr appointment cannot be assigned to another calendar through CalDAV.');
+			}
+		}
+		if ($creating) {
+			if ($incoming === null) $incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
+			$this->_assertCalendarUidAvailable((int) $calendarId, (string) $incoming['uid'], (int) ($existing['id'] ?? 0), (string) $objectUri);
+		}
+		if ($existing === null) {
+			return false;
+		}
+		$internal = $this->_parseInternalObjectUri($objectUri);
+		if (($internal !== null && $internal['source'] !== 'ev') || !$this->_isProtectedEvent((int) $existing['id'])) {
+			return false;
+		}
+		if ($creating) {
+			throw new Forbidden('A protected Dolibarr appointment cannot be assigned to another calendar through CalDAV.');
+		}
+		return \Dolibarr\CDav\CalendarWritePolicy::assertMoveOnly((string) $existing['calendardata'], (string) $calendarData);
+	}
+
+	/**
+	 * Native and ambiguous historical objects are protected independently of URI mappings.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @return bool Whether only date moves are allowed
+	 */
+	private function _isProtectedEvent($eventId)
+	{
+		return \Dolibarr\CDav\BusinessPolicy::protectNativeEvents()
+			&& !\Dolibarr\CDav\BusinessPolicy::isDavCreated($this->db, (int) $eventId);
+	}
+
+	/**
+	 * Persist a trusted scheduling revision in the same transaction as the date move.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param int $calendarId Calendar owner
+	 * @param string $objectUri Resource basename
+	 * @param array<string,int> $dates Validated new endpoints
+	 * @return void
+	 */
+	private function _advanceProtectedCalendarSequence($eventId, $calendarId, $objectUri, array $dates)
+	{
+		$current = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+		$stored = '';
+		if ($this->_schedulingTableAvailable()) {
+			$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.((int) $eventId));
+			if (!$result) {
+				throw new \Sabre\DAV\Exception('Unable to read the original appointment metadata');
+			}
+			$row = $this->db->fetch_object($result);
+			$stored = $row ? (string) $row->calendardata : '';
+		}
+		$updated = \Dolibarr\CDav\CalendarWritePolicy::metadataAfterMove($stored, (string) $current['calendardata'], $dates);
+		if ($updated !== null) {
+			if (!$this->_schedulingTableAvailable()) {
+				throw new Forbidden('Reactivate CDav in Dolibarr before moving protected appointments.');
+			}
+			$this->_storeCalendarMetadata((int) $eventId, $updated);
+		}
+	}
+
+	/**
+	 * Resolve a protected calendar item before deferring its scheduling effects.
+	 *
+	 * @param int $calendarId Calendar owner
+	 * @param string $objectUri Resource basename
+	 * @return array<string,mixed>|null Visible protected native event, otherwise null
+	 */
+	public function getProtectedCalendarObject($calendarId, $objectUri)
+	{
+		$internal = $this->_parseInternalObjectUri((string) $objectUri);
+		if ($internal !== null && $internal['source'] !== 'ev') {
+			return null;
+		}
+		$existing = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+		return $existing !== null && $this->_isProtectedEvent((int) $existing['id']) ? $existing : null;
+	}
+
+	/**
+	 * Distinguish an actual event deletion from a shared-calendar detachment.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @return bool Whether the native business record still exists
+	 */
+	public function calendarEventExists($eventId)
+	{
+		$result = $this->db->query('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.((int) $eventId)
+			.' AND entity IN ('.getEntity('agenda').')');
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to verify the committed appointment deletion');
+		}
+		return (bool) $this->db->fetch_object($result);
 	}
 
 	private function _resolveCalendarObject($calendarId, $objectUri)
@@ -1044,9 +1194,47 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 
 		$internal = $this->_parseInternalObjectUri($objectUri);
 		if ($internal !== null) {
-			return $internal;
+			return (int) $existing['id'] === (int) $internal['id'] ? $internal : null;
 		}
 		return array('id' => (int) $existing['id'], 'source' => 'ev');
+	}
+
+	/**
+	 * Resolve and optionally lock the native row before a transaction snapshot exists.
+	 * The Agenda row is shared by every calendar owner and by Dolibarr's native UI;
+	 * its lock prevents fetched business fields from overwriting concurrent edits.
+	 *
+	 * @param string $objectUri Native or external DAV resource basename
+	 * @param bool $lock Whether to acquire the native row lock
+	 * @param int $calendarId Optional owner scope for existing-resource writes
+	 * @return int Existing native Agenda identifier, otherwise zero
+	 */
+	private function _findActionCommByUri($objectUri, $lock = false, $calendarId = 0)
+	{
+		$internal = $this->_parseInternalObjectUri((string) $objectUri);
+		if ($internal !== null && $internal['source'] !== 'ev') {
+			return 0;
+		}
+		$sql = 'SELECT a.id FROM '.MAIN_DB_PREFIX.'actioncomm a';
+		if ($internal === null) {
+			$sql .= ' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_cdav ac ON ac.fk_object = a.id';
+		}
+		if ((int) $calendarId > 0) {
+			$sql .= ' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources ar ON ar.fk_actioncomm = a.id AND ar.element_type = \'user\' AND ar.fk_element = '.((int) $calendarId);
+		}
+		$uriMatch = 'ac.uuidext = \''.$this->db->escape((string) $objectUri).'\'';
+		if ((int) $calendarId > 0 && $internal === null) {
+			$uriMatch = '('.$uriMatch.' OR ac.sourceuid = \''.$this->db->escape((string) $objectUri).'\')';
+		}
+		$sql .= ' WHERE '.($internal !== null ? 'a.id = '.((int) $internal['id']) : $uriMatch)
+			.' AND a.entity IN ('.getEntity('agenda').')';
+		$sql .= ' ORDER BY a.id LIMIT 1'.($lock ? ' FOR UPDATE' : '');
+		$result = $this->db->query($sql);
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to resolve or lock the native appointment');
+		}
+		$row = $this->db->fetch_object($result);
+		return $row ? (int) $row->id : 0;
 	}
 
 	private function _upsertEventResource($eventId, $calendarId, $transparency, $answerStatus = '')
@@ -1063,11 +1251,19 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 	}
 
-	/** Persist the DAV identity that has no native ActionComm equivalent. */
-	private function _upsertCalendarMapping($eventId, $objectUri, $sourceUid)
+	/**
+	 * Persist the DAV identity that has no native ActionComm equivalent.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param string $objectUri Resource basename
+	 * @param string $sourceUid Stable calendar UID
+	 * @param bool $davCreated Whether this transaction created the native object
+	 * @return void
+	 */
+	private function _upsertCalendarMapping($eventId, $objectUri, $sourceUid, $davCreated = false)
 	{
-		$sql = 'INSERT INTO '.MAIN_DB_PREFIX.'actioncomm_cdav (fk_object, uuidext, sourceuid)
-			VALUES ('.((int) $eventId).', \''.$this->db->escape((string) $objectUri).'\', \''.$this->db->escape((string) $sourceUid).'\')
+		$sql = 'INSERT INTO '.MAIN_DB_PREFIX.'actioncomm_cdav (fk_object, uuidext, sourceuid, dav_origin)
+			VALUES ('.((int) $eventId).', \''.$this->db->escape((string) $objectUri).'\', \''.$this->db->escape((string) $sourceUid).'\', '.($davCreated ? 1 : 0).')
 			ON DUPLICATE KEY UPDATE
 				uuidext = VALUES(uuidext),
 				sourceuid = VALUES(sourceuid)';
@@ -1080,6 +1276,17 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	private function _assertCalendarUidAvailable($calendarId, $sourceUid, $eventId = 0, $objectUri = '')
 	{
 		$this->_lockCalendarOwner((int) $calendarId);
+		$nativeUid = $this->_parseInternalObjectUri((string) $sourceUid);
+		if ($nativeUid !== null && $nativeUid['source'] === 'ev' && (int) $nativeUid['id'] !== (int) $eventId) {
+			$result = $this->db->query('SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.((int) $nativeUid['id'])
+				.' AND entity IN ('.getEntity('agenda').')');
+			if (!$result) {
+				throw new \Sabre\DAV\Exception('Unable to verify the native calendar identity');
+			}
+			if ($this->db->fetch_object($result)) {
+				throw new \Sabre\DAV\Exception\Conflict('This UID already identifies a native Dolibarr appointment');
+			}
+		}
 		$sql = 'SELECT ac.fk_object FROM '.MAIN_DB_PREFIX.'actioncomm_cdav ac'
 			.' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm a ON a.id = ac.fk_object'
 			.' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources ar ON ar.fk_actioncomm = a.id'
@@ -1162,8 +1369,16 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$action->recurdateend = is_array($nativeRecurrence) ? (int) $nativeRecurrence['until'] : '';
 	}
 
-	/** Update an existing Dolibarr event through ActionComm and its resource API. */
-	private function _updateActionCommFromCalendarData($eventId, array $data, $calendarId)
+	/**
+	 * Update an existing Dolibarr event through ActionComm and its resource API.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param array $data Parsed calendar values
+	 * @param int $calendarId Calendar owner
+	 * @param bool $protectedMove Whether only validated endpoints may change
+	 * @return \ActionComm Updated native appointment
+	 */
+	private function _updateActionCommFromCalendarData($eventId, array $data, $calendarId, $protectedMove = false)
 	{
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
 		$event = new \ActionComm($this->db);
@@ -1171,11 +1386,37 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			|| !in_array((int) $event->entity, array_map('intval', explode(',', getEntity('agenda'))), true)) {
 			throw new \Sabre\DAV\Exception\NotFound('Dolibarr event not found');
 		}
+		if ($protectedMove) {
+			// The fetched ActionComm remains authoritative for every business field,
+			// including contacts, assignments, native notes and third-party/project links.
+			$previousStart = (int) $event->datep;
+			$event->datep = (int) $data['start'];
+			$event->datef = !empty($data['fullday']) ? (int) $data['end'] - 1 : (int) $data['end'];
+			if ($event->update($this->user) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to move the protected Dolibarr appointment: '.$event->error);
+			}
+			if ($previousStart !== (int) $event->datep) {
+				$this->_moveNativeReminders($event, (int) $event->datep);
+			}
+			$this->_restoreActionCommResourceMetadata((int) $event->id, $event->userassigned, $event->socpeopleassigned);
+			return $event;
+		}
+		$nativeAssignments = $event->userassigned;
+		if (empty($data['_native_note_resolved'])) {
+			// CREATE may attach an existing DAV-created event to a different calendar.
+			// Its source calendar still supplies the trusted description envelope.
+			$sourceCalendar = !empty($event->userassigned[(int) $calendarId]) ? (int) $calendarId : (int) $event->userownerid;
+			$current = $this->getCalendarObject($sourceCalendar, ((int) $eventId).'-ev-'.CDAV_URI_KEY);
+			if (isset($current['_cdav_description'])) {
+				$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($current['_cdav_description'], $data['label'], $data['location']);
+				$data['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($current['_cdav_description'], $data['description'], $replacementPrefix);
+			}
+		}
 		$actionType = $this->_getActionType($data['componentType']);
 		$this->_applyActionCommData($event, $data, $data['start'], $data['end'], $calendarId, $actionType);
 		if ($data['has_participants']) {
 			$canManageAllUsers = $this->_hasAgendaRight('allactions', 'write');
-			list($resolvedUsers, $resolvedContacts, $contactCompanies) = $this->_resolveParticipantResources(
+			list($resolvedUsers) = $this->_resolveParticipantResources(
 				$data['participants'],
 				(int) $calendarId,
 				$canManageAllUsers
@@ -1186,15 +1427,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				// Personal-agenda rights must not remove other users' assignments.
 				$event->userassigned[(int) $calendarId] = $resolvedUsers[(int) $calendarId];
 			}
-			$event->socpeopleassigned = $resolvedContacts;
-			if (count($resolvedContacts) === 1) {
-				$contactIds = array_keys($resolvedContacts);
-				$event->contact_id = (int) $contactIds[0];
-				$event->socid = (int) $contactCompanies[$event->contact_id];
-			} else {
-				$event->contact_id = 0;
-				$event->socid = 0;
-			}
+			// ATTENDEE is protocol metadata, never authority to reassign a native
+			// customer or replace contact relationships of an existing appointment.
 		}
 		if (empty($event->userassigned[(int) $calendarId])) {
 			$event->userassigned[(int) $calendarId] = array('id' => (int) $calendarId);
@@ -1207,15 +1441,52 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		unset($assignment);
 		$event->userassigned[(int) $calendarId]['answer_status'] = (string) $data['answer_status'];
 		if (empty($event->userassigned[(int) $event->userownerid])) {
-			$event->userownerid = (int) $calendarId;
+			$ownerId = (int) $event->userownerid;
+			if ($ownerId > 0) {
+				$event->userassigned[$ownerId] = $nativeAssignments[$ownerId] ?? array('id' => $ownerId);
+			}
 		}
 		if ($event->update($this->user) <= 0) {
 			throw new \Sabre\DAV\Exception('Unable to update the Dolibarr event: '.$event->error);
 		}
 		$this->_syncNativeRecurrence((int) $event->id, $data);
 		$this->_syncNativeReminders((int) $event->id, (int) $calendarId, $data['native_reminders'] ?? array());
-		$this->_restoreActionCommResourceMetadata((int) $event->id, $event->userassigned);
+		$this->_restoreActionCommResourceMetadata((int) $event->id, $event->userassigned, $event->socpeopleassigned);
 		return $event;
+	}
+
+	/**
+	 * Move existing pending relative reminders through their native business API.
+	 * loadReminders() omits disabled reminder types, so the bounded ID query bridges
+	 * that API gap. Disabled reminders retain their type/status; sent or failed
+	 * reminders and absolute iCalendar alarms remain untouched.
+	 *
+	 * @param \ActionComm $event Fetched and updated native appointment
+	 * @param int $start Committed-in-transaction new appointment start
+	 * @return void
+	 */
+	private function _moveNativeReminders($event, $start)
+	{
+		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncommreminder.class.php';
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.((int) $event->id)
+			.' AND status = 0 AND offsetunit IN (\'y\', \'m\', \'w\', \'d\', \'h\', \'i\') ORDER BY rowid FOR UPDATE');
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to lock the existing appointment reminders');
+		}
+		$ids = array();
+		while ($row = $this->db->fetch_object($result)) {
+			$ids[] = (int) $row->rowid;
+		}
+		foreach ($ids as $id) {
+			$reminder = new \ActionCommReminder($this->db);
+			if ($reminder->fetch($id) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to load the existing appointment reminder');
+			}
+			$reminder->dateremind = dol_time_plus_duree((int) $start, -1 * (int) $reminder->offsetvalue, (string) $reminder->offsetunit);
+			if ($reminder->update($this->user) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to move the existing appointment reminder: '.$reminder->error);
+			}
+		}
 	}
 
 	/**
@@ -1306,24 +1577,43 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		return array($userAssignments, $contactAssignments, $contactCompanies);
 	}
 
-	/** Work around ActionComm's integer cast of RFC PARTSTAT values in Dolibarr 23. */
-	private function _restoreActionCommResourceMetadata($eventId, array $userAssignments)
+	/**
+	 * Bridge an ActionComm API gap: 23/24 cast user PARTSTAT to integers and
+	 * recreate contact resources with zeroed metadata. Restore only the native
+	 * resource rows already persisted through the business API.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param array $userAssignments Native user assignment metadata
+	 * @param array $contactAssignments Native contact assignment metadata
+	 * @return void
+	 */
+	private function _restoreActionCommResourceMetadata($eventId, array $userAssignments, array $contactAssignments = array())
 	{
-		foreach ($userAssignments as $assignment) {
-			if (!is_array($assignment) || empty($assignment['id'])) {
-				continue;
+		foreach (array('user' => $userAssignments, 'socpeople' => $contactAssignments) as $type => $assignments) {
+			foreach ($assignments as $assignment) {
+				if (!is_array($assignment) || empty($assignment['id'])) {
+					continue;
+				}
+				$status = isset($assignment['answer_status']) ? '\''.$this->db->escape((string) $assignment['answer_status']).'\'' : 'NULL';
+				$sql = 'UPDATE '.MAIN_DB_PREFIX.'actioncomm_resources SET mandatory = '.((int) ($assignment['mandatory'] ?? 0))
+					.', transparency = '.((int) ($assignment['transparency'] ?? 0)).', answer_status = '.$status
+					.' WHERE fk_actioncomm = '.((int) $eventId).' AND element_type = \''.$type.'\' AND fk_element = '.((int) $assignment['id']);
+				if (!$this->db->query($sql)) {
+					throw new \Sabre\DAV\Exception('Unable to preserve native appointment resource metadata');
+				}
 			}
-			$this->_upsertEventResource(
-				(int) $eventId,
-				(int) $assignment['id'],
-				(int) ($assignment['transparency'] ?? 0),
-				(string) ($assignment['answer_status'] ?? '')
-			);
 		}
 	}
 
-	/** Remove one calendar assignment and use ActionComm for the business write. */
-	private function _detachActionCommFromCalendar($eventId, $calendarId)
+	/**
+	 * Remove one calendar assignment and use ActionComm for the business write.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param int $calendarId Calendar owner
+	 * @param array $deferredFiles Physical files to remove only after transaction commit
+	 * @return void
+	 */
+	private function _detachActionCommFromCalendar($eventId, $calendarId, array &$deferredFiles = array())
 	{
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
 		$event = new \ActionComm($this->db);
@@ -1337,15 +1627,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				$remainingAssignments[$id] = is_array($assignment) ? $assignment : array('id' => $id);
 			}
 		}
-		$result = $this->db->query('SELECT fk_object FROM '.MAIN_DB_PREFIX.'actioncomm_cdav
-			WHERE fk_object = '.((int) $eventId));
-		if (!$result) {
-			throw new \Sabre\DAV\Exception('Unable to inspect the CalDAV object mapping');
-		}
-		$moduleOwned = (bool) $this->db->fetch_object($result);
 		$this->_deleteNativeReminders((int) $eventId, (int) $calendarId);
-		if ($moduleOwned && !$remainingAssignments) {
-			$this->managedAttachmentStore->removeAllForEvent((int) $eventId);
+		if (!$remainingAssignments) {
+			$deferredFiles = array_merge($deferredFiles, $this->managedAttachmentStore->removeAllForEvent((int) $eventId, true));
 			$this->_deleteActionCommLinks((int) $eventId);
 			$this->_deleteCalendarMetadata((int) $eventId);
 			if ($event->delete($this->user) <= 0) {
@@ -1375,7 +1659,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if ($event->update($this->user) <= 0) {
 			throw new \Sabre\DAV\Exception('Unable to detach the Dolibarr event: '.$event->error);
 		}
-		$this->_restoreActionCommResourceMetadata((int) $eventId, $remainingAssignments);
+		$this->_restoreActionCommResourceMetadata((int) $eventId, $remainingAssignments, $event->socpeopleassigned);
 	}
 
 	private function _getActionType($componentType)
@@ -1743,8 +2027,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	/**
 	 * Remove rows produced by older versions that expanded one RRULE into many
 	 * events with the same UID.  Rows still assigned to another user are kept.
+	 *
+	 * @param int $calendarId Calendar owner
+	 * @param string $sourceUid Stable calendar UID
+	 * @param int $keepId Native appointment to retain
+	 * @param array $deferredFiles Physical files retained until transaction commit
+	 * @return void
 	 */
-	private function _removeAdditionalSeriesObjects($calendarId, $sourceUid, $keepId)
+	private function _removeAdditionalSeriesObjects($calendarId, $sourceUid, $keepId, array &$deferredFiles = array())
 	{
 		if ($sourceUid === '') {
 			return;
@@ -1767,7 +2057,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$ids[] = (int) $row->fk_object;
 		}
 		foreach ($ids as $eventId) {
-			$this->_detachActionCommFromCalendar($eventId, (int) $calendarId);
+			if ($this->_isProtectedEvent($eventId)) {
+				throw new Forbidden('A legacy series cleanup cannot remove protected Dolibarr appointments.');
+			}
+			$this->_detachActionCommFromCalendar($eventId, (int) $calendarId, $deferredFiles);
 		}
 	}
 
@@ -2066,6 +2359,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			'priority' => $priority,
 			'transparency' => $transparency,
 			'note' => $note,
+			'description' => $description,
 			'percent' => $percent,
 			'status' => $status,
 			'answer_status' => $answerStatus,
@@ -2103,11 +2397,16 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->db->begin()) {
 			throw new \Sabre\DAV\Exception('Unable to start the CalDAV delete transaction');
 		}
+		$removedAttachments = array();
 		try {
 			$this->_lockCalendarOwner((int) $calendarId);
+			$lockedEventId = $this->_findActionCommByUri((string) $objectUri, true, (int) $calendarId);
 			$resolvedObject = $this->_resolveCalendarObject($calendarId, $objectUri);
 			if ($resolvedObject === null) {
 				throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
+			}
+			if ($resolvedObject['source'] === 'ev' && (int) $resolvedObject['id'] !== $lockedEventId) {
+				throw new \Sabre\DAV\Exception\PreconditionFailed('The native appointment identity changed while its row was being locked', 'If-Match');
 			}
 			$oid = (int) $resolvedObject['id'];
 			$source = (string) $resolvedObject['source'];
@@ -2116,10 +2415,11 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				throw new Forbidden('Not allowed to modify this type of Dolibarr object');
 			}
 		if ($source === 'ev') {
-			$this->_detachActionCommFromCalendar($oid, (int) $calendarId);
+				$this->_detachActionCommFromCalendar($oid, (int) $calendarId, $removedAttachments);
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CalDAV event deletion');
 			}
+				$this->managedAttachmentStore->discardCreatedFiles($removedAttachments);
 			return;
 		}
 

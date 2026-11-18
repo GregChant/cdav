@@ -122,7 +122,7 @@ foreach (array('phone', 'phone_perso', 'phone_mobile', 'fax', 'email', 'url', 'a
 	sameValue('', $minimal[$field], 'A replacement vCard must clear '.$field);
 }
 sameValue(null, $minimal['birthday'], 'A replacement vCard must clear birthdays');
-sameValue('', $minimal['_organization'], 'A replacement vCard must clear third-party links');
+sameValue('', $minimal['_organization'], 'An absent ORG must parse as an empty display value');
 
 $member = invokeParser($cardBackend, '_parseDataMember', array(
 	"BEGIN:VCARD\r\nVERSION:3.0\r\nUID:member-1\r\nFN:Member One\r\nEMAIL:member@example.test\r\nURL:https://example.test/member\r\nX-LINKEDIN:member-one\r\nEND:VCARD\r\n",
