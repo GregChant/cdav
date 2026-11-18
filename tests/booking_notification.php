@@ -13,8 +13,16 @@ cdavTestStrictErrors($root);
 define('DOL_DOCUMENT_ROOT', $root);
 define('DOL_URL_ROOT', '/dolibarr');
 define('MAIN_DB_PREFIX', 'llx_');
+$notificationLangRoot = sys_get_temp_dir().'/cdav-booking-mail-test-'.bin2hex(random_bytes(8));
+if (!mkdir($notificationLangRoot, 0700)) throw new RuntimeException('Unable to create the private native module layout');
+register_shutdown_function(static function () use ($notificationLangRoot) {
+	if (is_link($notificationLangRoot.'/cdav')) unlink($notificationLangRoot.'/cdav');
+	if (is_dir($notificationLangRoot)) rmdir($notificationLangRoot);
+});
+// Native module language lookup uses cdav@cdav, regardless of checkout name.
+if (!symlink(dirname(__DIR__), $notificationLangRoot.'/cdav')) throw new RuntimeException('Unable to link the native module language directory');
 $conf = (object) array('global' => new stdClass(),
-	'file' => (object) array('dol_document_root' => array($root), 'character_set_client' => 'UTF-8'), 'cache' => array());
+	'file' => (object) array('dol_document_root' => array($root, $notificationLangRoot), 'character_set_client' => 'UTF-8'), 'cache' => array());
 $conf->global->MAIN_DISABLE_ALL_MAILS = 1;
 $mysoc = (object) array('name' => 'Atelier & fils', 'email' => 'company@example.test');
 $db = null;
