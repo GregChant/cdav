@@ -1,0 +1,11 @@
+{
+  "path": ["."],
+  "format": ["php", "javascript", "css", "sql"],
+  "ignore": ["**/tests/**", "**/dist/**", "**/node_modules/**", "**/vendor/**", "**/.git/**"],
+  "mode": "weak",
+  "minLines": 10,
+  "minTokens": 100,
+  "maxSize": "1mb",
+  "reporters": ["console", "json", "html"],
+  "output": "dist/qa/duplication/production"
+}
