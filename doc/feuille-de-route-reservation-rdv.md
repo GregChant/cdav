@@ -609,12 +609,15 @@ locales, l'empreinte du paquet et la publication sont référencées dans
 - [x] Synchroniser une invitation extérieure traitée par Outlook vers la copie
   personnelle CDav, sans autoriser cette exception sur les RDV natifs partagés.
 - [x] Préserver la confidentialité des descriptions de projet dans les inbox.
-- [ ] Qualifier la délégation, les acceptations simultanées et la matrice
+- [x] Qualifier la délégation, les acceptations simultanées et la matrice
   native Dolibarr 23/24 × PHP 8.4/8.5.
-- [ ] Publier les commits et le paquet reproductible après conservation des
+- [x] Publier les commits et le paquet reproductible après conservation des
   preuves et retrait des quatre instances jetables.
 
 Voir le [guide des invitations Outlook et DAVx⁵](invitations-outlook-davx5-fr.md).
+La [qualification 6.3.1](validation-invitations-dav.md) documente les 76 suites
+PHP, les 12 suites HTTP et les scénarios INV01–INV27 sur les quatre combinaisons,
+avec une course réelle entre deux acceptations et une réponse unique.
 
 ### Compléments à prévoir
 

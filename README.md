@@ -119,6 +119,8 @@ appointment identity and business links. Local scheduling runs after commit and
 does not create a second appointment; see the
 [French Outlook and DAVx⁵ guide](doc/invitations-outlook-davx5-fr.md) for setup,
 external-email boundaries and device validation.
+The [invitation qualification report](doc/validation-invitations-dav.md) records
+the four native combinations, concurrency checks and remaining client limits.
 
 Version 6.3.0 protects appointments created in Dolibarr or by public booking:
 CalDAV can move them while preserving duration, or delete them according to

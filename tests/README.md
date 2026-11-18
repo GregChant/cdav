@@ -79,6 +79,8 @@ les notifications, les changements de révision, les disponibilités personnelle
 les annulations et les imports extérieurs. Les payloads sont vérifiés par HTTP
 contre Dolibarr ; les applications Outlook, Microsoft 365 et Agenda sur téléphone
 ne sont pas pilotées par ces tests.
+Les résultats 6.3.1 sont détaillés dans le
+[rapport des invitations](../doc/validation-invitations-dav.md).
 
 La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
 sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.
