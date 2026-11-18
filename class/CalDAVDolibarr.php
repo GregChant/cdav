@@ -27,6 +27,7 @@ use Sabre\DAV\Exception\Forbidden;
 
 require_once __DIR__.'/CDavBusinessPolicy.php';
 require_once __DIR__.'/CDavCalendarWritePolicy.php';
+require_once __DIR__.'/CDavInvitationPolicy.php';
 
 class Dolibarr extends AbstractBackend implements SyncSupport {
 
@@ -94,6 +95,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 
 	/** @var array<string,string> Conditional ETags consumed inside the native lock. */
 	private $expectedCalendarEtags = array();
+
+	/** @var array<string,array> Scheduling receipts captured under the native lock. */
+	private $committedSchedulingChanges = array();
 
 	/**
 	 * List of CalDAV properties, and how they map to database fieldnames
@@ -471,6 +475,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		try {
 			$this->_lockCalendarOwner((int) $calendarId);
 			$this->_findActionCommByUri((string) $objectUri, true);
+			$previousSchedulingObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 			// One occurrence is stored. Recurrence rules remain attached to that DAV object.
 			foreach($calendarData['occurences'] as $iOccur => $occurence)
 			{
@@ -617,9 +622,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				}
 			}
 			} // loop occurrences
+			$committedSchedulingObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 			if (!$this->db->commit()) {
 				throw new \Sabre\DAV\Exception('Unable to commit the CalDAV creation');
 			}
+			$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
+				'id' => (int) $oid, 'previous_data' => $previousSchedulingObject['calendardata'] ?? null,
+				'canonical_data' => $committedSchedulingObject['calendardata'] ?? null,
+				'changed' => ($previousSchedulingObject['calendardata'] ?? null) !== ($committedSchedulingObject['calendardata'] ?? null));
 		} catch (\Throwable $e) {
 			$this->db->rollback();
 			$this->managedAttachmentStore->discardCreatedFiles($createdAttachments);
@@ -696,15 +706,29 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->_canModifySource($calendarData['elem_source'])) {
 			throw new Forbidden('Not allowed to modify this type of Dolibarr object');
 		}
+			$invitationChange = $calendarData['elem_source'] === 'ev'
+				? $this->validateProtectedCalendarWrite((int) $calendarId, (string) $objectUri, $origCalendarData) : false;
+			if (is_array($invitationChange) && isset($invitationChange['_invitation_plan'])) {
+				$previous = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+				$this->_applyInvitationPlan((int) $calendarData['id'], (int) $calendarId, $invitationChange['_invitation_plan'], $createdAttachments, $removedAttachments);
+				$committed = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+				if (!$this->db->commit()) {
+					throw new \Sabre\DAV\Exception('Unable to commit the meeting response or organizer update.');
+				}
+				$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
+					'id' => (int) $calendarData['id'], 'previous_data' => (string) $previous['calendardata'],
+					'canonical_data' => (string) $committed['calendardata'], 'changed' => (bool) $invitationChange['_invitation_plan']['changed'],
+					'owner_principal' => $invitationChange['_invitation_plan']['delegated_principal'] ?? 'principals/'.(string) $this->user->login);
+				$this->managedAttachmentStore->discardCreatedFiles($removedAttachments);
+				return;
+			}
 			$currentObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 			if (isset($currentObject['_cdav_description'])) {
 				$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($currentObject['_cdav_description'], $calendarData['label'], $calendarData['location']);
 				$calendarData['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($currentObject['_cdav_description'], $calendarData['description'], $replacementPrefix);
 				$calendarData['_native_note_resolved'] = true;
 			}
-			$protectedMove = $calendarData['elem_source'] === 'ev'
-			? $this->validateProtectedCalendarWrite((int) $calendarId, (string) $objectUri, $origCalendarData)
-			: false;
+			$protectedMove = $invitationChange;
 			if ($protectedMove !== false) {
 				$calendarData = array_replace($calendarData, $protectedMove);
 				$this->_advanceProtectedCalendarSequence((int) $calendarData['id'], (int) $calendarId, (string) $objectUri, $protectedMove);
@@ -800,9 +824,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				$removedAttachments
 			);
 			}
+			$committedSchedulingObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 		if (!$this->db->commit()) {
 			throw new \Sabre\DAV\Exception('Unable to commit the CalDAV update');
 		}
+			$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
+				'id' => (int) $calendarData['id'], 'previous_data' => $currentObject['calendardata'] ?? null,
+				'canonical_data' => $committedSchedulingObject['calendardata'] ?? null,
+				'changed' => ($currentObject['calendardata'] ?? null) !== ($committedSchedulingObject['calendardata'] ?? null));
 		} catch (\Throwable $e) {
 			$this->db->rollback();
 			$this->managedAttachmentStore->discardCreatedFiles($createdAttachments);
@@ -1080,13 +1109,35 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	public function validateProtectedCalendarWrite($calendarId, $objectUri, $calendarData, $creating = false)
 	{
 		$existing = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+		$internal = $this->_parseInternalObjectUri((string) $objectUri);
+		if (!$creating && $existing !== null && ($internal === null || $internal['source'] === 'ev')) {
+			try {
+				$invitation = \Dolibarr\CDav\InvitationPolicy::plan((string) $existing['calendardata'], (string) $calendarData,
+					(string) $this->user->email, $this->_isProtectedEvent((int) $existing['id']),
+					$this->_canImportExternalInvitation((int) $existing['id'], (int) $calendarId, (string) $existing['calendardata']));
+			} catch (Forbidden $exception) {
+				$organizer = $this->_hasAgendaRight('allactions', 'write')
+					? $this->_nativeOrganizerIdentity((int) $existing['id'], (string) $existing['calendardata']) : null;
+				if ($organizer === null) throw $exception;
+				$invitation = \Dolibarr\CDav\InvitationPolicy::plan((string) $existing['calendardata'], (string) $calendarData,
+					$organizer['email'], $this->_isProtectedEvent((int) $existing['id']));
+				if ($invitation !== null) $invitation['delegated_principal'] = $organizer['principal'];
+			}
+			if ($invitation !== null) {
+				if ($invitation['kind'] === 'reply' && (int) $calendarId !== (int) $this->user->id) {
+					throw new Forbidden('A meeting response must be written in the authenticated participant calendar.');
+				}
+				$data = $this->_parseData($invitation['calendar_data'], (int) $calendarId);
+				return array('start' => (int) $data['start'], 'end' => (int) $data['end'], 'fullday' => (int) $data['fullday'],
+					'_invitation_plan' => $invitation);
+			}
+		}
 		$incoming = null;
 		if (isset($existing['_cdav_description'])) {
 			$incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
 			$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($existing['_cdav_description'], $incoming['label'], $incoming['location']);
 			\Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($existing['_cdav_description'], $incoming['description'], $replacementPrefix);
 		}
-		$internal = $this->_parseInternalObjectUri((string) $objectUri);
 		if ($existing !== null && ($internal === null || $internal['source'] === 'ev')) {
 			if ($incoming === null) $incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
 			$this->_planNativeReminders((int) $existing['id'], (int) $calendarId, $incoming['native_reminders'] ?? array());
@@ -1125,6 +1176,81 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	{
 		return \Dolibarr\CDav\BusinessPolicy::protectNativeEvents()
 			&& !\Dolibarr\CDav\BusinessPolicy::isDavCreated($this->db, (int) $eventId);
+	}
+
+	/**
+	 * External email imports may update only their DAV-created personal calendar.
+	 * A native/shared appointment or a local organizer never inherits that exception.
+	 *
+	 * @param int $eventId Existing native appointment
+	 * @param int $calendarId Calendar receiving the import
+	 * @param string $calendarData Trusted current server representation
+	 * @return bool Whether the authenticated owner can import organizer email updates
+	 */
+	private function _canImportExternalInvitation($eventId, $calendarId, $calendarData)
+	{
+		if ((int) $calendarId !== (int) $this->user->id || !\Dolibarr\CDav\BusinessPolicy::isDavCreated($this->db, (int) $eventId)) return false;
+		$calendar = VObject\Reader::read((string) $calendarData);
+		try {
+			if (!isset($calendar->VEVENT->ORGANIZER)) return false;
+			$email = strtolower(preg_replace('/^mailto:/i', '', trim((string) $calendar->VEVENT->ORGANIZER)));
+			if (!filter_var($email, FILTER_VALIDATE_EMAIL) || $email === strtolower(trim((string) $this->user->email))) return false;
+		} finally {
+			$calendar->destroy();
+		}
+		$result = $this->db->query('SELECT fk_user_action FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.((int) $eventId).' AND entity IN ('.getEntity('agenda').')');
+		if (!$result || !($event = $this->db->fetch_object($result)) || (int) $event->fk_user_action !== (int) $this->user->id) return false;
+		$result = $this->db->query('SELECT fk_element FROM '.MAIN_DB_PREFIX.'actioncomm_resources WHERE fk_actioncomm = '.((int) $eventId)." AND element_type = 'user'");
+		if (!$result) throw new \Sabre\DAV\Exception('Unable to inspect the external invitation calendar scope.');
+		$count = 0;
+		while ($row = $this->db->fetch_object($result)) {
+			if ((int) $row->fk_element !== (int) $this->user->id) return false;
+			$count++;
+		}
+		if ($count !== 1) return false;
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'user WHERE LOWER(email) = \''.$this->db->escape($email)
+			.'\' AND statut > 0 AND fk_soc IS NULL AND entity IN ('.getEntity('user').') LIMIT 1');
+		if (!$result) throw new \Sabre\DAV\Exception('Unable to distinguish the external invitation organizer.');
+		return !$this->db->fetch_object($result);
+	}
+
+	/**
+	 * Resolve an invitation organizer only when it is also the native Agenda owner.
+	 * Native all-agenda rights may delegate this authority, never a client claim alone.
+	 *
+	 * @param int $eventId Readable existing appointment
+	 * @param string $calendarData Trusted current calendar
+	 * @return array|null Native owner identity bound to the organizer address
+	 */
+	private function _nativeOrganizerIdentity($eventId, $calendarData)
+	{
+		$calendar = VObject\Reader::read((string) $calendarData);
+		try {
+			if (!isset($calendar->VEVENT->ORGANIZER)) return null;
+			$email = strtolower(preg_replace('/^mailto:/i', '', trim((string) $calendar->VEVENT->ORGANIZER)));
+		} finally {
+			$calendar->destroy();
+		}
+		$result = $this->db->query('SELECT u.rowid, u.login, u.email FROM '.MAIN_DB_PREFIX.'actioncomm a
+			INNER JOIN '.MAIN_DB_PREFIX.'user u ON u.rowid = a.fk_user_action
+			WHERE a.id = '.((int) $eventId).' AND a.entity IN ('.getEntity('agenda').') AND u.entity IN ('.getEntity('user').')
+			AND u.statut > 0 AND u.fk_soc IS NULL');
+		if (!$result) throw new \Sabre\DAV\Exception('Unable to resolve native organizer delegation.');
+		$row = $this->db->fetch_object($result);
+		return $row && $email !== '' && strtolower(trim((string) $row->email)) === $email
+			? array('id' => (int) $row->rowid, 'email' => $email, 'principal' => 'principals/'.(string) $row->login) : null;
+	}
+
+	/**
+	 * Read only the state actually committed by this request, avoiding stale notifications.
+	 *
+	 * @param int $calendarId Calendar owner
+	 * @param string $objectUri Resource basename
+	 * @return array|null Locked before/after state, or null for unsupported sources
+	 */
+	public function getCommittedSchedulingChange($calendarId, $objectUri)
+	{
+		return $this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] ?? null;
 	}
 
 	/**
@@ -1375,15 +1501,117 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
+	 * Apply a validated invitation change while retaining the locked native relations.
+	 *
+	 * @param int $eventId Locked native appointment
+	 * @param int $calendarId Authenticated calendar owner
+	 * @param array $plan Canonical invitation update
+	 * @param array $createdFiles New attachment files rolled back by the caller
+	 * @param array $removedFiles Attachment files removed after the caller commits
+	 * @return void
+	 */
+	private function _applyInvitationPlan($eventId, $calendarId, array $plan, array &$createdFiles = array(), array &$removedFiles = array())
+	{
+		if (empty($plan['changed'])) return;
+		if (!$this->_schedulingTableAvailable()) {
+			throw new Forbidden('Reactivate CDav before recording invitation responses.');
+		}
+		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
+		$event = new \ActionComm($this->db);
+		if ($event->fetch((int) $eventId) <= 0
+			|| !in_array((int) $event->entity, array_map('intval', explode(',', getEntity('agenda'))), true)) {
+			throw new \Sabre\DAV\Exception\NotFound('Meeting not found.');
+		}
+		$kind = (string) $plan['kind'];
+		$canonical = (string) $plan['calendar_data'];
+		if (in_array($kind, array('organizer', 'cancel'), true) && (int) $event->userownerid !== (int) $this->user->id
+			&& !$this->_hasAgendaRight('allactions', 'write')) {
+			throw new Forbidden('Only the native meeting owner may apply organizer updates or cancellations.');
+		}
+		if ($kind === 'reply') {
+			if ((int) $calendarId !== (int) $this->user->id || empty($event->userassigned[(int) $calendarId])) {
+				throw new Forbidden('Only an assigned participant can respond to this invitation.');
+			}
+			$event->userassigned[(int) $calendarId]['answer_status'] = (string) $plan['partstat'];
+			$event->userassigned[(int) $calendarId]['transparency'] = (int) $plan['personal_transparency'];
+			if ($event->update($this->user) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to record the native meeting response: '.$event->error);
+			}
+			$this->_restoreActionCommResourceMetadata((int) $eventId, $event->userassigned, $event->socpeopleassigned);
+		} elseif ($kind === 'cancel') {
+			$event->transparency = 0;
+			foreach (array('userassigned', 'socpeopleassigned') as $field) {
+				foreach ($event->{$field} as &$assignment) {
+					if (is_array($assignment)) $assignment['transparency'] = 0;
+				}
+				unset($assignment);
+			}
+			if ($event->update($this->user) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to cancel the native meeting: '.$event->error);
+			}
+			$this->_restoreActionCommResourceMetadata((int) $eventId, $event->userassigned, $event->socpeopleassigned);
+			$this->_cancelPendingMeetingReminders((int) $eventId);
+		} elseif ($kind === 'organizer') {
+			$data = $this->_parseData($canonical, (int) $calendarId);
+			$current = $this->getCalendarObject((int) $calendarId, ((int) $eventId).'-ev-'.CDAV_URI_KEY);
+			if (isset($current['_cdav_description'])) {
+				$prefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($current['_cdav_description'], $data['label'], $data['location']);
+				$data['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($current['_cdav_description'], $data['description'], $prefix);
+				$data['_native_note_resolved'] = true;
+			}
+			$protected = $this->_isProtectedEvent((int) $eventId);
+			if (!$protected && getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
+				$this->managedAttachmentStore->synchronizeCalendarData((int) $eventId, $canonical, false);
+			}
+			$event = $this->_updateActionCommFromCalendarData((int) $eventId, $data, (int) $calendarId, $protected, true);
+			if (!$protected) {
+				$canonical = $this->managedAttachmentStore->importInlineCalendarData((int) $eventId, $canonical, $createdFiles);
+				if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
+					$removedFiles = array_merge($removedFiles, $this->managedAttachmentStore->synchronizeCalendarData((int) $eventId, $canonical, true, true));
+				}
+				$this->_syncActionCommAttachmentLinks((int) $eventId, $data['attachment_links']);
+			}
+		} else {
+			throw new Forbidden('Unsupported invitation change.');
+		}
+		$this->_storeCalendarMetadata((int) $eventId, $canonical);
+	}
+
+	/**
+	 * Remove pending reminders for a cancelled meeting through their native API.
+	 * Historical sent and failed rows are retained and never rearmed.
+	 *
+	 * @param int $eventId Cancelled native appointment
+	 * @return void
+	 */
+	private function _cancelPendingMeetingReminders($eventId)
+	{
+		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncommreminder.class.php';
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.((int) $eventId).' AND status = 0 FOR UPDATE');
+		if (!$result) throw new \Sabre\DAV\Exception('Unable to inspect reminders of the cancelled meeting.');
+		while ($row = $this->db->fetch_object($result)) {
+			$reminder = new \ActionCommReminder($this->db);
+			if ($reminder->fetch((int) $row->rowid) <= 0 || $reminder->delete($this->user) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to remove a pending reminder of the cancelled meeting.');
+			}
+			if ($this->_reminderMappingTableAvailable()
+				&& !$this->db->query('DELETE FROM '.MAIN_DB_PREFIX.'cdav_reminder WHERE fk_actioncomm = '.((int) $eventId).' AND fk_reminder = '.((int) $row->rowid))) {
+				throw new \Sabre\DAV\Exception('Unable to remove cancelled reminder provenance.');
+			}
+		}
+	}
+
+	/**
 	 * Update an existing Dolibarr event through ActionComm and its resource API.
 	 *
 	 * @param int $eventId Native Agenda identifier
 	 * @param array $data Parsed calendar values
 	 * @param int $calendarId Calendar owner
 	 * @param bool $protectedMove Whether only validated endpoints may change
+	 * @param bool $preserveInvitationResponses Whether existing personal resources remain authoritative
 	 * @return \ActionComm Updated native appointment
 	 */
-	private function _updateActionCommFromCalendarData($eventId, array $data, $calendarId, $protectedMove = false)
+	private function _updateActionCommFromCalendarData($eventId, array $data, $calendarId, $protectedMove = false, $preserveInvitationResponses = false)
 	{
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
 		$event = new \ActionComm($this->db);
@@ -1407,6 +1635,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			return $event;
 		}
 		$nativeAssignments = $event->userassigned;
+		$previousTransparency = (int) $event->transparency;
 		$previousStart = (int) $event->datep;
 		$reminderPlan = $this->_planNativeReminders((int) $eventId, (int) $calendarId, $data['native_reminders'] ?? array(), true);
 		if (empty($data['_native_note_resolved'])) {
@@ -1440,9 +1669,20 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (empty($event->userassigned[(int) $calendarId])) {
 			$event->userassigned[(int) $calendarId] = array('id' => (int) $calendarId);
 		}
-		foreach ($event->userassigned as &$assignment) {
+		$ownerTransparency = isset($nativeAssignments[(int) $calendarId]['transparency'])
+			? (int) $nativeAssignments[(int) $calendarId]['transparency'] : $previousTransparency;
+		$transparencyChanged = $ownerTransparency !== (int) $data['transparency'];
+		if ($preserveInvitationResponses && !$transparencyChanged) $event->transparency = $previousTransparency;
+		foreach ($event->userassigned as $id => &$assignment) {
 			if (is_array($assignment)) {
-				$assignment['transparency'] = (int) $data['transparency'];
+				$previous = $nativeAssignments[$id] ?? null;
+				if ($preserveInvitationResponses && is_array($previous)) {
+					$assignment['mandatory'] = (int) ($previous['mandatory'] ?? 0);
+					if ((int) $id !== (int) $calendarId) $assignment['answer_status'] = (string) ($previous['answer_status'] ?? '');
+				}
+				$assignment['transparency'] = $preserveInvitationResponses && !$transparencyChanged && is_array($previous)
+					? (int) ($previous['transparency'] ?? $previousTransparency) : (int) $data['transparency'];
+				if (strtoupper((string) ($assignment['answer_status'] ?? '')) === 'DECLINED') $assignment['transparency'] = 0;
 			}
 		}
 		unset($assignment);
@@ -1634,28 +1874,72 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
+	 * Translate attendee removal into a decline, keeping organizer cancellation distinct.
+	 *
+	 * @param int $eventId Locked native appointment
+	 * @param int $calendarId Calendar being removed
+	 * @param string $currentData Locked original calendar representation
+	 * @return bool Whether the authenticated organizer is cancelling the whole meeting
+	 */
+	private function _prepareInvitationRemoval($eventId, $calendarId, $currentData)
+	{
+		if ((int) $calendarId !== (int) $this->user->id) {
+			$organizer = $this->_hasAgendaRight('allactions', 'delete') ? $this->_nativeOrganizerIdentity((int) $eventId, $currentData) : null;
+			return $organizer !== null && (int) $organizer['id'] === (int) $calendarId;
+		}
+		$calendar = VObject\Reader::read((string) $currentData);
+		try {
+			$item = $calendar->VEVENT;
+			if ($item === null || !isset($item->ORGANIZER) || count($item->select('ATTENDEE')) === 0) return false;
+			$email = strtolower(trim((string) $this->user->email));
+			$organizer = strtolower(preg_replace('/^mailto:/i', '', trim((string) $item->ORGANIZER)));
+			if ($email !== '' && hash_equals($organizer, $email)) return true;
+			if (isset($item->STATUS) && strtoupper((string) $item->STATUS) === 'CANCELLED') return false;
+			$responding = false;
+			foreach ($item->select('ATTENDEE') as $attendee) {
+				if (strtolower(preg_replace('/^mailto:/i', '', trim((string) $attendee))) === $email) {
+					$attendee['PARTSTAT'] = 'DECLINED';
+					$attendee['RSVP'] = 'FALSE';
+					$responding = true;
+				}
+			}
+			if (!$responding) return false;
+			$plan = \Dolibarr\CDav\InvitationPolicy::plan((string) $currentData, $calendar->serialize(), $email, $this->_isProtectedEvent((int) $eventId));
+			if ($plan !== null) $this->_applyInvitationPlan((int) $eventId, (int) $calendarId, $plan);
+			return false;
+		} finally {
+			$calendar->destroy();
+		}
+	}
+
+	/**
 	 * Remove one calendar assignment and use ActionComm for the business write.
 	 *
 	 * @param int $eventId Native Agenda identifier
 	 * @param int $calendarId Calendar owner
 	 * @param array $deferredFiles Physical files to remove only after transaction commit
+	 * @param bool $cancelAsOrganizer Whether the authenticated native owner cancels the shared invitation
 	 * @return void
 	 */
-	private function _detachActionCommFromCalendar($eventId, $calendarId, array &$deferredFiles = array())
+	private function _detachActionCommFromCalendar($eventId, $calendarId, array &$deferredFiles = array(), $cancelAsOrganizer = false)
 	{
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncomm.class.php';
 		$event = new \ActionComm($this->db);
 		if ($event->fetch((int) $eventId) <= 0) {
 			throw new \Sabre\DAV\Exception\NotFound('Dolibarr event not found');
 		}
+		if ($cancelAsOrganizer && (int) $event->userownerid !== (int) $this->user->id
+			&& !$this->_hasAgendaRight('allactions', 'delete')) {
+			throw new Forbidden('Only the native meeting owner may cancel it for every participant.');
+		}
 		$remainingAssignments = array();
 		foreach ($event->userassigned as $key => $assignment) {
 			$id = is_array($assignment) ? (int) ($assignment['id'] ?? $key) : (int) $assignment;
-			if ($id > 0 && $id !== (int) $calendarId) {
+			if (!$cancelAsOrganizer && $id > 0 && $id !== (int) $calendarId) {
 				$remainingAssignments[$id] = is_array($assignment) ? $assignment : array('id' => $id);
 			}
 		}
-		$this->_deleteNativeReminders((int) $eventId, (int) $calendarId);
+		$this->_deleteNativeReminders((int) $eventId, $cancelAsOrganizer ? 0 : (int) $calendarId);
 		if (!$remainingAssignments) {
 			$deferredFiles = array_merge($deferredFiles, $this->managedAttachmentStore->removeAllForEvent((int) $eventId, true));
 			$this->_deleteActionCommLinks((int) $eventId);
@@ -1678,10 +1962,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 
 		$event->userassigned = $remainingAssignments;
-		if ($remainingAssignments) {
+		if ($remainingAssignments && empty($remainingAssignments[(int) $event->userownerid])) {
 			$remainingIds = array_keys($remainingAssignments);
 			$event->userownerid = (int) $remainingIds[0];
-		} else {
+		} elseif (!$remainingAssignments) {
 			$event->userownerid = max(0, (int) $event->authorid);
 		}
 		if ($event->update($this->user) <= 0) {
@@ -2501,14 +2785,20 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			if (!$this->_canModifySource($source)) {
 				throw new Forbidden('Not allowed to modify this type of Dolibarr object');
 			}
-		if ($source === 'ev') {
-				$this->_detachActionCommFromCalendar($oid, (int) $calendarId, $removedAttachments);
-			if (!$this->db->commit()) {
-				throw new \Sabre\DAV\Exception('Unable to commit the CalDAV event deletion');
-			}
+			if ($source === 'ev') {
+				$current = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
+				$cancelAsOrganizer = $this->_prepareInvitationRemoval($oid, (int) $calendarId, (string) $current['calendardata']);
+				$organizerIdentity = $cancelAsOrganizer ? $this->_nativeOrganizerIdentity($oid, (string) $current['calendardata']) : null;
+				$this->_detachActionCommFromCalendar($oid, (int) $calendarId, $removedAttachments, $cancelAsOrganizer);
+				if (!$this->db->commit()) {
+					throw new \Sabre\DAV\Exception('Unable to commit the CalDAV event deletion');
+				}
+				$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
+					'id' => $oid, 'previous_data' => (string) $current['calendardata'], 'canonical_data' => null, 'changed' => true,
+					'owner_principal' => $organizerIdentity['principal'] ?? 'principals/'.(string) $this->user->login);
 				$this->managedAttachmentStore->discardCreatedFiles($removedAttachments);
-			return;
-		}
+				return;
+			}
 
 		if ($source === 'pe' || $source === 'pt') {
 			require_once DOL_DOCUMENT_ROOT.'/projet/class/task.class.php';
@@ -2975,6 +3265,112 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		);
 		if ($withData) $object['calendardata'] = $data;
 		return $object;
+	}
+
+	/**
+	 * Apply a local authenticated iTIP REPLY to an existing assigned appointment.
+	 * The caller emits notifications only after this transaction has committed.
+	 *
+	 * @param string $senderPrincipal Authenticated scheduling outbox owner
+	 * @param string $calendarData Single VEVENT REPLY, possibly with partial fields
+	 * @return array Committed canonical data and local notification recipients
+	 */
+	public function processSchedulingReply($senderPrincipal, $calendarData)
+	{
+		if (!getDolGlobalInt('CDAV_SCHEDULING') || !$this->_canAccessSchedulingPrincipal($senderPrincipal)
+			|| !$this->_canWriteCalendar((int) $this->user->id)) {
+			throw new Forbidden('Not allowed to answer from this scheduling outbox.');
+		}
+		$reply = VObject\Reader::read($this->_readSchedulingData($calendarData));
+		try {
+			$item = $reply->VEVENT;
+			if (strtoupper((string) $reply->METHOD) !== 'REPLY' || count($reply->select('METHOD')) !== 1
+				|| $item === null || isset($item->{'RECURRENCE-ID'}) || count($item->select('ATTENDEE')) !== 1
+				|| count($item->select('UID')) !== 1 || count($item->select('ORGANIZER')) !== 1) {
+				throw new \Sabre\DAV\Exception\BadRequest('A reply must identify one meeting, organizer and authenticated participant.');
+			}
+			foreach (array('SEQUENCE', 'DTSTART', 'DTEND') as $field) {
+				if (count($item->select($field)) > 1) throw new \Sabre\DAV\Exception\BadRequest('A reply contains ambiguous revision or date fields.');
+			}
+			$email = strtolower(trim((string) $this->user->email));
+			$attendee = $item->select('ATTENDEE')[0];
+			$sender = strtolower(preg_replace('/^mailto:/i', '', trim((string) $attendee)));
+			$organizer = strtolower(preg_replace('/^mailto:/i', '', trim((string) $item->ORGANIZER)));
+			if ($email === '' || !hash_equals($email, $sender) || !filter_var($organizer, FILTER_VALIDATE_EMAIL)) {
+				throw new Forbidden('The reply participant does not match the authenticated user.');
+			}
+			$path = $this->getCalendarObjectByUID($senderPrincipal, (string) $item->UID);
+			if ($path === null) throw new \Sabre\DAV\Exception\NotFound('No assigned meeting has this invitation identity.');
+			list(, $uri) = \Sabre\Uri\split($path);
+			if (!$this->db->begin()) throw new \Sabre\DAV\Exception('Unable to start the invitation response transaction.');
+			try {
+				$this->_lockCalendarOwner((int) $this->user->id);
+				$id = $this->_findActionCommByUri($uri, true, (int) $this->user->id);
+				$current = $this->getCalendarObject((int) $this->user->id, $uri);
+				if ($id <= 0 || $current === null || (int) $current['id'] !== $id) {
+					throw new \Sabre\DAV\Exception\NotFound('The assigned meeting no longer exists.');
+				}
+				$calendar = VObject\Reader::read((string) $current['calendardata']);
+				try {
+					$existing = $calendar->VEVENT;
+					if ($existing === null || count($calendar->select('VEVENT')) !== 1 || isset($existing->{'RECURRENCE-ID'})
+						|| !isset($existing->ORGANIZER) || (string) $existing->UID !== (string) $item->UID
+						|| strtolower(preg_replace('/^mailto:/i', '', trim((string) $existing->ORGANIZER))) !== $organizer) {
+						throw new Forbidden('The reply does not match this meeting organizer and identity.');
+					}
+					$sequence = isset($existing->SEQUENCE) ? (int) (string) $existing->SEQUENCE : 0;
+					$replySequence = isset($item->SEQUENCE) ? (string) $item->SEQUENCE : '0';
+					if (!preg_match('/^(?:0|[1-9][0-9]{0,9})$/D', $replySequence) || (int) $replySequence !== $sequence) {
+						throw new \Sabre\DAV\Exception\PreconditionFailed('The invitation revision changed before this reply.');
+					}
+					foreach (array('DTSTART', 'DTEND') as $date) {
+						if (isset($item->{$date}) && (!isset($existing->{$date})
+							|| $item->{$date}->getDateTime()->getTimestamp() !== $existing->{$date}->getDateTime()->getTimestamp())) {
+							throw new \Sabre\DAV\Exception\PreconditionFailed('The reply refers to a different meeting date.');
+						}
+					}
+					$matched = false;
+					foreach ($existing->select('ATTENDEE') as $participant) {
+						if (strtolower(preg_replace('/^mailto:/i', '', trim((string) $participant))) !== $email) continue;
+						$participant['PARTSTAT'] = isset($attendee['PARTSTAT']) ? (string) $attendee['PARTSTAT'] : 'NEEDS-ACTION';
+						if (isset($attendee['RSVP'])) $participant['RSVP'] = (string) $attendee['RSVP'];
+						$matched = true;
+					}
+					if (!$matched) throw new Forbidden('The authenticated participant is absent from the invitation.');
+					$plan = \Dolibarr\CDav\InvitationPolicy::plan((string) $current['calendardata'], $calendar->serialize(), $email, $this->_isProtectedEvent($id));
+					if ($plan === null || !in_array($plan['kind'], array('reply', 'noop'), true)) {
+						throw new Forbidden('This message is not a participant response.');
+					}
+					$result = $this->db->query('SELECT u.rowid, u.login, u.email, a.fk_user_action FROM '.MAIN_DB_PREFIX.'actioncomm_resources r
+						INNER JOIN '.MAIN_DB_PREFIX.'actioncomm a ON a.id = r.fk_actioncomm
+						INNER JOIN '.MAIN_DB_PREFIX.'user u ON u.rowid = r.fk_element
+						WHERE r.fk_actioncomm = '.$id." AND r.element_type = 'user' AND u.statut > 0 AND u.fk_soc IS NULL"
+						.' AND u.entity IN ('.getEntity('user').') ORDER BY u.rowid');
+					if (!$result) throw new \Sabre\DAV\Exception('Unable to resolve local meeting recipients.');
+					$recipients = array();
+					$localOrganizer = false;
+					while ($row = $this->db->fetch_object($result)) {
+						if (strtolower(trim((string) $row->email)) === $organizer && (int) $row->rowid === (int) $row->fk_user_action) $localOrganizer = true;
+						if ((string) $row->login !== (string) $this->user->login) $recipients[] = 'principals/'.(string) $row->login;
+					}
+					if (!$localOrganizer) throw new \Sabre\DAV\Exception\NotImplemented('Email scheduling to an external organizer is not configured.');
+					$this->_applyInvitationPlan($id, (int) $this->user->id, $plan);
+					$committed = $this->getCalendarObject((int) $this->user->id, $uri);
+					$receipt = array('uid' => (string) $existing->UID, 'changed' => (bool) $plan['changed'],
+						'previous_data' => (string) $current['calendardata'], 'canonical_data' => (string) $committed['calendardata'],
+						'recipients' => $recipients, 'sender_address' => 'mailto:'.$email, 'organizer_address' => 'mailto:'.$organizer);
+				} finally {
+					$calendar->destroy();
+				}
+				if (!$this->db->commit()) throw new \Sabre\DAV\Exception('Unable to commit the invitation response.');
+				return $receipt;
+			} catch (\Throwable $e) {
+				$this->db->rollback();
+				throw $e;
+			}
+		} finally {
+			$reply->destroy();
+		}
 	}
 
 	/** Persist a bounded local audit copy; no iMIP/email transport is installed. */

@@ -133,8 +133,16 @@ function liveHttp($baseUrl, $login, $password, $method, $path, $body = null, arr
 	return array('status' => $status, 'headers' => $responseHeaders, 'body' => $responseBody);
 }
 
-/** Execute several authenticated requests at the same time. */
-function liveHttpConcurrent($baseUrl, $login, $password, array $requests)
+/**
+ * Execute authenticated requests concurrently, with an optional native lock barrier.
+ * @param string $baseUrl Isolated DAV endpoint
+ * @param string $login Private fixture login
+ * @param string $password Private fixture password
+ * @param array $requests Parallel HTTP operations
+ * @param callable|null $onDispatched Optional callback receiving the active cURL multi handle
+ * @return array Completed HTTP responses
+ */
+function liveHttpConcurrent($baseUrl, $login, $password, array $requests, ?callable $onDispatched = null)
 {
 	$multi = curl_multi_init();
 	$handles = array();
@@ -155,6 +163,11 @@ function liveHttpConcurrent($baseUrl, $login, $password, array $requests)
 	}
 	do {
 		$status = curl_multi_exec($multi, $running);
+		if ($onDispatched !== null) {
+			$callback = $onDispatched;
+			$onDispatched = null;
+			$callback($multi);
+		}
 		if ($running && $status === CURLM_OK) curl_multi_select($multi, 1.0);
 	} while ($running && $status === CURLM_OK);
 	if ($status !== CURLM_OK) {
@@ -1367,6 +1380,14 @@ try {
 		'prefix' => $prefix, 'token' => $token, 'company_id' => $linkCompanyId, 'entity' => $entity,
 		'calendar_path' => $calendarPath, 'addressbook_path' => $addressBookPath,
 		'limited_user_id' => $limitedUserId, 'limited_login' => $limitedLogin, 'limited_password' => $limitedPassword,
+		'limited_calendar_path' => $limitedCalendarPath,
+	));
+	require_once __DIR__.'/invitation_live_cases.php';
+	invitationLiveCases($db, $testUser, $admin, array(
+		'base_url' => $davBaseUrl, 'login' => $login, 'password' => $password,
+		'prefix' => $prefix, 'token' => $token, 'company_id' => $linkCompanyId, 'entity' => $entity,
+		'calendar_path' => $calendarPath, 'limited_user_id' => $limitedUserId,
+		'limited_login' => $limitedLogin, 'limited_password' => $limitedPassword,
 		'limited_calendar_path' => $limitedCalendarPath,
 	));
 	$eventDelete = liveHttp($davBaseUrl, $login, $password, 'DELETE', $eventPath);

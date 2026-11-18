@@ -29,6 +29,8 @@ pour rendre visibles les incompatibilités propres à une combinaison.
 | `contact_business.php` | Conservation des tiers, catégories, statuts, confidentialité et identifiants, contacts liés à un utilisateur |
 | `calendar_policy.php` | Déplacements à durée constante, propriétés protégées, descriptions réimportées et rappels natifs conservés |
 | `calendar_description.php` | Sections lisibles, texte riche natif conservé, contexte client/projet, reçu vérifié et absence de données privées dans l'export anonyme |
+| `invitation_policy.php` | Réponses personnelles, révisions Outlook/DAVx⁵, annulation, protections métier, import extérieur limité et UID stable |
+| `invitation_scheduling.php` | Broker Sabre réel, notifications après commit, confidentialité des inbox, POST REPLY authentifié et délégation de l'organisateur |
 | `booking.php` | Créneaux réellement libres, bornes, marges, pauses, journées entières, récurrences, changements d’heure, préavis, horizon et validation des profils |
 | `booking_projects.php` | Statuts projet natifs, conservation des liens indisponibles, retrait explicite et véritable sanitisation/rendu du sélecteur Dolibarr |
 | `booking_calendar.php` | Vue mensuelle, correspondance jours/créneaux, une lecture Agenda par mois, navigation bornée, années bissextiles et confidentialité |
@@ -72,6 +74,11 @@ ouverts est détaillée dans son
 [rapport dédié](../doc/validation-protection-metier-dav.md). Les cas HTTP
 BL01–BL27 sont appelés par `live_integration.php`, avec de vrais objets,
 verrous natifs, droits, rappels et refus de suppression transactionnelle.
+`invitation_live_cases.php` complète cette suite avec les réponses Outlook/DAVx⁵,
+les notifications, les changements de révision, les disponibilités personnelles,
+les annulations et les imports extérieurs. Les payloads sont vérifiés par HTTP
+contre Dolibarr ; les applications Outlook, Microsoft 365 et Agenda sur téléphone
+ne sont pas pilotées par ces tests.
 
 La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
 sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.

@@ -112,6 +112,14 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.3.1 adds personal invitation responses for Outlook CalDav Synchronizer
+and DAVx⁵ calendars, organizer updates and cancellations, and guarded imports of
+external invitations into a personal calendar. Replies preserve the native
+appointment identity and business links. Local scheduling runs after commit and
+does not create a second appointment; see the
+[French Outlook and DAVx⁵ guide](doc/invitations-outlook-davx5-fr.md) for setup,
+external-email boundaries and device validation.
+
 Version 6.3.0 protects appointments created in Dolibarr or by public booking:
 CalDAV can move them while preserving duration, or delete them according to
 native permissions. Other appointment information remains managed in Dolibarr.

@@ -8,10 +8,10 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	/** @var object */
 	private $backend;
 
-	/** @var array<array<string,mixed>> Protected moves waiting for a successful PUT. */
+	/** @var array<array<string,mixed>> Calendar changes waiting for a successful PUT. */
 	private $deferredProtectedMoves = array();
 
-	/** @var array<array<string,mixed>> Protected deletions awaiting native commit. */
+	/** @var array<array<string,mixed>> Calendar deletions awaiting native commit. */
 	private $deferredProtectedDeletes = array();
 
 	/** @param object $backend Native calendar backend */
@@ -21,7 +21,7 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	}
 
 	/**
-	 * Native protected writes must commit before their iTIP notifications are emitted.
+	 * Native writes must commit before their iTIP notifications are emitted.
 	 *
 	 * @param \Sabre\DAV\Server $server Native DAV server
 	 * @return void
@@ -41,14 +41,17 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	 */
 	public function beforeUnbind($path)
 	{
+		if ($this->server->httpRequest->getMethod() === 'MOVE') return;
 		list($calendarPath, $objectUri) = \Sabre\Uri\split((string) $path);
 		list(, $calendarUri) = \Sabre\Uri\split($calendarPath);
 		if (preg_match('/^(\d+)-cal-/', $calendarUri, $match)) {
 			$existing = $this->backend->getProtectedCalendarObject((int) $match[1], $objectUri);
+			if ($existing === null) $existing = $this->backend->getCalendarObject((int) $match[1], $objectUri);
 			if ($existing !== null) {
 				if ($this->scheduleReply($this->server->httpRequest)) {
 					$node = $this->server->tree->getNodeForPath($path);
 					$this->deferredProtectedDeletes[] = array('id' => (int) $existing['id'],
+						'calendar' => (int) $match[1], 'uri' => $objectUri,
 						'old' => (string) $existing['calendardata'], 'owner' => $node->getOwner());
 				}
 				return;
@@ -58,7 +61,7 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	}
 
 	/**
-	 * Emit cancellation only after the last assignment and native event are deleted.
+	 * Send organizer cancellations or attendee declines after the native delete.
 	 *
 	 * @param \Sabre\HTTP\RequestInterface $request Completed delete request
 	 * @param \Sabre\HTTP\ResponseInterface $response Final HTTP response
@@ -73,12 +76,21 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 		}
 		foreach ($pending as $deleted) {
 			try {
-				if ($this->backend->calendarEventExists($deleted['id'])) {
-					continue;
+				$receipt = method_exists($this->backend, 'getCommittedSchedulingChange')
+					? $this->backend->getCommittedSchedulingChange($deleted['calendar'], $deleted['uri']) : null;
+				if ($receipt !== null) {
+					if (empty($receipt['changed']) || $receipt['previous_data'] === null) continue;
+					$deleted['old'] = (string) $receipt['previous_data'];
+					$deleted['id'] = (int) ($receipt['id'] ?? $deleted['id']);
+					$deleted['owner'] = $receipt['owner_principal'] ?? $deleted['owner'];
 				}
+				$stillPresent = $this->backend->calendarEventExists($deleted['id']);
 				$addresses = $this->getAddressesForPrincipal((string) $deleted['owner']);
 				$broker = new \Sabre\VObject\ITip\Broker();
 				foreach ($broker->parseEvent(null, $addresses, $deleted['old']) as $message) {
+					// Removing one shared calendar is never an organizer cancellation.
+					// An attendee removal can still reply DECLINED to the organizer.
+					if ($stillPresent && $message->method === 'CANCEL') continue;
 					$this->deliver($message);
 				}
 			} catch (\Throwable $e) {
@@ -88,7 +100,7 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	}
 
 	/**
-	 * Defer scheduling for moves that may still fail a locked ETag or business check.
+	 * Defer all scheduling until locked ETag and native business checks commit.
 	 *
 	 * @param \Sabre\HTTP\RequestInterface $request Current request
 	 * @param \Sabre\HTTP\ResponseInterface $response Current response
@@ -102,13 +114,13 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	{
 		list(, $calendarUri) = \Sabre\Uri\split((string) $calendarPath);
 		list(, $objectUri) = \Sabre\Uri\split((string) $request->getPath());
-		if (preg_match('/^(\d+)-cal-/', $calendarUri, $match)
-			&& $this->backend->validateProtectedCalendarWrite((int) $match[1], $objectUri, $vCal->serialize(), (bool) $isNew) !== false) {
+		if (preg_match('/^(\d+)-cal-/', $calendarUri, $match)) {
+			$this->backend->validateProtectedCalendarWrite((int) $match[1], $objectUri, $vCal->serialize(), (bool) $isNew);
 			if ($this->scheduleReply($request)) {
 				$existing = $this->backend->getCalendarObject((int) $match[1], $objectUri);
 				$calendarNode = $this->server->tree->getNodeForPath($calendarPath);
 				$this->deferredProtectedMoves[] = array('calendar' => (int) $match[1], 'uri' => $objectUri,
-					'old' => (string) $existing['calendardata'], 'owner' => $calendarNode->getOwner());
+					'old' => $existing === null ? null : (string) $existing['calendardata'], 'owner' => $calendarNode->getOwner());
 			}
 			return;
 		}
@@ -131,22 +143,130 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 		}
 		foreach ($pending as $move) {
 			try {
-				$current = $this->backend->getCalendarObject($move['calendar'], $move['uri']);
+				$receipt = method_exists($this->backend, 'getCommittedSchedulingChange')
+					? $this->backend->getCommittedSchedulingChange($move['calendar'], $move['uri']) : null;
+				if ($receipt !== null) {
+					if (empty($receipt['changed'])) continue;
+					$move['old'] = $receipt['previous_data'];
+					$move['owner'] = $receipt['owner_principal'] ?? $move['owner'];
+					$current = $receipt['canonical_data'] === null ? null : array('calendardata' => $receipt['canonical_data']);
+				} else {
+					$current = $this->backend->getCalendarObject($move['calendar'], $move['uri']);
+				}
 				if ($current === null) {
 					continue;
 				}
-				$old = \Sabre\VObject\Reader::read($move['old']);
+				$old = $move['old'] === null ? null : \Sabre\VObject\Reader::read($move['old']);
 				$new = \Sabre\VObject\Reader::read((string) $current['calendardata']);
 				try {
 					$this->notifyManagedAttachmentChange($old, $new, $move['owner']);
 				} finally {
-					$old->destroy();
+					if ($old !== null) $old->destroy();
 					$new->destroy();
 				}
 			} catch (\Throwable $e) {
-				dol_syslog(__METHOD__.': protected appointment committed but scheduling notification failed: '.$e->getMessage(), LOG_ERR);
+				dol_syslog(__METHOD__.': appointment committed but scheduling notification failed: '.$e->getMessage(), LOG_ERR);
 			}
 		}
+	}
+
+	/**
+	 * Apply an authenticated attendee REPLY to the existing native appointment.
+	 * FREEBUSY and other methods retain Sabre's existing endpoint behavior.
+	 *
+	 * @param \Sabre\CalDAV\Schedule\IOutbox $outboxNode Scheduling outbox
+	 * @param \Sabre\HTTP\RequestInterface $request Current request
+	 * @param \Sabre\HTTP\ResponseInterface $response Current response
+	 * @return void
+	 */
+	public function outboxRequest(\Sabre\CalDAV\Schedule\IOutbox $outboxNode, \Sabre\HTTP\RequestInterface $request, \Sabre\HTTP\ResponseInterface $response)
+	{
+		$data = $request->getBodyAsString();
+		try {
+			$calendar = \Sabre\VObject\Reader::read($data);
+		} catch (\Throwable $error) {
+			throw new \Sabre\DAV\Exception\BadRequest('A valid iCalendar scheduling message is required');
+		}
+		try {
+			if ($calendar->name !== 'VCALENDAR') throw new \Sabre\DAV\Exception\BadRequest('A scheduling message must be a VCALENDAR');
+			if (!isset($calendar->METHOD) || strtoupper((string) $calendar->METHOD) !== 'REPLY') {
+				$request->setBody($data);
+				parent::outboxRequest($outboxNode, $request, $response);
+				return;
+			}
+			$acl = $this->server->getPlugin('acl');
+			$principal = $acl ? $acl->getCurrentUserPrincipal() : null;
+			if (!$principal || trim((string) $outboxNode->getOwner(), '/') !== trim((string) $principal, '/')) {
+				throw new \Sabre\DAV\Exception\Forbidden('An invitation reply must use the authenticated user outbox');
+			}
+			$acl->checkPrivileges($request->getPath(), '{'.self::NS_CALDAV.'}schedule-send-reply');
+			$addresses = array_map(array($this, 'normalizeSchedulingAddress'), $this->getAddressesForPrincipal($principal));
+			if (!$addresses) throw new \Sabre\DAV\Exception\Forbidden('The replying user has no calendar address');
+			$events = 0;
+			foreach ($calendar->getComponents() as $component) {
+				if ($component->name === 'VTIMEZONE') continue;
+				if ($component->name !== 'VEVENT') throw new \Sabre\DAV\Exception\BadRequest('Invitation replies must contain only VEVENT components');
+				$events++;
+				$ownAttendees = 0;
+				foreach ($component->select('ATTENDEE') as $attendee) {
+					if (in_array($this->normalizeSchedulingAddress((string) $attendee), $addresses, true)) $ownAttendees++;
+				}
+				if ($ownAttendees !== 1) throw new \Sabre\DAV\Exception\Forbidden('The replying attendee must match the authenticated calendar user');
+				if (count($component->select('ORGANIZER')) !== 1 || !$acl->getPrincipalByUri((string) $component->ORGANIZER)) {
+					throw new \Sabre\DAV\Exception\Forbidden('Invitation replies require an existing local organizer');
+				}
+			}
+			if (!$events || count($calendar->select('METHOD')) !== 1) throw new \Sabre\DAV\Exception\BadRequest('An unambiguous invitation reply is required');
+			$originator = $request->getHeader('Originator');
+			if ($originator && !in_array($this->normalizeSchedulingAddress($originator), $addresses, true)) {
+				throw new \Sabre\DAV\Exception\Forbidden('The scheduling originator must match the authenticated calendar user');
+			}
+			// This API verifies the UID, organizer, sequence and attendee under the
+			// native lock, commits once and returns the authoritative shared event.
+			$result = $this->backend->processSchedulingReply(trim((string) $principal, '/'), $data);
+			if (!empty($result['changed'])) {
+				$old = \Sabre\VObject\Reader::read((string) $result['previous_data']);
+				$new = \Sabre\VObject\Reader::read((string) $result['canonical_data']);
+				try {
+					$this->deliverCommittedChange($old, $new, $principal, $result['recipients']);
+				} catch (\Throwable $error) {
+					dol_syslog(__METHOD__.': reply committed but scheduling notification failed: '.$error->getMessage(), LOG_ERR);
+				} finally {
+					$old->destroy();
+					$new->destroy();
+				}
+			}
+			$organizerAddress = (string) ($result['organizer_address'] ?? $calendar->VEVENT->ORGANIZER);
+			$document = new \DOMDocument('1.0', 'utf-8');
+			$root = $document->createElementNS(self::NS_CALDAV, 'cal:schedule-response');
+			$document->appendChild($root);
+			$item = $document->createElementNS(self::NS_CALDAV, 'cal:response');
+			$recipient = $document->createElementNS(self::NS_CALDAV, 'cal:recipient');
+			$href = $document->createElementNS('DAV:', 'd:href');
+			$href->appendChild($document->createTextNode($organizerAddress));
+			$recipient->appendChild($href);
+			$item->appendChild($recipient);
+			$status = $document->createElementNS(self::NS_CALDAV, 'cal:request-status');
+			$status->appendChild($document->createTextNode('2.0;Reply applied to the existing appointment'));
+			$item->appendChild($status);
+			$root->appendChild($item);
+			$response->setStatus(200);
+			$response->setHeader('Content-Type', 'application/xml; charset=utf-8');
+			$response->setBody($document->saveXML());
+		} finally {
+			$calendar->destroy();
+		}
+	}
+
+	/**
+	 * Normalize a calendar-user address without treating it as a business identity.
+	 *
+	 * @param string $address Calendar address
+	 * @return string Normalized address
+	 */
+	private function normalizeSchedulingAddress($address)
+	{
+		return strtolower(trim((string) $address, " \t\r\n<>"));
 	}
 
 	/**
@@ -187,8 +307,20 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 			return;
 		}
 		try {
-			$uri = 'sabredav-'.\Sabre\DAV\UUIDUtil::getUUID().'.ics';
-			$this->backend->createSchedulingObject($principal, $uri, $message->message->serialize());
+			$notification = clone $message->message;
+			try {
+				// Business descriptions are rendered for the requesting calendar
+				// owner. Inbox recipients must retrieve their own ACL-filtered GET.
+				foreach ($notification->getComponents() as $component) {
+					if ($component->name !== 'VEVENT' && $component->name !== 'VTODO') continue;
+					unset($component->DESCRIPTION, $component->{'X-ALT-DESC'});
+				}
+				$data = $notification->serialize();
+			} finally {
+				$notification->destroy();
+			}
+			$uri = 'itip-'.hash('sha256', (string) $message->sender."\0".(string) $message->recipient."\0".$data).'.ics';
+			$this->backend->createSchedulingObject($principal, $uri, $data);
 			$message->scheduleStatus = '1.2;Message delivered locally';
 		} catch (\Throwable $e) {
 			dol_syslog(__METHOD__.': local scheduling delivery failed: '.$e->getMessage(), LOG_ERR);
@@ -206,8 +338,58 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	 */
 	public function notifyManagedAttachmentChange($oldCalendar, $newCalendar, $ownerPrincipal)
 	{
-		$modified = false;
+		$this->deliverCommittedChange($oldCalendar, $newCalendar, $ownerPrincipal);
+	}
+
+	/**
+	 * Use Sabre's broker for committed changes and relay attendee replies to peers.
+	 *
+	 * @param \Sabre\VObject\Component\VCalendar|null $oldCalendar Previous state
+	 * @param \Sabre\VObject\Component\VCalendar $newCalendar Committed state
+	 * @param string $ownerPrincipal Principal making the calendar change
+	 * @param string[]|null $allowedPrincipals Optional explicit-reply recipient scope
+	 * @return void
+	 */
+	private function deliverCommittedChange($oldCalendar, $newCalendar, $ownerPrincipal, $allowedPrincipals = null)
+	{
 		$addresses = $this->getAddressesForPrincipal((string) $ownerPrincipal);
-		$this->processICalendarChange($oldCalendar, $newCalendar, $addresses, array(), $modified);
+		$broker = new \Sabre\VObject\ITip\Broker();
+		$organizer = isset($newCalendar->VEVENT->ORGANIZER) ? $this->normalizeSchedulingAddress((string) $newCalendar->VEVENT->ORGANIZER) : '';
+		$isOrganizer = in_array($organizer, array_map(array($this, 'normalizeSchedulingAddress'), $addresses), true);
+		$isCancelled = isset($newCalendar->VEVENT->STATUS) && strtoupper((string) $newCalendar->VEVENT->STATUS) === 'CANCELLED';
+		$wasCancelled = $oldCalendar !== null && isset($oldCalendar->VEVENT->STATUS) && strtoupper((string) $oldCalendar->VEVENT->STATUS) === 'CANCELLED';
+		if ($isOrganizer && $isCancelled) {
+			// Sabre treats STATUS:CANCELLED PUTs as REQUEST. Generate its native
+			// CANCEL shape while retaining the sequence committed by our backend.
+			$messages = $oldCalendar === null || $wasCancelled ? array() : $broker->parseEvent(null, $addresses, $oldCalendar);
+			foreach ($messages as $message) {
+				$message->sequence = isset($newCalendar->VEVENT->SEQUENCE) ? (int) (string) $newCalendar->VEVENT->SEQUENCE : 0;
+				foreach ($message->message->select('VEVENT') as $event) $event->SEQUENCE = $message->sequence;
+			}
+		} else {
+			$messages = $broker->parseEvent($newCalendar, $addresses, $oldCalendar);
+		}
+		$replies = array_filter($messages, static function ($message) {
+			return $message->method === 'REPLY';
+		});
+		foreach ($replies as $reply) {
+			// This is Sabre's normal local-REPLY redistribution, without applying
+			// the same reply a second time to our shared native appointment.
+			foreach ($broker->parseEvent($newCalendar, array($reply->recipient), $oldCalendar) as $notice) {
+				if ($notice->recipient !== $reply->sender) $messages[] = $notice;
+			}
+		}
+		$sent = array();
+		foreach ($messages as $message) {
+			if ($allowedPrincipals !== null) {
+				$acl = $this->server->getPlugin('acl');
+				$principal = $acl ? $acl->getPrincipalByUri((string) $message->recipient) : null;
+				if (!$principal || !in_array(trim($principal, '/'), $allowedPrincipals, true)) continue;
+			}
+			$key = hash('sha256', $message->method."\0".$message->sender."\0".$message->recipient."\0".$message->message->serialize());
+			if (isset($sent[$key])) continue;
+			$sent[$key] = true;
+			$this->deliver($message);
+		}
 	}
 }

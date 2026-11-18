@@ -1,6 +1,6 @@
 # Protection des données métier avec CalDAV et CardDAV
 
-CDav 6.3.0 conserve Dolibarr comme source des données métier. Les écritures
+CDav 6.3.1 conserve Dolibarr comme source des données métier. Les écritures
 utilisent les classes natives et leurs transactions et triggers.
 
 ## Rendez-vous
@@ -20,6 +20,13 @@ de pliage ou d’ordre des propriétés ne constituent pas une modification mét
 L’interface du logiciel agenda peut néanmoins présenter ces champs comme
 éditables : CDav contrôle l’enregistrement côté serveur.
 
+Depuis 6.3.1, une invitation permet aussi au participant authentifié de répondre
+sans modifier les autres données métier. Son refus n'annule pas le rendez-vous
+des autres. L'organisateur peut annuler explicitement son invitation ; les
+déplacements et les délégations suivent les droits Agenda natifs. Les détails
+et le cas des invitations extérieures sont décrits dans le
+[guide Outlook et DAVx⁵](invitations-outlook-davx5-fr.md).
+
 Les rappels natifs relatifs encore en attente suivent le déplacement, sans
 changer leur destinataire, leur canal ou leur état et sans créer de nouvel
 envoi. La révision de planification est avancée par le serveur. Les notifications
@@ -35,7 +42,9 @@ réarmés par la synchronisation.
 
 La suppression reste soumise aux droits Agenda natifs. Pour un événement affecté
 à plusieurs collaborateurs, elle retire uniquement l’affectation au calendrier
-concerné. Le retrait de la dernière affectation supprime le rendez-vous par
+concerné. Pour une invitation, la suppression par l'organisateur annule le
+rendez-vous pour tous, selon ses droits ; le retrait par un invité reste
+personnel. Le retrait de la dernière affectation supprime le rendez-vous par
 `ActionComm::delete()`. Le tiers, le projet et les contacts liés restent des
 objets indépendants. Déplacer un rendez-vous entre deux calendriers change ses
 affectations : cette opération se gère dans Dolibarr pour un événement protégé.

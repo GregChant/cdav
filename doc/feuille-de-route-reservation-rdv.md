@@ -600,6 +600,22 @@ migrations sur les quatre combinaisons ; voir le
 locales, l'empreinte du paquet et la publication sont référencées dans
 `dist/qa/booking-release-manifest.json`.
 
+### Invitations Outlook et DAVx⁵ — 6.3.1
+
+- [x] Enregistrer uniquement la réponse du participant authentifié, conserver
+  les réponses des autres et préserver les liaisons et notes Dolibarr.
+- [x] Prendre en charge les mises à jour et annulations de l'organisateur,
+  avec les droits natifs et des notifications après commit.
+- [x] Synchroniser une invitation extérieure traitée par Outlook vers la copie
+  personnelle CDav, sans autoriser cette exception sur les RDV natifs partagés.
+- [x] Préserver la confidentialité des descriptions de projet dans les inbox.
+- [ ] Qualifier la délégation, les acceptations simultanées et la matrice
+  native Dolibarr 23/24 × PHP 8.4/8.5.
+- [ ] Publier les commits et le paquet reproductible après conservation des
+  preuves et retrait des quatre instances jetables.
+
+Voir le [guide des invitations Outlook et DAVx⁵](invitations-outlook-davx5-fr.md).
+
 ### Compléments à prévoir
 
 - [ ] Choisir séparément les détails exportés vers les logiciels agenda
