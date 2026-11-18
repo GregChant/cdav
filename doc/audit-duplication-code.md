@@ -29,7 +29,7 @@ La comparaison avec `0cd17f5` (6.3.0) ne signale aucun nouveau clone exact aux
 seuils principaux. Une revue indépendante confirme qu'aucune des 25 paires
 exactes ne recouvre les lignes de production modifiées en 6.3.1.
 
-## Correspondances à factoriser
+## Périmètre de la factorisation
 
 Les 25 paires se concentrent dans les parseurs et sérialiseurs CardDAV, le
 chargement de Dolibarr et les constantes partagées par ICS/CalDAV, les branches
@@ -58,8 +58,10 @@ la commande installée `jscpd`, ou `npx` avec cette version exacte.
 La configuration de production est `.jscpd.json`. Les rapports HTML/JSON sont
 écrits dans `dist/qa/duplication/production/` et `tests/`.
 
-Le mode par défaut refuse les nouveaux clones absents de l'état de référence
-`.jscpd-baseline.json`. Pour actualiser cette référence après une revue explicite :
+Depuis 6.3.2, le mode par défaut impose **zéro duplication de production**
+(`--threshold 0`) et refuse aussi les nouveaux clones. La référence
+`.jscpd-baseline.json` est vide. Ajouter un clone à cette référence ne suffit
+pas à faire passer le contrôle. Pour régénérer les empreintes après une revue :
 
 ```sh
 bash tests/duplication.sh update-baseline
@@ -73,9 +75,29 @@ refusée. Aucun PHP métier ni accès à une base n'est nécessaire à cette pre
 Les preuves brutes sont conservées localement dans `dist/qa/duplication/`, dont
 `scan-manifest.json`, `gate-checks.json` et les rapports par périmètre.
 
-## Objectif de factorisation
+## Résultat 6.3.2
 
-La demande suivante porte sur la suppression des 25 correspondances mesurées.
-Le seuil reste fixé à 10 lignes / 100 tokens et les fichiers de production ne
-doivent pas être masqués pour obtenir un résultat nul. La référence sera mise
-à jour après factorisation et qualification des comportements natifs.
+Les **25 correspondances exactes de production sont supprimées** : 0 paire,
+0 ligne rapportée et 0 %, sur 48 fichiers analysés. Le mode, les seuils
+10 lignes / 100 tokens et les exclusions de production restent inchangés.
+Les trois nouveaux fichiers de production sont analysés eux aussi.
+Les deux correspondances initiales des fixtures de tests restent mesurées
+séparément : 54 lignes rapportées, 0,41 % sur 35 fichiers ; elles ne sont pas
+masquées et ne sont pas une dette de production acceptée dans la référence.
+
+Les traitements communs sont regroupés dans des helpers limités à leur rôle :
+chargement global de Dolibarr, constantes ICS/DAV, génération vCard et parsing,
+chargement des objets natifs, verrouillage/résolution Agenda, dates iCalendar,
+valeurs de tâches commerciales et réponse multiget. Les différences métier
+restent explicites et les API Dolibarr/Sabre gardent la maîtrise des écritures,
+autorisations et formats. Aucun schéma ni dépendance d'exécution n'est ajouté.
+
+La CI ajoute un job indépendant avec jscpd 5.4.3 épinglé et conserve ses rapports
+HTML/JSON. Un clone réel injecté dans une copie temporaire fait échouer le job,
+y compris après ajout à une référence temporaire. Son retrait rétablit le succès.
+La [qualification 6.3.2](validation-factorisation-cdav.md) détaille les tests
+unitaires, les comparaisons avant/après, les suites HTTP natives et PHPCS.
+
+Zéro correspondance à ce seuil ne signifie pas absence de toute ressemblance
+sémantique ou de petits blocs similaires. Les contrôles avant transaction et
+sous verrou restent tous deux exécutés ; leur rôle temporel est conservé.

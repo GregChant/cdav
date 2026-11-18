@@ -619,6 +619,22 @@ La [qualification 6.3.1](validation-invitations-dav.md) documente les 76 suites
 PHP, les 12 suites HTTP et les scénarios INV01–INV27 sur les quatre combinaisons,
 avec une course réelle entre deux acceptations et une réponse unique.
 
+### Factorisation et prévention des duplications — 6.3.2
+
+- [x] Commiter l'audit avant les modifications, puis factoriser les 25 paires
+  de production avec les mêmes seuils et sans nouvelle exclusion.
+- [x] Partager les mappings et la mécanique commune en gardant les API natives,
+  différences métier, droits, UID et verrous Dolibarr/Sabre.
+- [x] Ajouter quatre suites de régression et comparer les formats avant/après.
+- [x] Qualifier Dolibarr 23/24 × PHP 8.4/8.5 sur le paquet extrait :
+  92 suites PHP, 12 suites HTTP, 36 contrôles bootstrap et 264 gardes CLI.
+- [x] Contrôler PHPCS natif 23/24 sans nouvelle règle ni diagnostic ajouté.
+- [x] Bloquer la réapparition des duplications de production dans un job CI
+  dédié et conserver les rapports.
+
+Voir l'[audit de duplication](audit-duplication-code.md) et la
+[qualification de la factorisation](validation-factorisation-cdav.md).
+
 ### Compléments à prévoir
 
 - [ ] Choisir séparément les détails exportés vers les logiciels agenda

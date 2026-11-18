@@ -18,9 +18,18 @@ chaque pull request et chaque push sur `23.0` ou `master`, sur les quatre
 combinaisons Dolibarr 23.0.4 / 24.0.0 × PHP 8.4 / 8.5. Un échec de test, de
 syntaxe ou de PHPCS fait échouer le job. Les quatre jobs continuent indépendamment
 pour rendre visibles les incompatibilités propres à une combinaison.
+Un cinquième job exécute `bash tests/duplication.sh` avec jscpd 5.4.3 : la
+production doit rester à zéro correspondance au seuil 10 lignes / 100 tokens,
+même après modification de la référence. Les tests ont un rapport séparé.
+Les rapports HTML/JSON sont conservés comme artefacts de CI. Voir
+[l'audit reproductible](../doc/audit-duplication-code.md).
 
 | Suite sans base | Comportements contrôlés |
 |---|---|
+| `sync_bootstrap.php` | Portée globale native, flags d'entrée, déploiements custom/externes, échec du chargement et constantes d'entité |
+| `multiget.php` | Vrais plugins Sabre, ordre/href absents ou filtrés, statuts ACL, XML, Prefer/Brief, vCard/jCard/jCal et expansion |
+| `calendar_factorization.php` | Identités et dates ev/pe/pt/fi, enveloppes/fragments, progrès Task et priorités des lignes commerciales |
+| `carddav_refactoring.php` | Différences contact/tiers/adhérent, préférences vCard3/4, retraits, désactivation par API native, rollback et contacts liés |
 | `run.php` | Lecture vCard/iCalendar, champs absents/remplacés, photos, participants, récurrences, rappels et rejet des données incompatibles |
 | `freebusy.php` | Suppression des données privées sans changer les occupations, récurrences, exceptions et fuseaux |
 | `contact_photos.php` | Photo personnelle, logo du tiers, repli, entité propriétaire, ETag et limites des fichiers, avec fichiers temporaires et doublure SQL ciblée |
@@ -102,3 +111,8 @@ qu’il échoue avant correction puis qu’il réussit après. Pour une modifica
 des droits, du SQL, des transactions ou des contrôleurs, compléter par la suite
 HTTP/base réelle concernée. Pour une modification du parcours client, compléter
 par les contrôles navigateur. Un job vert ne remplace pas ces vérifications.
+
+La [qualification 6.3.2](../doc/validation-factorisation-cdav.md) complète ces
+preuves par des comparaisons avant/après des parseurs/sérialiseurs et par la
+résiliation réelle d'un adhérent via CardDAV dans BL18, avec conservation de
+sa ligne, de son type et de sa société native.
