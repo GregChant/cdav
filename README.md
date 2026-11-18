@@ -112,6 +112,14 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.4.0 adds a native Agenda extra field for tentative, confirmed and
+cancelled appointments, synchronized with standard CalDAV event states and
+Outlook CalDav Synchronizer's availability hints. Global state changes require
+native owner or all-agenda permissions; attendee replies remain personal.
+Cancellation retains business links, frees assigned calendars and removes only
+pending reminders. Reactivate CDav after updating to install the native field
+and trigger. See the [appointment state guide](doc/etats-rendez-vous-fr.md).
+
 Version 6.3.3 reduces repeated calendar serialization during CalDAV discovery,
 filtering and REPORT responses. A bounded read cache lives only for the current
 HTTP request and is disabled before native writes. UID, ETag and permission

@@ -30,6 +30,8 @@ Les rapports HTML/JSON sont conservés comme artefacts de CI. Voir
 | `multiget.php` | Vrais plugins Sabre, ordre/href absents ou filtrés, statuts ACL, XML, Prefer/Brief, vCard/jCard/jCal et expansion |
 | `calendar_factorization.php` | Identités et dates ev/pe/pt/fi, enveloppes/fragments, progrès Task et priorités des lignes commerciales |
 | `calendar_read_cost.php` | Vrais REPORT Sabre sur 100/1000 objets fictifs, budget de rendus/SQL, ETags/récurrences, cache borné, contexte, routage et invalidation avant écriture |
+| `appointment_status.php` | Priorité des états natifs et DAV historiques, compatibilité Outlook, tâches et réponses individuelles distinctes, libération des affectations |
+| `agenda_form.php` | Vrai rendu natif des affectations, compatibilité Dolibarr 24, occupation et sélections de deux onglets indépendants, restauration de session même après erreur |
 | `carddav_refactoring.php` | Différences contact/tiers/adhérent, préférences vCard3/4, retraits, désactivation par API native, rollback et contacts liés |
 | `run.php` | Lecture vCard/iCalendar, champs absents/remplacés, photos, participants, récurrences, rappels et rejet des données incompatibles |
 | `freebusy.php` | Suppression des données privées sans changer les occupations, récurrences, exceptions et fuseaux |
@@ -91,6 +93,12 @@ contre Dolibarr ; les applications Outlook, Microsoft 365 et Agenda sur téléph
 ne sont pas pilotées par ces tests.
 Les résultats 6.3.1 sont détaillés dans le
 [rapport des invitations](../doc/validation-invitations-dav.md).
+
+`status_live_cases.php`, appelé par la même suite HTTP, vérifie les états de
+rendez-vous depuis le vrai formulaire Agenda et les écritures DAV. Les cas
+couvrent les permissions, les réponses et disponibilités des participants,
+les révisions et renvois identiques, l'annulation avec rappels, les journées
+entières au changement d'heure et les champs historiques vides.
 
 La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
 sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.

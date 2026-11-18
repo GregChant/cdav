@@ -254,6 +254,120 @@ $zeroMove = calendarPolicyEvent("DTSTART:20261121T090000Z\r\nDTEND:20261121T0900
 $zeroDates = CalendarWritePolicy::assertMoveOnly($zero, $zeroMove);
 calendarPolicyAssert($zeroDates['start'] === $zeroDates['end'], 'Native zero-duration appointments must not acquire an invented hour');
 
+// Global appointment state is separate from availability and attendee responses.
+$tentative = str_replace('STATUS:CONFIRMED', 'STATUS:TENTATIVE', $before);
+$statusPlan = CalendarWritePolicy::planStatusChange($before, $tentative);
+calendarPolicyAssert($statusPlan['status'] === 'TENTATIVE' && $statusPlan['previous_status'] === 'CONFIRMED'
+	&& $statusPlan['changed'] && !$statusPlan['date_changed'] && $statusPlan['sequence'] === 1,
+	'A provisional native appointment must advance its server revision without changing its dates');
+$provisionalCalendar = Sabre\VObject\Reader::read($statusPlan['calendar_data']);
+calendarPolicyAssert((string) $provisionalCalendar->VEVENT->DESCRIPTION === "First line\nSecond line"
+	&& (string) $provisionalCalendar->VEVENT->ATTENDEE['PARTSTAT'] === 'ACCEPTED'
+	&& (string) $provisionalCalendar->VEVENT->TRANSP === 'OPAQUE',
+	'Global state changes must retain native notes, participant responses and independent occupancy');
+$provisionalCalendar->destroy();
+calendarPolicyAssert(CalendarWritePolicy::planStatusChange($tentative, $before)['status'] === 'CONFIRMED',
+	'A provisional appointment can be confirmed through the authorized status policy');
+calendarPolicyAssert(!CalendarWritePolicy::planStatusChange($tentative, $tentative)['changed'], 'An identical provisional replay must be idempotent');
+calendarPolicyAssert(!CalendarWritePolicy::planStatusChange($before, str_replace("STATUS:CONFIRMED\r\n", '', $before))['changed'],
+	'An omitted legacy STATUS must mean confirmed');
+$free = str_replace('TRANSP:OPAQUE', 'TRANSP:TRANSPARENT', $before);
+calendarPolicyAssert(str_contains(CalendarWritePolicy::planStatusChange($free,
+	str_replace('STATUS:CONFIRMED', 'STATUS:TENTATIVE', $free))['calendar_data'], 'TRANSP:TRANSPARENT'),
+	'An intentionally free appointment must remain free when its confirmation state changes');
+$outlookBusy = str_replace('END:VEVENT', "X-MICROSOFT-CDO-BUSYSTATUS:BUSY\r\nEND:VEVENT", $before);
+$outlookProvisional = str_replace('BUSYSTATUS:BUSY', 'BUSYSTATUS:TENTATIVE', $outlookBusy);
+calendarPolicyAssert(CalendarWritePolicy::planStatusChange($outlookBusy, $outlookProvisional)['status'] === 'TENTATIVE',
+	'CalDav Synchronizer marks Provisional through its changed Microsoft availability hint');
+$exportedProvisional = str_replace('STATUS:CONFIRMED', 'STATUS:TENTATIVE', $outlookProvisional);
+calendarPolicyAssert(CalendarWritePolicy::planStatusChange($exportedProvisional,
+	str_replace('BUSYSTATUS:TENTATIVE', 'BUSYSTATUS:BUSY', $exportedProvisional))['status'] === 'CONFIRMED',
+	'Changing the Outlook display from Provisional to Busy must confirm the appointment');
+calendarPolicyAssert(CalendarWritePolicy::planStatusChange($exportedProvisional,
+	str_replace("\r\nSTATUS:TENTATIVE", "\r\nSTATUS:CONFIRMED", $exportedProvisional))['status'] === 'CONFIRMED',
+	'A DAVx5 STATUS edit must override a preserved Microsoft hint');
+calendarPolicyAssert(!CalendarWritePolicy::planStatusChange($exportedProvisional,
+	str_replace("\r\nSTATUS:TENTATIVE\r\n", "\r\n", $exportedProvisional))['changed'],
+	'An Outlook echo without STATUS must retain its unchanged Provisional hint');
+$cancelStatus = str_replace(array('STATUS:CONFIRMED', 'TRANSP:OPAQUE'), array('STATUS:CANCELLED', 'TRANSP:TRANSPARENT'), $before);
+$cancellation = CalendarWritePolicy::planStatusChange($before, $cancelStatus);
+calendarPolicyAssert($cancellation['kind'] === 'cancel' && $cancellation['status'] === 'CANCELLED'
+	&& str_contains($cancellation['calendar_data'], 'TRANSP:TRANSPARENT'), 'Explicit cancellation must free the shared appointment');
+calendarPolicyAssert(!CalendarWritePolicy::planStatusChange($cancellation['calendar_data'], $cancellation['calendar_data'])['changed'],
+	'A cancelled standalone echo must be idempotent');
+foreach (array(
+	array($before, str_replace('STATUS:CONFIRMED', 'STATUS:UNKNOWN', $before), Sabre\DAV\Exception\BadRequest::class),
+	array($before, str_replace('STATUS:CONFIRMED', 'STATUS:', $before), Sabre\DAV\Exception\BadRequest::class),
+	array($before, str_replace('END:VEVENT', "STATUS:TENTATIVE\r\nEND:VEVENT", $before), Sabre\DAV\Exception\BadRequest::class),
+	array($outlookBusy, str_replace('END:VEVENT', "X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE\r\nEND:VEVENT", $outlookBusy), Sabre\DAV\Exception\BadRequest::class),
+	array($before, str_replace('Native appointment', 'Replaced subject', $tentative), Sabre\DAV\Exception\Forbidden::class),
+	array($before, str_replace('TRANSP:OPAQUE', 'TRANSP:TRANSPARENT', $tentative), Sabre\DAV\Exception\Forbidden::class),
+	array($before, str_replace('20261120T', '20261121T', $cancelStatus), Sabre\DAV\Exception\Forbidden::class),
+	array($cancellation['calendar_data'], $before, Sabre\DAV\Exception\Forbidden::class),
+	array($cancellation['calendar_data'], str_replace('20261120T', '20261121T', $cancellation['calendar_data']), Sabre\DAV\Exception\Forbidden::class),
+) as $invalidStatusCase) {
+	try {
+		CalendarWritePolicy::planStatusChange($invalidStatusCase[0], $invalidStatusCase[1]);
+		throw new RuntimeException('An invalid, unauthorized or ambiguous status transition was accepted');
+	} catch (Sabre\DAV\Exception $error) {
+		calendarPolicyAssert($error instanceof $invalidStatusCase[2], 'A status refusal must use the expected protocol error');
+	}
+}
+
+$outlookFirstCancel = str_replace('SUMMARY:Native appointment', 'SUMMARY:Cancelled: Native appointment', $cancelStatus);
+$firstOutlookCancellation = CalendarWritePolicy::planStatusChange($before, $outlookFirstCancel);
+calendarPolicyAssert($firstOutlookCancellation['kind'] === 'cancel'
+	&& str_contains($firstOutlookCancellation['calendar_data'], 'SUMMARY:Native appointment'),
+	'An explicit first Outlook cancellation may carry its exact display prefix without replacing the native subject');
+try {
+	CalendarWritePolicy::planStatusChange($before, str_replace('SUMMARY:Native appointment', 'SUMMARY:Cancelled: Changed subject', $cancelStatus));
+	throw new RuntimeException('An initial cancellation permitted an unrelated business subject replacement');
+} catch (Sabre\DAV\Exception\Forbidden $error) {
+	// An explicit cancellation grants only the exact connector presentation prefix.
+}
+
+$outlookCancelledEcho = str_replace('SUMMARY:Native appointment', 'SUMMARY:Cancelled: Native appointment', $cancellation['calendar_data']);
+$cancelEchoPlan = CalendarWritePolicy::planStatusChange($cancellation['calendar_data'], $outlookCancelledEcho);
+calendarPolicyAssert(!$cancelEchoPlan['changed'] && str_contains($cancelEchoPlan['calendar_data'], 'SUMMARY:Native appointment')
+	&& !str_contains($cancelEchoPlan['calendar_data'], 'SUMMARY:Cancelled:'),
+	'An already cancelled Outlook echo may add its exact display prefix without changing the native subject');
+try {
+	CalendarWritePolicy::planStatusChange($cancellation['calendar_data'],
+		str_replace('SUMMARY:Native appointment', 'SUMMARY:Cancelled: Changed subject', $cancellation['calendar_data']));
+	throw new RuntimeException('A cancelled display prefix permitted an unrelated native subject replacement');
+} catch (Sabre\DAV\Exception\Forbidden $error) {
+	// The display exception is exact and never authorizes another subject.
+}
+
+$minimalStatusMetadata = CalendarWritePolicy::metadataAfterStatusChange('', $statusPlan);
+$protocolMetadata = Sabre\VObject\Reader::read($minimalStatusMetadata);
+calendarPolicyAssert((string) $protocolMetadata->VEVENT->STATUS === 'TENTATIVE'
+	&& (int) (string) $protocolMetadata->VEVENT->SEQUENCE === 1 && !isset($protocolMetadata->VEVENT->SUMMARY)
+	&& !isset($protocolMetadata->VEVENT->DESCRIPTION) && !isset($protocolMetadata->VEVENT->LOCATION)
+	&& !isset($protocolMetadata->VEVENT->ATTENDEE), 'A first state edit must persist only protocol metadata, never rendered CRM context');
+$protocolMetadata->destroy();
+$trustedStatusMetadata = CalendarWritePolicy::metadataAfterStatusChange($withSequence,
+	CalendarWritePolicy::planStatusChange($withSequence, str_replace('STATUS:CONFIRMED', 'STATUS:TENTATIVE', $withSequence)));
+$trustedCalendar = Sabre\VObject\Reader::read($trustedStatusMetadata);
+calendarPolicyAssert((string) $trustedCalendar->VEVENT->DESCRIPTION === "First line\nSecond line"
+	&& (string) $trustedCalendar->VEVENT->ATTENDEE['PARTSTAT'] === 'ACCEPTED'
+	&& (int) (string) $trustedCalendar->VEVENT->SEQUENCE === 5 && (string) $trustedCalendar->VEVENT->STATUS === 'TENTATIVE',
+	'An existing trusted sidecar must retain its original participant and note metadata when state changes');
+$trustedCalendar->destroy();
+$dateOnlyMetadata = Sabre\VObject\Reader::read(CalendarWritePolicy::metadataAfterStatusChange('',
+	CalendarWritePolicy::planStatusChange($before, $moved)));
+calendarPolicyAssert(!isset($dateOnlyMetadata->VEVENT->STATUS) && !isset($dateOnlyMetadata->VEVENT->DESCRIPTION),
+	'A date-only state plan must not introduce a global STATUS or business description into minimal metadata');
+$dateOnlyMetadata->destroy();
+$cancelMetadata = Sabre\VObject\Reader::read(CalendarWritePolicy::metadataAfterStatusChange($withSequence,
+	CalendarWritePolicy::planStatusChange($withSequence, str_replace('STATUS:CONFIRMED', 'STATUS:CANCELLED', $withSequence))));
+calendarPolicyAssert((string) $cancelMetadata->VEVENT->STATUS === 'CANCELLED'
+	&& (string) $cancelMetadata->VEVENT->TRANSP === 'TRANSPARENT' && !isset($cancelMetadata->VEVENT->VALARM),
+	'Cancellation protocol metadata must remain cancelled, transparent and without pending alarms');
+$cancelMetadata->destroy();
+calendarPolicyAssert(CalendarWritePolicy::metadataAfterStatusChange('', CalendarWritePolicy::planStatusChange($before, $before)) === null,
+	'An unchanged appointment state must not create or rewrite a protocol sidecar');
+
 // Exercise the actual scheduling hook: effects wait for a successful response.
 $backend = new class($before) {
 	public $current;

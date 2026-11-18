@@ -6,12 +6,13 @@
  * */
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
+require_once dirname(__DIR__).'/class/CDavAppointmentStatus.php';
 
 
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-readable-business-description-v6';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-appointment-status-v7';
 
 	private $db;
 
@@ -24,6 +25,9 @@ class CdavLib
 
 	/** @var bool|null Whether the optional iCalendar metadata table exists. */
 	private $hasSchedulingTable = null;
+
+	/** @var bool|null Whether the native appointment status field has been installed. */
+	private $hasAppointmentStatus = null;
 
 	/** @var bool|null Whether CalDAV recurrence projection metadata exists. */
 	private $hasRecurrenceTable = null;
@@ -393,6 +397,24 @@ class CdavLib
 	}
 
 	/**
+	 * Resolve the optional native column once per request, including before reactivation.
+	 * @return bool Whether the native select field is installed
+	 */
+	private function appointmentStatusAvailable()
+	{
+		if ($this->hasAppointmentStatus === null) {
+			$this->hasAppointmentStatus = false;
+			foreach ((array) $this->db->DDLInfoTable(MAIN_DB_PREFIX.'actioncomm_extrafields') as $column) {
+				if (is_array($column) && ($column[0] ?? '') === 'cdav_status') {
+					$this->hasAppointmentStatus = true;
+					break;
+				}
+			}
+		}
+		return $this->hasAppointmentStatus;
+	}
+
+	/**
 	 * Make native ActionComm recurrence edits visible to DAV clients.
 	 *
 	 * @param int $eventId Native event identifier
@@ -578,7 +600,9 @@ class CdavLib
 					$target->add(clone $property);
 				}
 			}
-			if (isset($source->STATUS)) {
+			if ($target->name === 'VEVENT') {
+				$target->STATUS = \Dolibarr\CDav\AppointmentStatus::componentStatus($source);
+			} elseif (isset($source->STATUS)) {
 				$target->remove('STATUS');
 				foreach ($source->select('STATUS') as $property) {
 					$target->add(clone $property);
@@ -814,6 +838,7 @@ class CdavLib
 	{
 		// TODO : replace GROUP_CONCAT by
 		$hasSchedulingMetadata = $this->schedulingTableAvailable();
+		$statusField = $this->appointmentStatusAvailable() ? 'cdavstate.cdav_status' : 'NULL';
 		$lastUpdatedSql = $hasSchedulingMetadata ? 'GREATEST(a.tms, COALESCE(cds.tms, a.tms))' : 'a.tms';
 		$bookingFields = '';
 		if ($bookingRange !== null) {
@@ -828,7 +853,7 @@ class CdavLib
 		$sql = 'SELECT
 					"ev" elem_source,
 					'.$lastUpdatedSql.' AS lastupd,
-						a.*, '.$bookingFields.'
+						a.*, '.$statusField.' AS cdav_status, '.$bookingFields.'
 					sp.firstname,
 					sp.lastname,
 					sp.address,
@@ -866,7 +891,7 @@ class CdavLib
 			// Reuse the native joins and authorization predicates below, but never
 			// buffer unrelated notes, project descriptions or contact/company data.
 			$sql = 'SELECT "ev" AS elem_source, '.$lastUpdatedSql.' AS lastupd, a.id, a.entity, a.datec, a.datep, a.datep2, a.percent, a.fulldayevent, a.recurid, a.recurrule, a.recurdateend, a.transparency, ';
-			$sql .= $bookingFields.'ac.sourceuid, arcal.transparency AS calendar_transparency, ';
+			$sql .= $statusField.' AS cdav_status, '.$bookingFields.'ac.sourceuid, arcal.transparency AS calendar_transparency, ';
 			$sql .= 'NULL AS uuidext, 0 AS uuidext_count, NULL AS calendar_answer_status, ';
 			$sql .= 'NULL AS label, NULL AS location, NULL AS note, 0 AS priority, ';
 			$sql .= 'NULL AS firstname, NULL AS lastname, NULL AS address, NULL AS zip, NULL AS town, ';
@@ -890,6 +915,9 @@ class CdavLib
 		}
 		if ($hasSchedulingMetadata) {
 			$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'cdav_scheduling AS cds ON cds.fk_actioncomm = a.id';
+		}
+		if ($this->appointmentStatusAvailable()) {
+			$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'actioncomm_extrafields AS cdavstate ON cdavstate.fk_object = a.id';
 		}
 
 		$sql.=' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources AS arcal
@@ -1430,6 +1458,18 @@ class CdavLib
 			try {
 				// Let Sabre normalize CRLF, escape properties and fold long lines.
 				$calendar = \Sabre\VObject\Reader::read($caldata);
+				if ($obj->elem_source === 'ev' && $type === 'VEVENT') {
+					$event = $calendar->VEVENT;
+					$nativeStatus = (string) ($obj->cdav_status ?? '');
+					$status = $nativeStatus !== '' ? \Dolibarr\CDav\AppointmentStatus::normalize($nativeStatus)
+						: \Dolibarr\CDav\AppointmentStatus::componentStatus($event);
+					$event->STATUS = $status;
+					if ($status === 'CANCELLED') $event->TRANSP = 'TRANSPARENT';
+					$answer = strtoupper((string) ($obj->calendar_answer_status ?? ''));
+					$provisional = $status === 'TENTATIVE' || in_array($answer, array('TENTATIVE', 'NEEDS-ACTION'), true);
+					$busy = (string) $event->TRANSP === 'TRANSPARENT' ? 'FREE' : ($provisional ? 'TENTATIVE' : 'BUSY');
+					$event->{'X-MICROSOFT-CDO-BUSYSTATUS'} = $busy;
+				}
 				if ($booking) {
 					require_once dirname(__DIR__).'/class/CDavFreeBusyFilter.php';
 					$times = new \Sabre\VObject\Component\VCalendar();

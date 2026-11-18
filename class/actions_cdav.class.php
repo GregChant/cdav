@@ -7,6 +7,29 @@
 class ActionsCDav
 {
 	/**
+	 * Bridge the native Agenda renderer after access checks and Form initialization.
+	 *
+	 * @param array $parameters Native header hook context
+	 * @param CommonObject|null $object Current object when supplied by the framework
+	 * @param string $action Current page action
+	 * @param HookManager $hookmanager Native hook manager
+	 * @return int Zero to retain the standard header
+	 */
+	public function llxHeader($parameters, &$object, &$action, $hookmanager)
+	{
+		global $db, $form;
+		if (($parameters['currentcontext'] ?? '') !== 'actioncard' || !defined('DOL_VERSION') || (int) DOL_VERSION !== 24
+			|| !is_object($form) || get_class($form) !== 'Form') return 0;
+		require_once __DIR__.'/CDavAgendaForm.php';
+		$nativeForm = new \Dolibarr\CDav\AgendaForm($db);
+		foreach (get_object_vars($form) as $property => $value) {
+			if (property_exists($nativeForm, $property)) $nativeForm->{$property} = $value;
+		}
+		$form = $nativeForm;
+		return 0;
+	}
+
+	/**
 	 * Complete optional fields expected by Dolibarr's legacy xcal exporter.
 	 *
 	 * Dolibarr 23 reads url and assignedUsers without checking that producers
@@ -92,7 +115,20 @@ class ActionsCDav
 	 */
 	public function doActions($parameters, &$object, &$action, $hookmanager)
 	{
-		global $user, $db;
+		global $user, $db, $addreminder;
+		if (($parameters['currentcontext'] ?? '') === 'actioncard' && $object->table_element === 'actioncomm'
+			&& in_array($action, array('add', 'update'), true)) {
+			require_once __DIR__.'/CDavAppointmentStatus.php';
+			$requested = GETPOST('options_cdav_status', 'alphanohtml');
+			if ((is_string($requested) && strtoupper(trim($requested)) === 'CANCELLED')
+				|| \Dolibarr\CDav\AppointmentStatus::nativeStatus($db, $object) === 'CANCELLED') {
+				// Agenda creates new reminders after ACTION_MODIFY; cancellation must not rearm one.
+				$addreminder = '';
+				$_POST['addreminder'] = '';
+				if (isset($_GET['addreminder'])) $_GET['addreminder'] = '';
+			}
+			return 0;
+		}
 
 		// echo "action: " . $action;
 		// echo "parameters: ";
@@ -407,7 +443,25 @@ class ActionsCDav
 	 */
 	public function formObjectOptions($parameters, &$object, &$action)
 	{
-		global $db;
+		global $db, $extrafields, $langs;
+		if (($parameters['currentcontext'] ?? '') === 'actioncard' && $object->table_element === 'actioncomm') {
+			if ($object->percentage !== null && (int) $object->percentage >= 0) {
+				$extrafields->attributes['actioncomm']['list']['cdav_status'] = '0';
+				return 0;
+			}
+			require_once __DIR__.'/CDavAppointmentStatus.php';
+			try {
+				$object->array_options['options_cdav_status'] = \Dolibarr\CDav\AppointmentStatus::nativeStatus($db, $object);
+			} catch (\InvalidArgumentException $error) {
+				$previous = !empty($object->oldcopy) ? $object->oldcopy : clone $object;
+				if (empty($object->oldcopy)) $previous->array_options['options_cdav_status'] = '';
+				$object->array_options['options_cdav_status'] = \Dolibarr\CDav\AppointmentStatus::nativeStatus($db, $previous);
+				$_POST['options_cdav_status'] = $object->array_options['options_cdav_status'];
+				$langs->load('cdav@cdav');
+				setEventMessages($langs->trans('CDavAppointmentStatusWriteFailed'), null, 'errors');
+			}
+			return 0;
+		}
 
 		// echo "formObjectOptions parameters: ";
 		// print_r($parameters);

@@ -653,6 +653,21 @@ Voir l'[audit de duplication](audit-duplication-code.md) et la
 Voir la [qualification des performances](validation-performances-calendrier.md).
 La vérification du délai sur l'hébergement réel suit l'installation du paquet.
 
+### État natif des rendez-vous — 6.4.0
+
+- [x] Ajouter un champ complémentaire Agenda natif : provisoire, confirmé,
+  annulé ; préserver les états DAV historiques lors de la réactivation.
+- [x] Synchroniser `STATUS` et les indications de disponibilité Outlook,
+  sans confondre état global et réponse individuelle à une invitation.
+- [x] Réserver les changements globaux au propriétaire ou au droit natif de
+  modification de tous les agendas, avec contrôle sous verrou et ETags.
+- [x] Préserver dates, durée, liens métier et réponses des autres participants ;
+  libérer les affectations et supprimer les seuls rappels à venir à l'annulation.
+- [ ] Qualifier le paquet sur Dolibarr 23/24 et PHP 8.4/8.5, avec tests du
+  formulaire Agenda natif, contrôle PHPCS et absence de duplication de production.
+
+Voir le [guide des états de rendez-vous](etats-rendez-vous-fr.md).
+
 ### Compléments à prévoir
 
 - [ ] Choisir séparément les détails exportés vers les logiciels agenda

@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '6.3.3';
+		$this->version = '6.4.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -86,7 +86,8 @@ class modCDav extends DolibarrModules
 		//							'workflow' => array('WORKFLOW_MODULE1_YOURACTIONTYPE_MODULE2'=>array('enabled'=>'! empty($conf->module1->enabled) && ! empty($conf->module2->enabled)', 'picto'=>'yourpicto@mymodule')) // Set here all workflow context managed by module
 		//                        );
 		$this->module_parts = array(
-			'hooks' => array('projectcard', 'projecttaskscard', 'agendaexport', 'fichinterexport'),
+			'triggers' => 1,
+			'hooks' => array('projectcard', 'projecttaskscard', 'agendaexport', 'fichinterexport', 'actioncard'),
 		);
 
 		// Data directories to create when module is enabled.
@@ -363,6 +364,11 @@ class modCDav extends DolibarrModules
 			require_once dirname(__DIR__, 2).'/class/CDavBusinessPolicy.php';
 			if (\Dolibarr\CDav\BusinessPolicy::migrate($this->db) < 0) {
 				$this->error = $langs->trans('CDavBusinessProtectionMigrationFailed');
+				return 0;
+			}
+			require_once dirname(__DIR__, 2).'/class/CDavAppointmentStatus.php';
+			if (\Dolibarr\CDav\AppointmentStatus::migrate($this->db) <= 0) {
+				$this->error = $langs->trans('CDavAppointmentStatusMigrationFailed');
 				return 0;
 			}
 		}

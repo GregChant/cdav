@@ -76,6 +76,7 @@ function invitationLiveNoopState($db, int $id): array
 	while ($row = $db->fetch_object($rows)) $resources[] = (array) $row;
 	return array('event' => (array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id),
 		'resources' => $resources,
+		'appointment_status' => (array) liveRow($db, 'SELECT cdav_status FROM '.MAIN_DB_PREFIX.'actioncomm_extrafields WHERE fk_object = '.$id),
 		'metadata' => (array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.$id),
 		'journal_count' => (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_schedule_object')->nb);
 }
@@ -493,6 +494,8 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 		$projectSecret = 'PRIVATE-PROJECT-'.$context['token'];
 		$project->description = '<p>'.$projectSecret.'</p>';
 		liveAssert($project->create($organizer) > 0 && $project->setValid($organizer) > 0, 'Unable to open the native invitation project');
+		require_once __DIR__.'/status_live_cases.php';
+		appointmentStatusLiveChecks($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events, $proof);
 		$fixture = invitationLiveCreate($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events);
 		$id = $fixture['id'];
 		$state = invitationLiveProtectedState($db, $id, (int) $invitee->id);

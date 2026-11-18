@@ -232,6 +232,43 @@ $resized = invitationPolicyChange($before, static function ($event) {
 invitationPolicyRejects($before, $resized, 'organizer@example.test', 'Native organizer moves must preserve duration');
 invitationPolicyAssert(InvitationPolicy::plan($before, $resized, 'organizer@example.test', false)['sequence'] === 5, 'DAV-created invitations may retain their ordinary duration editing capability');
 
+$provisional = invitationPolicyChange($before, static function ($event) {
+	$event->STATUS = 'TENTATIVE';
+});
+$provisionalPlan = InvitationPolicy::plan($before, $provisional, 'organizer@example.test');
+invitationPolicyAssert($provisionalPlan['changed'] && !$provisionalPlan['date_changed'] && $provisionalPlan['sequence'] === 5
+	&& invitationPolicyState($provisionalPlan)['status'] === 'TENTATIVE'
+	&& invitationPolicyState($provisionalPlan)['attendees'] === $original['attendees'],
+	'A native organizer may mark its invitation provisional without changing participant responses');
+$confirmedAgain = invitationPolicyChange($provisionalPlan['calendar_data'], static function ($event) {
+	$event->STATUS = 'CONFIRMED';
+});
+invitationPolicyAssert(InvitationPolicy::plan($provisionalPlan['calendar_data'], $confirmedAgain, 'organizer@example.test')['sequence'] === 6,
+	'Confirming a provisional invitation must advance the original revision once');
+$tentativeResponse = InvitationPolicy::plan($before, $davx5, 'alice@example.test');
+invitationPolicyAssert($tentativeResponse['status'] === 'CONFIRMED' && $tentativeResponse['partstat'] === 'TENTATIVE',
+	'A tentative participant response must never change the global appointment state');
+$attendeeHint = invitationPolicyChange($accept, static function ($event) {
+	$event->{'X-MICROSOFT-CDO-BUSYSTATUS'} = 'TENTATIVE';
+	$event->STATUS = 'TENTATIVE';
+});
+invitationPolicyAssert(InvitationPolicy::plan($before, $attendeeHint, 'alice@example.test')['status'] === 'CONFIRMED',
+	'An Outlook personal availability hint must never give an attendee organizer authority');
+$outlookGlobal = invitationPolicyChange($before, static function ($event) {
+	$event->{'X-MICROSOFT-CDO-BUSYSTATUS'} = 'TENTATIVE';
+});
+invitationPolicyAssert(InvitationPolicy::plan($before, $outlookGlobal, 'organizer@example.test')['status'] === 'TENTATIVE',
+	'An authorized organizer Provisional edit from CalDav Synchronizer must update global state');
+foreach (array('unknown', 'duplicate', 'business') as $invalidState) {
+	$invalid = invitationPolicyChange($provisional, static function ($event) use ($invalidState) {
+		if ($invalidState === 'unknown') $event->STATUS = 'UNKNOWN';
+		if ($invalidState === 'duplicate') $event->add('STATUS', 'CONFIRMED');
+		if ($invalidState === 'business') $event->LOCATION = 'Untrusted replacement';
+	});
+	invitationPolicyRejects($before, $invalid, 'organizer@example.test', 'Invalid state changes must not bypass protected native fields',
+		$invalidState === 'business' ? Forbidden::class : BadRequest::class);
+}
+
 $cancel = invitationPolicyChange($before, static function ($event) {
 	$event->STATUS = 'CANCELLED';
 	$event->TRANSP = 'TRANSPARENT';
@@ -242,6 +279,26 @@ $cancelState = invitationPolicyState($cancelled);
 invitationPolicyAssert($cancelled['kind'] === 'cancel' && $cancelled['sequence'] === 5 && $cancelState['status'] === 'CANCELLED' && $cancelState['transp'] === 'TRANSPARENT', 'Only an organizer cancellation may cancel and free the shared event');
 invitationPolicyAssert($cancelState['uid'] === $original['uid'] && $cancelState['description'] === $original['description'] && $cancelState['attendees'] === $original['attendees'], 'Cancellation must preserve stable identity, native notes and all participant associations');
 invitationPolicyAssert(InvitationPolicy::plan($cancelled['calendar_data'], $cancelled['calendar_data'], 'organizer@example.test')['kind'] === 'noop', 'Replaying a cancellation must be idempotent');
+$initialOutlookCancellation = invitationPolicyChange($cancel, static function ($event) {
+	$event->SUMMARY = 'Cancelled: '.(string) $event->SUMMARY;
+});
+$initialCancelPlan = InvitationPolicy::plan($before, $initialOutlookCancellation, 'organizer@example.test');
+invitationPolicyAssert($initialCancelPlan['kind'] === 'cancel' && invitationPolicyState($initialCancelPlan)['summary'] === $original['summary'],
+	'An explicit initial Outlook cancellation may add its exact display prefix while retaining the native subject');
+$invalidCancelSubject = invitationPolicyChange($initialOutlookCancellation, static function ($event) {
+	$event->SUMMARY = 'Cancelled: Unrelated business replacement';
+});
+invitationPolicyRejects($before, $invalidCancelSubject, 'organizer@example.test', 'An initial cancellation must not adopt an unrelated client subject');
+
+$cancelledOutlookEcho = invitationPolicyChange($cancelled['calendar_data'], static function ($event) {
+	$event->SUMMARY = 'Cancelled: '.(string) $event->SUMMARY;
+});
+foreach (array('organizer@example.test', 'alice@example.test') as $actor) {
+	$cancelEcho = InvitationPolicy::plan($cancelled['calendar_data'], $cancelledOutlookEcho, $actor);
+	invitationPolicyAssert($cancelEcho['kind'] === 'noop' && invitationPolicyState($cancelEcho)['summary'] === $original['summary'],
+		'An Outlook cancelled invitation display prefix must not reject a replay or change its trusted subject');
+}
+
 $resurrection = invitationPolicyChange($cancelled['calendar_data'], static function ($event) {
 	$event->STATUS = 'CONFIRMED';
 });

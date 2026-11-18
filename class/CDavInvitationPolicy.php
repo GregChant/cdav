@@ -35,6 +35,7 @@ class InvitationPolicy
 			$newEvents = self::events($after);
 			if (!$newEvents) throw new Forbidden('An invitation must remain a VEVENT.');
 			$new = self::master($newEvents);
+			foreach (array_merge($events, $newEvents) as $event) self::status($event);
 			$organizer = self::organizer($old);
 			if (self::uid($old) !== self::uid($new) || self::organizer($new) !== $organizer) {
 				throw new Forbidden('The invitation UID and organizer cannot be changed.');
@@ -179,6 +180,7 @@ class InvitationPolicy
 			self::preserveResponses($test, $oldAttendees, false);
 			// Outlook may map its own display name or scheduling-agent hints differently.
 			self::copyParameter($test->select('ATTENDEE'), $actor, $oldAttendees[$actor], 'CN');
+			CalendarWritePolicy::normalizeCancelledSummary($old, $test);
 			self::copyProperty($test, $old, 'STATUS');
 			self::copyProperty($test, $old, 'TRANSP');
 			self::copyAlarms($test, $old);
@@ -219,16 +221,22 @@ class InvitationPolicy
 	private static function organizerPlan($before, $after, $old, $new, array $oldAttendees, array $newAttendees, $organizer, $sequence, $protectBusiness)
 	{
 		self::preserveResponses($new, $oldAttendees, true);
-		$cancel = self::status($new) === 'CANCELLED';
-		$alreadyCancelled = self::status($old) === 'CANCELLED';
+		$status = CalendarWritePolicy::normalizeAppointmentStatus($old, $new);
+		$oldStatus = self::status($old);
+		$statusChanged = $status !== $oldStatus;
+		$cancel = $status === 'CANCELLED';
+		$alreadyCancelled = $oldStatus === 'CANCELLED';
 		if ($alreadyCancelled && !$cancel) throw new Forbidden('A cancelled invitation cannot be restored through CalDAV.');
 		$baseline = clone $before;
 		$comparison = clone $after;
 		try {
 			$base = self::master(self::events($baseline));
 			$test = self::master(self::events($comparison));
+			// Global state changes are allowed without opening native business fields.
+			CalendarWritePolicy::normalizeCancelledSummary($old, $test);
+			$base->STATUS = $oldStatus;
+			$test->STATUS = $oldStatus;
 			if ($cancel) {
-				self::copyProperty($test, $old, 'STATUS');
 				self::copyProperty($test, $old, 'TRANSP');
 				self::copyAlarms($test, $old);
 			}
@@ -245,9 +253,9 @@ class InvitationPolicy
 			}
 			$extensionChanged = self::extensions($base) !== self::extensions($test);
 			if (($protectBusiness || $cancel || $alreadyCancelled) && (!$protectedMatch || ($cancel && $dateChanged))) {
-				throw new Forbidden('Only the organizer dates or an explicit cancellation may change this protected invitation.');
+				throw new Forbidden('Only the organizer dates or appointment status may change this protected invitation.');
 			}
-			$changed = $dateChanged || !$protectedMatch || (!$protectBusiness && $extensionChanged) || ($cancel && !$alreadyCancelled);
+			$changed = $dateChanged || $statusChanged || !$protectedMatch || (!$protectBusiness && $extensionChanged);
 			if ($alreadyCancelled && $changed) throw new Forbidden('A cancelled invitation cannot be modified through CalDAV.');
 		} finally {
 			$baseline->destroy();
@@ -267,9 +275,11 @@ class InvitationPolicy
 			self::copyProperty($old, $new, 'DTEND');
 			self::copyProperty($old, $new, 'DUE');
 			self::copyProperty($old, $new, 'DURATION');
+			$old->STATUS = $status;
 			$old->SEQUENCE = $sequence;
 			return self::result('organizer', $before->serialize(), true, $old, $organizer, $sequence, true, null, null, $dateChanged);
 		}
+		$new->STATUS = $status;
 		$new->SEQUENCE = $sequence;
 		return self::result('organizer', $after->serialize(), true, $new, $organizer, $sequence, true, null, null, $dateChanged);
 	}
@@ -386,7 +396,9 @@ class InvitationPolicy
 				foreach ($before->select('VTIMEZONE') as $zone) $left->add(clone $zone);
 				foreach ($after->select('VTIMEZONE') as $zone) $right->add(clone $zone);
 				$left->add(clone $event);
-				$right->add(clone $incoming[$key]);
+				$test = clone $incoming[$key];
+				CalendarWritePolicy::normalizeCancelledSummary($event, $test);
+				$right->add($test);
 				$dates = CalendarWritePolicy::assertMoveOnly($left->serialize(), $right->serialize());
 				if ($dates !== CalendarWritePolicy::assertMoveOnly($left->serialize(), $left->serialize())
 					|| self::extensions($event) !== self::extensions($incoming[$key])) return false;
@@ -585,7 +597,7 @@ class InvitationPolicy
 	 */
 	private static function status($event)
 	{
-		return isset($event->STATUS) ? strtoupper(trim((string) $event->STATUS)) : '';
+		return CalendarWritePolicy::eventStatus($event);
 	}
 
 	/**
@@ -634,6 +646,6 @@ class InvitationPolicy
 		return array('kind' => $kind, 'calendar_data' => $data, 'changed' => $changed,
 			'partstat' => $partstat, 'personal_transparency' => $personal, 'organizer_email' => $organizer,
 			'sequence' => $sequence, 'uid' => self::uid($event), 'actor_is_organizer' => $isOrganizer,
-			'date_changed' => $dateChanged, 'external_import' => false);
+			'date_changed' => $dateChanged, 'status' => self::status($event), 'external_import' => false);
 	}
 }

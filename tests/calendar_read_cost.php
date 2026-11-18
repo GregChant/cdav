@@ -175,7 +175,7 @@ class CalendarReadDatabase
 			preg_match('/fk_actioncomm = ([0-9]+)/', $sql, $match);
 			$id = (int) $match[1];
 			if ($id === $this->failMetadataFor) throw new RuntimeException('Isolated metadata read failure');
-			$extra = $id === 1 ? "RRULE:FREQ=DAILY;COUNT=30\r\n" : '';
+			$extra = $id === 1 ? "RRULE:FREQ=DAILY;COUNT=30\r\n" : ($id === 5 ? "X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE\r\n" : '');
 			$exception = $id === 1 ? "BEGIN:VEVENT\r\nUID:load-1@example.test\r\nRECURRENCE-ID:20261120T080000Z\r\nDTSTART:20261120T120000Z\r\nDTEND:20261120T130000Z\r\nSUMMARY:Exception\r\nEND:VEVENT\r\n" : '';
 			$rows[] = (object) array('calendardata' => "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:load-".$id."@example.test\r\nDTSTART:20261101T080000Z\r\nDTEND:20261101T090000Z\r\nSEQUENCE:3\r\nORGANIZER:mailto:owner@example.test\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:load@example.test\r\n".$extra."END:VEVENT\r\n".$exception."END:VCALENDAR\r\n");
 		} elseif (str_contains($sql, 'SELECT recurid, recurrule, recurdateend FROM llx_actioncomm')) {
@@ -299,6 +299,9 @@ foreach (array(100, 1000) as $count) {
 		calendarReadAssert(str_contains($resource['data'], 'ATTENDEE;PARTSTAT=ACCEPTED:mailto:load@example.test'), 'Scheduling metadata must survive cached REPORT');
 	}
 	calendarReadAssert(isset($resources['calendar-client-4.ics']), 'Client resource URI aliases must survive collection warming');
+	calendarReadAssert(str_contains($resources['5-ev-'.CDAV_URI_KEY]['data'], 'STATUS:TENTATIVE')
+		&& str_contains($resources['5-ev-'.CDAV_URI_KEY]['data'], 'X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE'),
+		'A legacy Outlook-only tentative state must survive native REPORT export before an optional field is populated');
 	calendarReadAssert(substr_count($resources['1-ev-'.CDAV_URI_KEY]['data'], 'BEGIN:VEVENT') === 2, 'Recurrence exceptions must remain complete calendar resources');
 	$record = $backend->getCalendarObject(7, 'calendar-client-4.ics');
 	calendarReadAssert((int) $record['id'] === 4 && $record['_cdav_description']['native_note'] === '<p>Native note 4</p>', 'Warm object records must retain native identity and trusted description boundaries');
@@ -320,6 +323,20 @@ foreach (array(100, 1000) as $count) {
 if (getenv('CDAV_READ_COST_BENCHMARK') === '1') fwrite(STDOUT, json_encode($measurements, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)."\n");
 calendarReadAssert(!$calendarReadDiagnostics, 'REPORT export must not hide PHP diagnostics: '.implode('; ', $calendarReadDiagnostics));
 calendarReadAssert(!$budgetFailures, 'REPORT one-export-per-row budget exceeded: '.implode('; ', $budgetFailures));
+
+list($database, , $backend) = calendarReadFixture(5, false);
+$database->rows[5]->cdav_status = 'CONFIRMED';
+$explicitState = $backend->getCalendarObject(7, '5-ev-'.CDAV_URI_KEY);
+calendarReadAssert(str_contains($explicitState['calendardata'], 'STATUS:CONFIRMED')
+	&& str_contains($explicitState['calendardata'], 'X-MICROSOFT-CDO-BUSYSTATUS:BUSY'),
+	'An explicit native state must override an older Outlook-only tentative hint in both protocol representations');
+foreach (array('NEEDS-ACTION' => 'TENTATIVE', 'TENTATIVE' => 'TENTATIVE', 'ACCEPTED' => 'BUSY') as $answer => $busy) {
+	$database->rows[5]->calendar_answer_status = $answer;
+	$personalState = $backend->getCalendarObject(7, '5-ev-'.CDAV_URI_KEY);
+	calendarReadAssert(str_contains($personalState['calendardata'], 'STATUS:CONFIRMED')
+		&& str_contains($personalState['calendardata'], 'X-MICROSOFT-CDO-BUSYSTATUS:'.$busy),
+		'Outlook must retain the personal provisional display without changing the confirmed shared state: '.$answer);
+}
 
 // Collection discovery/CTag reconciliation must reuse the same request snapshot.
 list($database, $exporter, $backend, $server) = calendarReadFixture(100, true);

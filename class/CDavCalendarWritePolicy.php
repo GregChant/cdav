@@ -2,6 +2,7 @@
 
 namespace Dolibarr\CDav;
 
+use Sabre\DAV\Exception\BadRequest;
 use Sabre\DAV\Exception\Forbidden;
 use Sabre\VObject;
 
@@ -165,6 +166,195 @@ class CalendarWritePolicy
 			$before->destroy();
 			$after->destroy();
 		}
+	}
+
+	/**
+	 * Plan an authorized status change without adopting native business fields.
+	 * The backend must verify ownership before applying any global status change.
+	 *
+	 * @param string $current Current authoritative appointment
+	 * @param string $incoming Client replacement appointment
+	 * @return array<string,mixed> Canonical dates, state and server-owned revision
+	 */
+	public static function planStatusChange($current, $incoming)
+	{
+		$before = VObject\Reader::read((string) $current);
+		$after = null;
+		$comparison = null;
+		try {
+			$after = VObject\Reader::read((string) $incoming);
+			$old = self::item($before);
+			$new = self::item($after);
+			if ($old->name !== 'VEVENT' || $new->name !== 'VEVENT'
+				|| (isset($old->ORGANIZER) && $old->select('ATTENDEE'))) {
+				throw new Forbidden('Appointment status changes require an original event; invitations use their organizer policy.');
+			}
+			$oldStatus = self::eventStatus($old);
+			$status = self::normalizeAppointmentStatus($old, $new);
+			$statusChanged = $status !== $oldStatus;
+			$comparison = clone $after;
+			$test = self::item($comparison);
+			// Compare every other protected field, including independent occupancy.
+			self::normalizeCancelledSummary($old, $test);
+			$old->STATUS = $oldStatus;
+			$test->STATUS = $oldStatus;
+			if ($status === 'CANCELLED') {
+				$test->remove('TRANSP');
+				foreach ($old->select('TRANSP') as $property) $test->add(clone $property);
+				$test->remove('VALARM');
+				foreach ($old->select('VALARM') as $alarm) $test->add(clone $alarm);
+			}
+			$dates = self::assertMoveOnly($before->serialize(), $comparison->serialize());
+			$oldDates = self::assertMoveOnly($before->serialize(), $before->serialize());
+			$dateChanged = $dates !== $oldDates;
+			if (($status === 'CANCELLED' && $dateChanged)
+				|| ($oldStatus === 'CANCELLED' && ($statusChanged || $dateChanged))) {
+				throw new Forbidden('A cancelled appointment cannot be restored or moved through CalDAV.');
+			}
+			$sequenceProperties = $old->select('SEQUENCE');
+			$sequenceValue = isset($old->SEQUENCE) ? (string) $old->SEQUENCE : '0';
+			if (count($sequenceProperties) > 1 || !preg_match('/^[0-9]+$/D', $sequenceValue)
+				|| (float) $sequenceValue > 2147483647) {
+				throw new BadRequest('The appointment revision is invalid or ambiguous.');
+			}
+			$sequence = (int) $sequenceValue;
+			$changed = $statusChanged || $dateChanged;
+			if ($changed) {
+				if ($sequence >= 2147483647) throw new Forbidden('The appointment revision cannot be advanced safely.');
+				$sequence++;
+				foreach (array('DTSTART', 'DTEND', 'DUE', 'DURATION') as $name) {
+					$old->remove($name);
+					foreach ($new->select($name) as $property) $old->add(clone $property);
+				}
+				$old->STATUS = $status;
+				$old->SEQUENCE = $sequence;
+				if ($status === 'CANCELLED') $old->TRANSP = 'TRANSPARENT';
+			}
+			return array('kind' => !$changed ? 'noop' : ($status === 'CANCELLED' ? 'cancel' : 'status'),
+				'changed' => $changed, 'date_changed' => $dateChanged, 'status' => $status,
+				'previous_status' => $oldStatus, 'dates' => $dates, 'sequence' => $sequence,
+				'calendar_data' => $before->serialize());
+		} finally {
+			$before->destroy();
+			if ($after !== null) $after->destroy();
+			if ($comparison !== null) $comparison->destroy();
+		}
+	}
+
+	/**
+	 * Read one supported global event state, independent of attendee PARTSTAT.
+	 *
+	 * @param VObject\Component $event Event component
+	 * @return string Effective supported event status
+	 */
+	public static function eventStatus($event)
+	{
+		$properties = $event->select('STATUS');
+		$status = isset($event->STATUS) ? strtoupper(trim((string) $event->STATUS)) : 'CONFIRMED';
+		if (count($properties) > 1 || !in_array($status, array('TENTATIVE', 'CONFIRMED', 'CANCELLED'), true)) {
+			throw new BadRequest('The appointment status is unsupported or ambiguous.');
+		}
+		return $status;
+	}
+
+	/**
+	 * Persist protocol changes without copying a generated CRM description into metadata.
+	 *
+	 * @param string $stored Trusted existing sidecar, empty for a native appointment
+	 * @param array<string,mixed> $plan Validated canonical appointment state plan
+	 * @return string|null Trusted protocol metadata, null for an unchanged echo
+	 */
+	public static function metadataAfterStatusChange($stored, array $plan)
+	{
+		if (empty($plan['changed'])) return null;
+		$canonical = VObject\Reader::read((string) $plan['calendar_data']);
+		$metadata = null;
+		try {
+			$source = self::item($canonical);
+			if ((string) $stored !== '') {
+				$metadata = VObject\Reader::read((string) $stored);
+				$target = self::item($metadata);
+				if ($target->name !== $source->name || (string) $target->UID !== (string) $source->UID) {
+					throw new Forbidden('The appointment metadata cannot replace its original identity.');
+				}
+			} else {
+				$metadata = new VObject\Component\VCalendar();
+				$target = $metadata->add($source->name, array('UID' => (string) $source->UID));
+			}
+			foreach (array('DTSTART', 'DTEND', 'DUE', 'DURATION') as $name) {
+				$target->remove($name);
+				foreach ($source->select($name) as $property) $target->add(clone $property);
+			}
+			if ($plan['status'] !== $plan['previous_status']) {
+				$target->STATUS = $plan['status'];
+				$target->remove('X-MICROSOFT-CDO-BUSYSTATUS');
+			}
+			$target->SEQUENCE = (int) $plan['sequence'];
+			if ($plan['status'] === 'CANCELLED') {
+				$target->TRANSP = 'TRANSPARENT';
+				$target->remove('VALARM');
+			}
+			return $metadata->serialize();
+		} finally {
+			$canonical->destroy();
+			if ($metadata !== null) $metadata->destroy();
+		}
+	}
+
+	/**
+	 * Reconcile Outlook availability edits without overriding an explicit DAV edit.
+	 * CalDav Synchronizer changes X-MICROSOFT-CDO-BUSYSTATUS for Provisional.
+	 * A preserved client hint must not override a STATUS edit from another client.
+	 *
+	 * @param VObject\Component $current Authoritative event with exported display hints
+	 * @param VObject\Component $incoming Client replacement event
+	 * @return string Requested global appointment state
+	 */
+	public static function normalizeAppointmentStatus($current, $incoming)
+	{
+		self::eventStatus($current);
+		$status = self::eventStatus($incoming);
+		$previousBusy = self::outlookBusyStatus($current);
+		$busy = self::outlookBusyStatus($incoming);
+		if ($status !== 'CANCELLED' && (!isset($incoming->STATUS) || $busy !== $previousBusy)) {
+			if ($busy === 'TENTATIVE') $status = 'TENTATIVE';
+			if ($busy === 'BUSY') $status = 'CONFIRMED';
+		}
+		return $status;
+	}
+
+	/**
+	 * Ignore CalDav Synchronizer's exact subject prefix on an explicit cancellation.
+	 * This must be applied only to a comparison clone, never to trusted native data.
+	 *
+	 * @param VObject\Component $current Authoritative appointment
+	 * @param VObject\Component $incoming Client comparison clone
+	 * @return void
+	 */
+	public static function normalizeCancelledSummary($current, $incoming)
+	{
+		self::eventStatus($current);
+		if (self::eventStatus($incoming) !== 'CANCELLED' || count($incoming->select('STATUS')) !== 1
+			|| count($current->select('SUMMARY')) !== 1 || count($incoming->select('SUMMARY')) !== 1) return;
+		if ((string) $incoming->SUMMARY === 'Cancelled: '.(string) $current->SUMMARY) {
+			$incoming->remove('SUMMARY');
+			$incoming->add(clone $current->SUMMARY);
+		}
+	}
+
+	/**
+	 * Read an optional Outlook availability hint without accepting ambiguous data.
+	 *
+	 * @param VObject\Component $event Event component
+	 * @return string|null Normalized client hint, null when absent
+	 */
+	public static function outlookBusyStatus($event)
+	{
+		$name = 'X-MICROSOFT-CDO-BUSYSTATUS';
+		if (count($event->select($name)) > 1) {
+			throw new BadRequest('The Outlook availability hint is ambiguous.');
+		}
+		return isset($event->{$name}) ? strtoupper(trim((string) $event->{$name})) : null;
 	}
 
 	/**
