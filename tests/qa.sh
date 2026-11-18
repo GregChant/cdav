@@ -25,7 +25,7 @@ if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
         tests/bootstrap.php tests/booking.php tests/booking_calendar.php tests/booking_multi.php \
         tests/booking_identity.php tests/booking_details.php tests/booking_notification.php tests/booking_validity.php tests/booking_ui.php \
         tests/business_policy.php tests/contact_business.php tests/calendar_policy.php tests/calendar_description.php \
-        tests/business_live_cases.php tests/business_delete_rollback_cases.php \
+        tests/business_live_cases.php tests/business_delete_rollback_cases.php tests/business_project_acl_cases.php \
         tests/booking_live.php tests/booking_multi_live.php tests/booking_profiles_live.php tests/booking_browser.php
 fi
 if [[ "${CDAV_LIVE_TEST:-0}" == 1 ]]; then

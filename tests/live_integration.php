@@ -352,6 +352,7 @@ try {
 	liveAssert($testUser->addrights(0, 'societe', '', $entity) > 0, 'Unable to grant native third-party/contact rights');
 	liveAssert($testUser->addrights(0, 'agenda', '', $entity) > 0, 'Unable to grant native agenda rights');
 	liveAssert($testUser->addrights(0, 'adherent', '', $entity) > 0, 'Unable to grant native member rights');
+	liveAssert($testUser->addrights(0, 'projet', '', $entity) > 0, 'Unable to grant native project rights');
 	liveAssert($testUser->fetch($userId) > 0 && $testUser->loadRights() >= 0, 'Unable to reload the isolated DAV user');
 	liveAssert($testUser->isAdmin(), 'The isolated DAV user does not have the required test rights');
 	liveAssert($testUser->hasRight('societe', 'contact', 'read') && $testUser->hasRight('agenda', 'myactions', 'write'), 'The isolated DAV user rights were not loaded');

@@ -16,8 +16,8 @@ define('DOL_URL_ROOT', '/dolibarr');
 define('DOL_MAIN_URL_ROOT', 'https://calendar.example.test/dolibarr');
 define('MAIN_DB_PREFIX', 'llx_');
 define('CDAV_URI_KEY', 'description-tests');
-define('CDAV_TASK_SYNC', 0);
-define('CDAV_INTERV_SYNC', 0);
+define('CDAV_TASK_SYNC', 3);
+define('CDAV_INTERV_SYNC', 1);
 define('CDAV_SYNC_PAST', 90);
 define('CDAV_SYNC_FUTURE', 180);
 $languageRoot = sys_get_temp_dir().'/cdav-description-'.bin2hex(random_bytes(8));
@@ -26,7 +26,7 @@ register_shutdown_function(static function () use ($languageRoot) {
 	if (is_link($languageRoot.'/cdav')) unlink($languageRoot.'/cdav');
 	if (is_dir($languageRoot)) rmdir($languageRoot);
 });
-$conf = (object) array('entity' => 1, 'global' => new stdClass(), 'modules' => array(), 'cache' => array(),
+$conf = (object) array('entity' => 1, 'global' => new stdClass(), 'modules' => array('project' => true), 'cache' => array(),
 	'file' => (object) array('dol_document_root' => array($root, $languageRoot), 'dol_url_root' => array('', '/custom'),
 		'dol_main_url_root' => DOL_MAIN_URL_ROOT, 'character_set_client' => 'UTF-8'));
 require $root.'/includes/sabre/autoload.php';
@@ -41,6 +41,9 @@ class DescriptionDatabase
 	public $reference = '';
 	public $available = true;
 	public $queries = array();
+	public $interventionCandidates = array();
+	public $interventionAllowed = array();
+	public $tagRow = null;
 	/**
 	 * Expose only the optional booking receipt tables.
 	 * @param string $table Requested table
@@ -76,9 +79,13 @@ class DescriptionDatabase
 	public function query($sql)
 	{
 		$this->queries[] = $sql;
+		if (str_starts_with($sql, 'SELECT DISTINCT fi.rowid FROM llx_fichinter fi')) {
+			return (object) array('rows' => array_map(static fn($id) => (object) array('rowid' => $id), $this->interventionCandidates));
+		}
+		if ($sql === 'SELECT description_acl_tag_fixture') return (object) array('rows' => $this->tagRow ? array(clone $this->tagRow) : array());
 		$matched = $this->reference !== '' && strpos($sql, "request.reference = '".$this->reference."'") !== false
 			&& strpos($sql, 'request.fk_actioncomm = 42') !== false && strpos($sql, 'segment.fk_actioncomm = 42') !== false;
-		return (object) array('row' => $matched ? (object) array('reference' => $this->reference) : null);
+		return (object) array('rows' => $matched ? array((object) array('reference' => $this->reference)) : array());
 	}
 	// phpcs:disable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
 	/**
@@ -88,11 +95,122 @@ class DescriptionDatabase
 	 */
 	public function fetch_object($result)
 	{
-		$row = $result->row;
-		$result->row = null;
-		return $row;
+		return array_shift($result->rows);
 	}
 	// phpcs:enable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
+}
+
+/** Native project API double; production uses Project::fetch/restrictedProjectArea. */
+class Project
+{
+	public static $records = array(4 => array('entity' => 1, 'allowed' => true));
+	public static $fetches = 0;
+	public static $checks = 0;
+	public static $scopes = 0;
+	public $id = 0;
+	public $entity = 0;
+	/**
+	 * Match the native constructor without loading a business database.
+	 * @param object $db Native connection
+	 */
+	public function __construct($db)
+	{
+	}
+	/**
+	 * Fetch only an explicitly configured native project fixture.
+	 * @param int $id Native project ID
+	 * @return int Native fetch result
+	 */
+	public function fetch($id)
+	{
+		self::$fetches++;
+		if (!isset(self::$records[$id])) return 0;
+		$this->id = $id;
+		$this->entity = self::$records[$id]['entity'];
+		return 1;
+	}
+	/**
+	 * Apply the fixture's native object access decision.
+	 * @param object $user Authenticated user
+	 * @param string $mode Requested access
+	 * @return int Native permission result
+	 */
+	public function restrictedProjectArea($user, $mode = 'read')
+	{
+		self::$checks++;
+		return $user->projectAll || self::$records[$this->id]['allowed'] ? 1 : 0;
+	}
+	/**
+	 * Match the native project-list scope API.
+	 * @param object $user Authenticated user
+	 * @param int $mode Native scope mode
+	 * @param int $list String-list flag
+	 * @param int $socid Optional company
+	 * @return string Native ID list
+	 */
+	public function getProjectsAuthorizedForUser($user, $mode = 0, $list = 0, $socid = 0)
+	{
+		self::$scopes++;
+		$ids = array();
+		foreach (self::$records as $id => $record) if ($record['entity'] === 1 && ($mode === 2 || $record['allowed'])) $ids[] = $id;
+		return $ids ? implode(',', $ids) : '0';
+	}
+}
+
+/**
+ * Model native intervention object access independently of a calendar assignment.
+ * @param object $user Authenticated user
+ * @param array $features Native features
+ * @param mixed $object Native object ID
+ * @param string $table Native table
+ * @param string $feature2 Secondary native feature
+ * @param string $key Native company field
+ * @return bool
+ */
+function checkUserAccessToObject($user, array $features, $object = 0, $table = '', $feature2 = '', $key = '')
+{
+	global $db;
+	$GLOBALS['description_intervention_checks'][] = (int) $object;
+	return $features === array('ficheinter') && $table === 'fichinter' && $key === 'fk_soc'
+		&& in_array((int) $object, $db->interventionAllowed, true);
+}
+
+/** Collection-tag fixture without filesystem attachments or unrelated module lists. */
+class DescriptionTagLibrary extends CdavLib
+{
+	/**
+	 * Skip Agenda filesystem attachment work in this focused token regression.
+	 * @param int $calid Native owner
+	 * @param mixed $oid Native ID
+	 * @param mixed $ouri Resource URI
+	 * @param array|null $bookingRange Anonymous range
+	 * @return false
+	 */
+	public function getSqlCalEvents($calid, $oid = false, $ouri = false, ?array $bookingRange = null)
+	{
+		return false;
+	}
+	/**
+	 * Supply one unchanged project-linked native row.
+	 * @param int $calid Native owner
+	 * @param mixed $oid Native ID
+	 * @param string $elem_source Native source
+	 * @return string|false
+	 */
+	public function getSqlProjectTasks($calid, $oid = false, $elem_source = 'pt')
+	{
+		return $elem_source === 'pe' ? 'SELECT description_acl_tag_fixture' : false;
+	}
+	/**
+	 * Exclude unrelated intervention fixtures.
+	 * @param int $calid Native owner
+	 * @param mixed $oid Native line ID
+	 * @return false
+	 */
+	public function getSqlIntervEvents($calid, $oid = false)
+	{
+		return false;
+	}
 }
 
 /**
@@ -120,6 +238,9 @@ function descriptionCalendar($lib, $row)
 $db = new DescriptionDatabase();
 $user = new class {
 	public $id = 7;
+	public $projectRead = true;
+	public $projectAll = false;
+	public $interventionRead = true;
 	/**
 	 * Keep native exporter rights deterministic.
 	 * @param string $module Native module
@@ -129,6 +250,9 @@ $user = new class {
 	 */
 	public function hasRight($module, $group, $right = '')
 	{
+		if ($module === 'projet' && $group === 'lire') return $this->projectRead;
+		if ($module === 'projet' && $group === 'all' && $right === 'lire') return $this->projectAll;
+		if ($module === 'ficheinter' && $group === 'lire') return $this->interventionRead;
 		return true;
 	}
 };
@@ -144,6 +268,7 @@ $event = (object) array('elem_source' => 'ev', 'id' => 42, 'label' => 'Entretien
 	'soc_nom' => 'Client & Associés SA', 'soc_address' => 'Industriestrasse 12', 'soc_zip' => '4600', 'soc_town' => 'Olten',
 	'soc_country_label' => 'Suisse', 'soc_phone' => '+41 62 555 00 00', 'soc_email' => 'societe@example.test',
 	'proj_ref' => 'PRJ-0042', 'proj_title' => 'Installation chauffage',
+	'fk_project' => 4, 'cdav_project_id' => 4,
 	'proj_desc' => '<p>Première consigne</p><p>Deuxième paragraphe<br>Suite de la consigne</p>',
 	'recurid' => '', 'recurrule' => '', 'recurdateend' => null);
 
@@ -275,4 +400,91 @@ descriptionAssert($lib->getCalendarDescriptionPrefixForFields($intervention->_cd
 $bookingSql = $lib->getSqlCalEvents(7, false, false, array(strtotime('2026-11-20'), strtotime('2026-11-22')));
 descriptionAssert(strpos($bookingSql, 'sp.email') === false && strpos($bookingSql, 's.email') === false,
 	'Anonymous booking SQL must not select newly displayed contact or company emails');
+
+// Project links may be visible on Agenda while project contents remain private.
+$aclRow = clone $event;
+$aclRow->note = 'Native event note';
+$aclRow->proj_desc = 'PROJECT-DESCRIPTION-SECRET';
+$user->projectRead = false;
+$beforeFetches = Project::$fetches;
+$noProjectRead = new CdavLib($user, $db, $langs);
+$denied = $noProjectRead->getCalendarDescriptionParts($aclRow)['text'];
+descriptionAssert(strpos($denied, $aclRow->proj_desc) === false && strpos($denied, '[PRJ-0042]') !== false
+	&& Project::$fetches === $beforeFetches, 'Agenda-only access may retain its project link but must not read project contents');
+descriptionAssert($noProjectRead->getSqlProjectTasks(7) === false, 'Agenda-only users must not list or fetch project-task details');
+
+$user->projectRead = true;
+Project::$records[4]['allowed'] = false;
+$privateProject = new CdavLib($user, $db, $langs);
+$beforeFetches = Project::$fetches;
+$beforeChecks = Project::$checks;
+descriptionAssert(strpos($privateProject->getCalendarDescriptionParts($aclRow)['text'], $aclRow->proj_desc) === false,
+	'A private project must stay masked when the reader is not a project member');
+$privateProject->getCalendarDescriptionParts($aclRow);
+descriptionAssert(Project::$fetches === $beforeFetches + 1 && Project::$checks === $beforeChecks + 1,
+	'Native project fetch and authorization must run once per project in one export request');
+descriptionAssert($privateProject->getSqlProjectTasks(7) === false, 'A calendar assignment must not bypass private-project membership for tasks');
+
+Project::$records[4]['allowed'] = true;
+$memberProject = new CdavLib($user, $db, $langs);
+descriptionAssert(strpos($memberProject->getCalendarDescriptionParts($aclRow)['text'], $aclRow->proj_desc) !== false,
+	'A native project member with read permission must retain the project description');
+$beforeScopes = Project::$scopes;
+$taskSql = $memberProject->getSqlProjectTasks(7);
+$memberProject->getSqlProjectTasks(7, 15, 'pe');
+descriptionAssert(strpos($taskSql, 'p.rowid IN (4)') !== false && Project::$scopes === $beforeScopes + 1,
+	'Task list and direct reads must use one cached native project scope');
+Project::$records[4]['allowed'] = false;
+$user->projectAll = true;
+$allProject = new CdavLib($user, $db, $langs);
+descriptionAssert($allProject->canReadProjectDescription($aclRow), 'The native all-project read permission must authorize a private project');
+$user->projectAll = false;
+Project::$records[4] = array('entity' => 2, 'allowed' => true);
+$crossEntity = new CdavLib($user, $db, $langs);
+descriptionAssert(!$crossEntity->canReadProjectDescription($aclRow), 'A linked project outside shared entities must remain masked');
+unset(Project::$records[4]);
+descriptionAssert(!(new CdavLib($user, $db, $langs))->canReadProjectDescription($aclRow), 'A failed native project fetch must fail closed');
+Project::$records[4] = array('entity' => 1, 'allowed' => true);
+$legacyAlias = clone $aclRow;
+unset($legacyAlias->cdav_project_id, $legacyAlias->fk_project);
+$legacyAlias->fk_projet = 4;
+descriptionAssert((new CdavLib($user, $db, $langs))->canReadProjectDescription($legacyAlias), 'Native fk_projet aliases must receive the same project authorization');
+$maskedJoin = clone $aclRow;
+$maskedJoin->cdav_project_id = null;
+descriptionAssert(!(new CdavLib($user, $db, $langs))->canReadProjectDescription($maskedJoin), 'A masked entity join must not fall back to its forbidden native foreign key');
+$conf->modules['project'] = false;
+descriptionAssert(!(new CdavLib($user, $db, $langs))->canReadProjectDescription($aclRow), 'A disabled project module must not export project descriptions');
+$conf->modules['project'] = true;
+$scopeSql = $memberProject->getSqlCalEvents(7, 42);
+descriptionAssert(strpos($scopeSql, 'p.rowid = a.fk_project AND p.entity IN (1)') !== false,
+	'Agenda project joins must respect current native shared-project entities');
+
+// Rights/membership changes invalidate descriptions even without an Agenda edit.
+$db->tagRow = $aclRow;
+Project::$records[4]['allowed'] = false;
+$deniedTag = (new DescriptionTagLibrary($user, $db, $langs))->getCalendarCollectionTag(7);
+Project::$records[4]['allowed'] = true;
+$allowedTag = (new DescriptionTagLibrary($user, $db, $langs))->getCalendarCollectionTag(7);
+Project::$records[4]['allowed'] = false;
+$revokedTag = (new DescriptionTagLibrary($user, $db, $langs))->getCalendarCollectionTag(7);
+descriptionAssert($deniedTag !== $allowedTag && $revokedTag === $deniedTag,
+	'Granting or revoking project membership must change the collection tag without changing the Agenda row');
+
+// Native intervention rights and parent-company scope are separate from Agenda.
+$conf->modules['ficheinter'] = true;
+$user->interventionRead = false;
+$db->queries = array();
+descriptionAssert((new CdavLib($user, $db, $langs))->getSqlIntervEvents(7) === false && $db->queries === array(),
+	'Agenda-only readers must not query assigned intervention details');
+$user->interventionRead = true;
+$db->interventionCandidates = array(9, 10);
+$db->interventionAllowed = array(9);
+$GLOBALS['description_intervention_checks'] = array();
+$interventionScope = new CdavLib($user, $db, $langs);
+$interventionSql = $interventionScope->getSqlIntervEvents(7);
+$interventionScope->getSqlIntervEvents(7, 15);
+descriptionAssert(strpos($interventionSql, 'fi.rowid IN (9)') !== false
+	&& $GLOBALS['description_intervention_checks'] === array(9, 10), 'Intervention list/direct reads must reuse cached native object access for allowed parent documents');
+descriptionAssert(strpos($interventionSql, 'p.rowid = fi.fk_projet AND p.entity IN (1)') !== false,
+	'Intervention project links must respect shared-project entities');
 fwrite(STDOUT, "Localized plain calendar descriptions, verified reference footer, protected moves and free/busy privacy passed.\n");

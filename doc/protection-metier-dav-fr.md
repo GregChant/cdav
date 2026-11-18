@@ -24,8 +24,14 @@ Les rappels natifs relatifs encore en attente suivent le déplacement, sans
 changer leur destinataire, leur canal ou leur état et sans créer de nouvel
 envoi. La révision de planification est avancée par le serveur. Les notifications
 de déplacement ou d’annulation sont traitées après validation de la transaction.
-Les écritures verrouillent également l’objet natif pour conserver une liaison
-changée simultanément dans Dolibarr ou dans un autre calendrier.
+Les écritures des rendez-vous et des contacts verrouillent également l’objet
+natif pour conserver une liaison changée simultanément dans Dolibarr ou dans
+un autre calendrier.
+
+Un rappel créé dans Dolibarr et renvoyé à l’identique par CalDAV conserve son
+identifiant et sa provenance. Il n’est pas recréé, y compris lorsque la protection
+générale des rendez-vous est désactivée. Les rappels déjà traités ne sont pas
+réarmés par la synchronisation.
 
 La suppression reste soumise aux droits Agenda natifs. Pour un événement affecté
 à plusieurs collaborateurs, elle retire uniquement l’affectation au calendrier
@@ -91,6 +97,10 @@ et contact**, puis **Projet**. Les paragraphes du projet et les coordonnées son
 conservés, sans pictogramme répété devant chaque ligne. L’adresse du rendez-vous
 reste distincte de l’adresse du tiers. La référence d’une réservation vérifiée
 figure en bas avec un libellé lisible.
+
+La description détaillée d’un projet nécessite l’accès natif à ce projet. L’accès
+au rendez-vous seul n’accorde pas cet accès. Les tâches projet et interventions
+suivent également les droits de lecture de leur objet natif.
 
 Cette présentation ne change pas les notes stockées dans Dolibarr. Le renvoi
 d’une description inchangée conserve les notes natives, y compris leur format

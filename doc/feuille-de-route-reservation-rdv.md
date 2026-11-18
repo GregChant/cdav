@@ -592,6 +592,16 @@ Texte de référence pour l'objectif :
 
 Voir le [guide de protection métier](protection-metier-dav-fr.md).
 
+### Compléments à prévoir
+
+- [ ] Choisir séparément les détails exportés vers les logiciels agenda
+  (description du projet, coordonnées du tiers et du contact), en complément
+  des contrôles d’accès natifs obligatoires.
+- [ ] Séparer les autorisations de déplacement et de suppression dans le
+  réglage de protection des rendez-vous.
+- [ ] Permettre une protection renforcée par rendez-vous sensible, sans
+  accorder plus de droits que les permissions Dolibarr.
+
 ## Références locales
 
 - [Guide actuel : disponibilités, documents et photos](disponibilites-documents-photos-fr.md).

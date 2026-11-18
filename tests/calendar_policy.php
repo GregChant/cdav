@@ -61,6 +61,69 @@ function calendarPolicyEvent($dates, $extra = '')
 		.$dates."\r\n".$extra."END:VEVENT\r\nEND:VCALENDAR\r\n";
 }
 
+// A native alarm returned by the server must never become a new DAV-owned row.
+$nativeReminder = array('rowid' => 41, 'entity' => 1, 'fk_user' => 7, 'fk_soc' => null, 'fk_contact' => null,
+	'typeremind' => 'browser', 'offsetvalue' => 15, 'offsetunit' => 'i', 'status' => 0, 'cdav_reminder_id' => null);
+$alarm15 = array('start' => 1760000000, 'value' => 15, 'unit' => 'i');
+$alarm30 = array('start' => 1760000000, 'value' => 30, 'unit' => 'i');
+$plan = CalendarWritePolicy::planReminders(array($nativeReminder), array($alarm15), 7);
+calendarPolicyAssert($plan === array('delete' => array(), 'preserve' => array(41), 'create' => array()),
+	'An echoed native reminder must retain its ID and ownership without duplicate creation');
+$duplicateNative = array_replace($nativeReminder, array('rowid' => 42));
+$plan = CalendarWritePolicy::planReminders(array($nativeReminder, $duplicateNative), array($alarm15), 7);
+calendarPolicyAssert($plan['preserve'] === array(41, 42) && !$plan['create'] && !$plan['delete'],
+	'Existing duplicate native rows on Dolibarr 24 must not cause another reminder or destructive cleanup');
+$ownedReminder = array_replace($nativeReminder, array('rowid' => 43, 'offsetvalue' => 30, 'cdav_reminder_id' => 43));
+$plan = CalendarWritePolicy::planReminders(array($nativeReminder, $ownedReminder), array($alarm15, $alarm30), 7);
+calendarPolicyAssert($plan['preserve'] === array(41, 43) && !$plan['create'] && !$plan['delete'],
+	'An unchanged DAV-owned reminder must also retain its identity and status');
+$plan = CalendarWritePolicy::planReminders(array($nativeReminder, $ownedReminder), array($alarm15), 7);
+calendarPolicyAssert($plan['delete'] === array(43) && $plan['preserve'] === array(41),
+	'Only an explicitly removed DAV-owned pending reminder may be deleted');
+$plan = CalendarWritePolicy::planReminders(array($nativeReminder), array($alarm15, $alarm30), 7);
+calendarPolicyAssert($plan['create'] === array($alarm30) && $plan['preserve'] === array(41),
+	'Adding an alarm must create only the new offset while preserving the native reminder');
+foreach (array(array(), array($alarm30)) as $replacementAlarms) {
+	try {
+		CalendarWritePolicy::planReminders(array($nativeReminder), $replacementAlarms, 7);
+		throw new RuntimeException('A native reminder was removed or changed through CalDAV');
+	} catch (Sabre\DAV\Exception\Forbidden $e) {
+		// Native alarm changes must be refused before scheduling and business writes.
+	}
+}
+foreach (array(1, -1) as $processedStatus) {
+	$processed = array_replace($nativeReminder, array('status' => $processedStatus));
+	$plan = CalendarWritePolicy::planReminders(array($processed), array(), 7);
+	calendarPolicyAssert($plan['preserve'] === array(41) && !$plan['create'] && !$plan['delete'], 'Sent and failed native reminders must remain historical records');
+	try {
+		CalendarWritePolicy::planReminders(array($processed), array($alarm15), 7);
+		throw new RuntimeException('A processed reminder was rearmed by an echoed alarm');
+	} catch (Sabre\DAV\Exception\Forbidden $e) {
+		// A stale or newly requested alarm must not reset a native processed status.
+	}
+}
+$ownedHistory = array_replace($ownedReminder, array('status' => 1));
+calendarPolicyAssert(CalendarWritePolicy::planReminders(array($ownedHistory), array(), 7)['preserve'] === array(43),
+	'A regular edit must retain processed DAV-owned reminder history too');
+foreach (array(array_replace($nativeReminder, array('fk_user' => 8)), array_replace($nativeReminder, array('fk_soc' => 99)),
+	array_replace($nativeReminder, array('fk_contact' => 99)), array_replace($nativeReminder, array('typeremind' => 'email')),
+	array_replace($nativeReminder, array('typeremind' => 'sms'))) as $foreignReminder) {
+	$plan = CalendarWritePolicy::planReminders(array($foreignReminder), array($alarm15), 7);
+	calendarPolicyAssert($plan['create'] === array($alarm15) && !$plan['delete'], 'Different recipients and non-browser reminder types must never be adopted or deleted');
+}
+$hourReminder = array_replace($nativeReminder, array('offsetvalue' => 60));
+calendarPolicyAssert(CalendarWritePolicy::planReminders(array($hourReminder), array(array('start' => $alarm15['start'], 'value' => 1, 'unit' => 'h')), 7)['preserve'] === array(41),
+	'Equivalent elapsed-hour and minute offsets must reconcile to the same native row');
+$dayReminder = array_replace($nativeReminder, array('offsetvalue' => 1, 'offsetunit' => 'd'));
+try {
+	CalendarWritePolicy::planReminders(array($dayReminder), array(array('start' => $alarm15['start'], 'value' => 24, 'unit' => 'h')), 7);
+	throw new RuntimeException('A calendar-day reminder was silently replaced by a fixed elapsed duration');
+} catch (Sabre\DAV\Exception\Forbidden $e) {
+	// Calendar days and fixed hours differ at daylight-saving boundaries.
+}
+calendarPolicyAssert(count(CalendarWritePolicy::planReminders(array(), array($alarm15, $alarm15), 7)['create']) === 1,
+	'Duplicate incoming alarms must create at most one native reminder');
+
 // The native rich text and generated CRM context must survive repeated GET/PUT.
 $noteParts = array('note_prefix' => "Rendez-vous\nObjet : Native appointment\n\n", 'note_suffix' => "\n\nClient et contact\nTiers : Client SA\n\nProjet\n[PRJ-42] Native project",
 	'native_note' => '<p>Original <strong>rich</strong> note</p>', 'notes_editable' => true);

@@ -1086,6 +1086,11 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($existing['_cdav_description'], $incoming['label'], $incoming['location']);
 			\Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($existing['_cdav_description'], $incoming['description'], $replacementPrefix);
 		}
+		$internal = $this->_parseInternalObjectUri((string) $objectUri);
+		if ($existing !== null && ($internal === null || $internal['source'] === 'ev')) {
+			if ($incoming === null) $incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
+			$this->_planNativeReminders((int) $existing['id'], (int) $calendarId, $incoming['native_reminders'] ?? array());
+		}
 		if ($creating && $existing === null) {
 			$targetId = $this->_findActionCommByUri((string) $objectUri);
 			if ($targetId > 0 && (!$this->_canAttachExistingObject((int) $calendarId, (string) $objectUri, 'ev', $targetId)
@@ -1402,6 +1407,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			return $event;
 		}
 		$nativeAssignments = $event->userassigned;
+		$previousStart = (int) $event->datep;
+		$reminderPlan = $this->_planNativeReminders((int) $eventId, (int) $calendarId, $data['native_reminders'] ?? array(), true);
 		if (empty($data['_native_note_resolved'])) {
 			// CREATE may attach an existing DAV-created event to a different calendar.
 			// Its source calendar still supplies the trusted description envelope.
@@ -1449,8 +1456,11 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if ($event->update($this->user) <= 0) {
 			throw new \Sabre\DAV\Exception('Unable to update the Dolibarr event: '.$event->error);
 		}
+		if ($previousStart !== (int) $event->datep) {
+			$this->_moveNativeReminders($event, (int) $event->datep);
+		}
 		$this->_syncNativeRecurrence((int) $event->id, $data);
-		$this->_syncNativeReminders((int) $event->id, (int) $calendarId, $data['native_reminders'] ?? array());
+		$this->_syncNativeReminders((int) $event->id, (int) $calendarId, $data['native_reminders'] ?? array(), $reminderPlan);
 		$this->_restoreActionCommResourceMetadata((int) $event->id, $event->userassigned, $event->socpeopleassigned);
 		return $event;
 	}
@@ -1468,19 +1478,29 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	private function _moveNativeReminders($event, $start)
 	{
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncommreminder.class.php';
-		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.((int) $event->id)
+		$result = $this->db->query('SELECT * FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.((int) $event->id)
 			.' AND status = 0 AND offsetunit IN (\'y\', \'m\', \'w\', \'d\', \'h\', \'i\') ORDER BY rowid FOR UPDATE');
 		if (!$result) {
 			throw new \Sabre\DAV\Exception('Unable to lock the existing appointment reminders');
 		}
-		$ids = array();
+		$rows = array();
 		while ($row = $this->db->fetch_object($result)) {
-			$ids[] = (int) $row->rowid;
+			$rows[] = $row;
 		}
-		foreach ($ids as $id) {
+		foreach ($rows as $row) {
 			$reminder = new \ActionCommReminder($this->db);
-			if ($reminder->fetch($id) <= 0) {
+			if ($reminder->fetch((int) $row->rowid) <= 0) {
 				throw new \Sabre\DAV\Exception('Unable to load the existing appointment reminder');
+			}
+			// fetchCommon() uses a snapshot read. Retain the current locked fields
+			// if a native reminder editor changed them after this transaction began.
+			foreach (array('entity', 'typeremind', 'fk_user', 'offsetvalue', 'offsetunit', 'status', 'lasterror', 'fk_actioncomm', 'fk_email_template') as $field) {
+				$reminder->{$field} = $row->{$field};
+			}
+			if ($row->fk_user === null) {
+				// Dolibarr 24 allows contact/company recipients while the bundled
+				// reminder class still declares fk_user mandatory. Preserve SQL NULL.
+				$reminder->fields['fk_user']['notnull'] = 0;
 			}
 			$reminder->dateremind = dol_time_plus_duree((int) $start, -1 * (int) $reminder->offsetvalue, (string) $reminder->offsetunit);
 			if ($reminder->update($this->user) <= 0) {
@@ -1561,6 +1581,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			foreach ($candidates as $rows) {
 				if (count($rows) === 1) {
 					$id = $rows[0]['id'];
+					if (!function_exists('checkUserAccessToObject')) {
+						require_once DOL_DOCUMENT_ROOT.'/core/lib/security.lib.php';
+					}
+					if (!\checkUserAccessToObject($this->user, array('contact'), $id, 'socpeople&contact')) {
+						// Keep the external ATTENDEE, but never derive inaccessible
+						// native contact/company relationships from a known email.
+						continue;
+					}
 					$contactAssignments[$id] = array('id' => $id);
 					$contactCompanies[$id] = $rows[0]['socid'];
 				}
@@ -1750,16 +1778,57 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 	}
 
-	/** Replace only DAV-owned browser reminders through Dolibarr's native class. */
-	private function _syncNativeReminders($eventId, $calendarId, array $reminders)
+	/**
+	 * Read the reminder plan before scheduling and recheck it under the native lock.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param int $calendarId Browser-reminder recipient
+	 * @param array $reminders Requested supported relative DISPLAY alarms
+	 * @param bool $lock Whether the enclosing native transaction acquires row locks
+	 * @return array<string,array> Native IDs to delete/preserve and alarms to create
+	 */
+	private function _planNativeReminders($eventId, $calendarId, array $reminders, $lock = false)
 	{
 		if (!getDolGlobalInt('CDAV_NATIVE_REMINDERS') || !getDolGlobalString('AGENDA_REMINDER_BROWSER')
 			|| !$this->_reminderMappingTableAvailable()) {
-			return;
+			return array('delete' => array(), 'preserve' => array(), 'create' => array());
 		}
+		$result = $this->db->query('SELECT r.*, mapping.fk_reminder AS cdav_reminder_id FROM '.MAIN_DB_PREFIX.'actioncomm_reminder r LEFT JOIN '.MAIN_DB_PREFIX.'cdav_reminder mapping ON mapping.fk_reminder = r.rowid AND mapping.fk_actioncomm = r.fk_actioncomm AND mapping.fk_user = r.fk_user WHERE r.fk_actioncomm = '.((int) $eventId).' AND r.fk_user = '.((int) $calendarId)
+			.' AND r.typeremind = \'browser\' ORDER BY r.rowid'.($lock ? ' FOR UPDATE' : ''));
+		if (!$result) {
+			throw new \Sabre\DAV\Exception('Unable to inspect native appointment reminder ownership');
+		}
+		$rows = array();
+		while ($row = $this->db->fetch_object($result)) {
+			$rows[] = (array) $row;
+		}
+		return \Dolibarr\CDav\CalendarWritePolicy::planReminders($rows, array_slice($reminders, 0, 10), (int) $calendarId);
+	}
+
+	/**
+	 * Preserve native and unchanged DAV alarms; create only genuinely new reminders.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param int $calendarId Browser-reminder recipient
+	 * @param array $reminders Requested supported relative DISPLAY alarms
+	 * @param array|null $plan Already locked reminder plan for an existing appointment
+	 * @return void
+	 */
+	private function _syncNativeReminders($eventId, $calendarId, array $reminders, $plan = null)
+	{
+		if ($plan === null) $plan = $this->_planNativeReminders((int) $eventId, (int) $calendarId, $reminders, true);
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncommreminder.class.php';
-		$this->_deleteNativeReminders((int) $eventId, (int) $calendarId);
-		foreach (array_slice($reminders, 0, 10) as $data) {
+		foreach ($plan['delete'] as $id) {
+			$reminder = new \ActionCommReminder($this->db);
+			if ($reminder->fetch((int) $id) <= 0 || $reminder->delete($this->user) <= 0) {
+				throw new \Sabre\DAV\Exception('Unable to remove a DAV-owned native reminder');
+			}
+			if (!$this->db->query('DELETE FROM '.MAIN_DB_PREFIX.'cdav_reminder WHERE fk_actioncomm = '.((int) $eventId)
+				.' AND fk_user = '.((int) $calendarId).' AND fk_reminder = '.((int) $id))) {
+				throw new \Sabre\DAV\Exception('Unable to remove DAV reminder provenance');
+			}
+		}
+		foreach ($plan['create'] as $data) {
 			$reminder = new \ActionCommReminder($this->db);
 			$reminder->entity = $this->_entity();
 			$reminder->dateremind = dol_time_plus_duree((int) $data['start'], -1 * (int) $data['value'], (string) $data['unit']);
@@ -1781,18 +1850,27 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 	}
 
-	/** Remove only reminders recorded as DAV-owned, even if projection is now disabled. */
+	/**
+	 * Remove only scoped DAV-owned browser reminders, even if projection is disabled.
+	 *
+	 * @param int $eventId Native Agenda identifier
+	 * @param int $calendarId Optional recipient scope
+	 * @return void
+	 */
 	private function _deleteNativeReminders($eventId, $calendarId = 0)
 	{
 		if (!$this->_reminderMappingTableAvailable()) return;
 		require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncommreminder.class.php';
 		$where = ' WHERE fk_actioncomm = '.((int) $eventId);
 		if ($calendarId > 0) $where .= ' AND fk_user = '.((int) $calendarId);
-		$result = $this->db->query('SELECT fk_reminder FROM '.MAIN_DB_PREFIX.'cdav_reminder'.$where);
+		$trackedWhere = ' WHERE tracked.fk_actioncomm = '.((int) $eventId);
+		if ($calendarId > 0) $trackedWhere .= ' AND tracked.fk_user = '.((int) $calendarId);
+		$result = $this->db->query('SELECT reminder.* FROM '.MAIN_DB_PREFIX.'cdav_reminder tracked INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_reminder reminder ON reminder.rowid = tracked.fk_reminder AND reminder.fk_actioncomm = tracked.fk_actioncomm AND reminder.fk_user = tracked.fk_user'.$trackedWhere.' FOR UPDATE');
 		if (!$result) throw new \Sabre\DAV\Exception('Unable to inspect DAV-owned reminders');
 		while ($row = $this->db->fetch_object($result)) {
+			if ((string) $row->typeremind !== 'browser' || !empty($row->fk_soc) || !empty($row->fk_contact)) continue;
 			$reminder = new \ActionCommReminder($this->db);
-			if ($reminder->fetch((int) $row->fk_reminder) > 0 && $reminder->delete($this->user) <= 0) {
+			if ($reminder->fetch((int) $row->rowid) > 0 && $reminder->delete($this->user) <= 0) {
 				throw new \Sabre\DAV\Exception('Unable to delete a DAV-owned reminder: '.$reminder->error);
 			}
 		}
@@ -2146,6 +2224,15 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				continue;
 			}
 			try {
+				$interval = VObject\DateTimeParser::parseDuration((string) $alarm->TRIGGER);
+				if ($interval->d > 0 && $interval->d <= 3650 && !$interval->h && !$interval->i && !$interval->s) {
+					// A calendar day is not a fixed 24-hour offset across DST.
+					$unit = $interval->d % 7 === 0 ? 'w' : 'd';
+					$value = $unit === 'w' ? (int) ($interval->d / 7) : $interval->d;
+					$reminders[$value.$unit] = array('start' => (int) $start, 'value' => $value, 'unit' => $unit);
+					if (count($reminders) >= 10) break;
+					continue;
+				}
 				$trigger = $alarm->getEffectiveTriggerTime()->getTimestamp();
 			} catch (\Throwable $e) {
 				continue;
@@ -2156,7 +2243,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			}
 			$unit = '';
 			$value = 0;
-			foreach (array('w' => 604800, 'd' => 86400, 'h' => 3600, 'i' => 60) as $candidate => $divisor) {
+			foreach (array('h' => 3600, 'i' => 60) as $candidate => $divisor) {
 				if ($seconds % $divisor === 0) {
 					$unit = $candidate;
 					$value = (int) ($seconds / $divisor);
@@ -2247,7 +2334,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				$end = $component->DUE->getDateTime()->getTimestamp();
 			} elseif (isset($component->DURATION) && isset($component->DTSTART)) {
 				$endDate = clone $component->DTSTART->getDateTime();
-				$endDate->add(VObject\DateTimeParser::parse($component->DURATION->getValue()));
+				$endDate = $endDate->add(VObject\DateTimeParser::parse($component->DURATION->getValue()));
 				$end = $endDate->getTimestamp();
 			} else {
 				$end = $start + ($fullday ? 86400 : 3600);

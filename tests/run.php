@@ -213,6 +213,20 @@ $compatibleEvent = invokeParser($calendarBackend, '_parseData', array($compatibl
 sameValue('FREQ=DAILY', $compatibleEvent['native_recurrence']['rule'], 'A faithful daily recurrence must be projected natively');
 sameValue(15, $compatibleEvent['native_reminders'][0]['value'], 'A safe DISPLAY alarm must be projected as a native reminder');
 sameValue('i', $compatibleEvent['native_reminders'][0]['unit'], 'A minute alarm must use Dolibarr minute units');
+foreach (array('20260329T100000' => 23 * 3600, '20261025T100000' => 25 * 3600) as $startDate => $elapsed) {
+	$dstAlarm = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:dst-native-reminder\r\nDTSTART;TZID=Europe/Zurich:".$startDate
+		."\r\nDURATION:PT1H\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-P1D\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+	$parsedAlarm = invokeParser($calendarBackend, '_parseData', array($dstAlarm, null));
+	$dstCalendar = Sabre\VObject\Reader::read($dstAlarm);
+	sameValue($elapsed, $parsedAlarm['start'] - $dstCalendar->VEVENT->VALARM->getEffectiveTriggerTime()->getTimestamp(),
+		'The native calendar-day test must cross the actual DST boundary');
+	$dstCalendar->destroy();
+	sameValue(1, $parsedAlarm['native_reminders'][0]['value'], 'A calendar-day alarm must retain its native offset value across DST');
+	sameValue('d', $parsedAlarm['native_reminders'][0]['unit'], 'A calendar-day alarm must not become an elapsed-hour alarm across DST');
+	$fixedAlarm = invokeParser($calendarBackend, '_parseData', array(str_replace('-P1D', '-PT24H', $dstAlarm), null));
+	sameValue(24, $fixedAlarm['native_reminders'][0]['value'], 'A fixed elapsed alarm must retain its hour offset');
+	sameValue('h', $fixedAlarm['native_reminders'][0]['unit'], 'A fixed elapsed alarm must not become a calendar-day alarm');
+}
 sameValue(1, count($compatibleEvent['attachment_links']), 'Managed attachments must never be mirrored as native URL links');
 
 $managedPluginSource = file_get_contents(__DIR__.'/../class/CDavManagedAttachmentPlugin.php');

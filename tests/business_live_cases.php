@@ -434,6 +434,10 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		$linksSql = 'SELECT fk_soc, fk_project, fk_contact, fk_user_action FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId;
 		$linksBefore = (array) liveRow($db, $linksSql);
 		$noteBefore = (string) liveRow($db, 'SELECT note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->note;
+		$nativeReminderBefore = (array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE rowid = '.$reminderId);
+		liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.$eventId)->nb === 1
+			&& (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_reminder WHERE fk_actioncomm = '.$eventId)->nb === 0,
+			'BL24 requires one existing native reminder with no DAV-owned provenance');
 		try {
 			liveAssert(dolibarr_set_const($db, $protectionName, '0', 'chaine', 0, '', $entity) > 0,
 				'Unable to disable the native appointment policy explicitly for its configuration test');
@@ -448,6 +452,11 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 			liveAssert((array) liveRow($db, $linksSql) === $linksBefore, 'Disabling date-only protection also unlocked native business relationships');
 			liveAssert((string) liveRow($db, 'SELECT note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->note === $noteBefore,
 				'An ordinary subject edit copied generated calendar sections into native notes or stripped their original rich text');
+			liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.$eventId)->nb === 1
+				&& (array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE rowid = '.$reminderId) === $nativeReminderBefore,
+				'An ordinary subject edit duplicated or replaced a native reminder, or changed its date, recipient, offset or lifecycle');
+			liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_reminder WHERE fk_actioncomm = '.$eventId)->nb === 0,
+				'An ordinary calendar echo adopted a native reminder into DAV-owned provenance');
 			$origin = liveRow($db, 'SELECT dav_origin FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE fk_object = '.$eventId);
 			liveAssert($origin !== null && (int) $origin->dav_origin === 0, 'An editable native appointment acquired DAV-created provenance');
 		} finally {
@@ -553,6 +562,28 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		liveAssert($limitedAccount->addrights($limitedReadRight, '', '', $entity) > 0,
 			'Unable to grant the restricted native third-party reader role');
 		liveHttpStatus($limitedRead(), array(404), 'BL19 a restricted salesperson cannot read another company contact');
+		$participantUri = $prefix.'-hidden-attendee.ics';
+		$participantPath = $context['limited_calendar_path'].rawurlencode($participantUri);
+		$participantStart = strtotime('+17 days 14:00 UTC');
+		$participantEmail = (string) $linkedContact->email;
+		$participantBody = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:".$prefix."-hidden-attendee-uid\r\n"
+			.'DTSTART:'.gmdate('Ymd\THis\Z', $participantStart)."\r\nDTEND:".gmdate('Ymd\THis\Z', $participantStart + 3600)
+			."\r\nSUMMARY:".$prefix." Inaccessible native contact probe\r\nATTENDEE;ROLE=REQ-PARTICIPANT:mailto:".$participantEmail
+			."\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+		$participantCreate = liveHttp($context['base_url'], $context['limited_login'], $context['limited_password'],
+			'PUT', $participantPath, $participantBody, $calendarHeaders);
+		liveHttpStatus($participantCreate, array(201, 204), 'BL19 known private contact email stays a protocol-only attendee');
+		$participantMapping = liveRow($db, 'SELECT fk_object FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE uuidext = \''.$db->escape($participantUri).'\'');
+		liveAssert($participantMapping !== null, 'The isolated attendee probe appointment was not mapped');
+		$participantId = (int) $participantMapping->fk_object;
+		$events[] = $participantId;
+		$participantNative = liveRow($db, 'SELECT fk_contact, fk_soc FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$participantId);
+		liveAssert($participantNative !== null && empty($participantNative->fk_contact) && empty($participantNative->fk_soc)
+			&& (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm_resources WHERE fk_actioncomm = '.$participantId
+				.' AND element_type = \'socpeople\'')->nb === 0, 'A known email bypassed native contact access and created business relationships');
+		$participantGet = liveHttp($context['base_url'], $context['limited_login'], $context['limited_password'], 'GET', $participantPath);
+		liveHttpStatus($participantGet, array(200), 'BL19 external attendee read-back');
+		liveAssert(str_contains(liveUnfold($participantGet['body']), $participantEmail), 'Native contact protection removed an ordinary external attendee');
 		$companyObject = new Societe($db);
 		liveAssert($companyObject->fetch($companyId) > 0 && $companyObject->add_commercial($admin, (int) $limitedAccount->id) > 0,
 			'Unable to assign the native company salesperson');
@@ -564,6 +595,8 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 			'Unable to restore the restricted native role');
 		$limitedReadRight = 0;
 		liveOk('BL19 contact visibility follows native contact-reader and assigned-salesperson permissions');
+		require_once __DIR__.'/business_project_acl_cases.php';
+		businessLiveProjectAccess($db, $testUser, $admin, $context);
 		require_once __DIR__.'/business_delete_rollback_cases.php';
 		businessLiveDeleteRollback($db, $testUser, $admin, $context);
 	} finally {

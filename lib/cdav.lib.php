@@ -31,6 +31,18 @@ class CdavLib
 	/** @var bool|null Whether booking references can be verified against native event receipts. */
 	private $hasBookingReferenceTables = null;
 
+	/** @var array<int,bool> Native project authorization, cached only for this exporter/request. */
+	private $projectDescriptionAccess = array();
+
+	/** @var array<int>|null Native project IDs available to the authenticated user. */
+	private $readableProjectIds = null;
+
+	/** @var array<int,array<int>> Readable assigned interventions by calendar owner. */
+	private $readableInterventionIds = array();
+
+	/** @var array<int,bool> Native intervention object access decisions. */
+	private $interventionReadAccess = array();
+
 	function __construct($user, $db, $langs, $davDocumentUrls = false)
 	{
 		$this->user 	= $user;
@@ -170,6 +182,81 @@ class CdavLib
 	}
 
 	/**
+	 * Agenda visibility reveals a project link, never permission to read its contents.
+	 * @param object $row Native Agenda/task/intervention row
+	 * @return bool Whether the native project description may be exported
+	 */
+	public function canReadProjectDescription($row)
+	{
+		if (!isModEnabled('project') || !$this->hasRight('projet', 'lire')) return false;
+		$id = property_exists($row, 'cdav_project_id') ? (int) $row->cdav_project_id
+			: (int) ($row->fk_project ?? $row->fk_projet ?? 0);
+		if ($id <= 0) return false;
+		if (!array_key_exists($id, $this->projectDescriptionAccess)) {
+			$this->projectDescriptionAccess[$id] = false;
+			try {
+				if (!class_exists('Project')) require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
+				$project = new \Project($this->db);
+				$this->projectDescriptionAccess[$id] = $project->fetch($id) > 0
+					&& in_array((int) $project->entity, array_map('intval', explode(',', getEntity('project'))), true)
+					&& $project->restrictedProjectArea($this->user, 'read') > 0;
+			} catch (\Throwable $error) {
+				$this->projectDescriptionAccess[$id] = false;
+			}
+		}
+		return $this->projectDescriptionAccess[$id];
+	}
+
+	/**
+	 * Reuse the project-card scope for listing tasks, including private-project roles.
+	 * @return array<int> Native readable project IDs
+	 */
+	private function nativeReadableProjectIds()
+	{
+		if ($this->readableProjectIds !== null) return $this->readableProjectIds;
+		$this->readableProjectIds = array();
+		try {
+			if (!class_exists('Project')) require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
+			$project = new \Project($this->db);
+			$ids = $project->getProjectsAuthorizedForUser($this->user, $this->hasRight('projet', 'all', 'lire') ? 2 : 0, 1, 0);
+			if (is_string($ids) && preg_match('/^[0-9]+(?:,[0-9]+)*$/D', $ids)) {
+				$this->readableProjectIds = array_values(array_filter(array_unique(array_map('intval', explode(',', $ids))), static fn($id) => $id > 0));
+			}
+		} catch (\Throwable $error) {
+			$this->readableProjectIds = array();
+		}
+		return $this->readableProjectIds;
+	}
+
+	/**
+	 * Reuse native intervention entity/commercial checks before selecting line details.
+	 * @param int $calendarId Native calendar owner
+	 * @return array<int> Assigned parent documents readable by the authenticated user
+	 */
+	private function nativeReadableInterventionIds($calendarId)
+	{
+		$calendarId = (int) $calendarId;
+		if (isset($this->readableInterventionIds[$calendarId])) return $this->readableInterventionIds[$calendarId];
+		$this->readableInterventionIds[$calendarId] = array();
+		if (!function_exists('checkUserAccessToObject')) require_once DOL_DOCUMENT_ROOT.'/core/lib/security.lib.php';
+		$result = $this->db->query('SELECT DISTINCT fi.rowid FROM '.MAIN_DB_PREFIX.'fichinter fi INNER JOIN '.MAIN_DB_PREFIX.'element_contact ec ON ec.element_id = fi.rowid INNER JOIN '.MAIN_DB_PREFIX.'c_type_contact tc ON tc.rowid = ec.fk_c_type_contact WHERE tc.element = \'fichinter\' AND tc.source = \'internal\' AND ec.fk_socpeople = '.$calendarId.' AND fi.entity IN ('.getEntity('intervention').')');
+		if (!$result) return array();
+		$ids = array();
+		while ($row = $this->db->fetch_object($result)) $ids[] = (int) $row->rowid;
+		foreach ($ids as $id) {
+			if (!array_key_exists($id, $this->interventionReadAccess)) {
+				try {
+					$this->interventionReadAccess[$id] = (bool) checkUserAccessToObject($this->user, array('ficheinter'), $id, 'fichinter', '', 'fk_soc');
+				} catch (\Throwable $error) {
+					$this->interventionReadAccess[$id] = false;
+				}
+			}
+			if ($this->interventionReadAccess[$id]) $this->readableInterventionIds[$calendarId][] = $id;
+		}
+		return $this->readableInterventionIds[$calendarId];
+	}
+
+	/**
 	 * Build ordinary iCalendar TEXT sections and a trusted editable-note envelope.
 	 * @param object $row Native event, task or intervention export row
 	 * @param string $subject Already selected native subject
@@ -222,7 +309,7 @@ class CdavLib
 		if (str_starts_with((string) ($row->elem_source ?? ''), 'p') && !empty($row->ref)) $projectRef .= '/'.$row->ref;
 		$projectTitle = trim(($projectRef !== '' ? '['.$projectRef.'] ' : '').$this->cleanDolibarrText($row->proj_title ?? ''));
 		if ($projectTitle !== '') $project[] = $projectTitle;
-		$projectNote = $this->cleanDolibarrText($row->proj_desc ?? '');
+		$projectNote = $this->canReadProjectDescription($row) ? $this->cleanDolibarrText($row->proj_desc ?? '') : '';
 		if ($projectNote !== '') $project[] = $projectNote;
 		if ($project) $sections[] = $this->langs->transnoentitiesnoconv('CDavCalendarProject')."\n".implode("\n\n", $project);
 		if ($reference !== '') $sections[] = $this->langs->transnoentitiesnoconv('CDavCalendarBookingReference').' : '.$reference;
@@ -753,6 +840,7 @@ class CdavLib
 					p.ref proj_ref,
 					p.title proj_title,
 					p.description proj_desc,
+					p.rowid AS cdav_project_id,
 					ac.sourceuid,
 					ac.uuidext,
 					(SELECT COUNT(*)
@@ -797,7 +885,7 @@ class CdavLib
 
 		$sql.=' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources AS arcal
 					ON (arcal.fk_actioncomm = a.id AND arcal.element_type = \'user\' AND arcal.fk_element = '.intval($calid).')
-				LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = a.fk_project)
+					LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = a.fk_project AND p.entity IN ('.getEntity('project').'))
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = sp.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				WHERE 	a.code IN (SELECT cac.code FROM '.MAIN_DB_PREFIX.'c_actioncomm cac WHERE cac.type<>\'systemauto\')
@@ -910,7 +998,7 @@ class CdavLib
 			}
 			while ($obj = $this->db->fetch_object($result)) {
 				$attachmentTag = $source === 'ev' ? ':'.$this->getActionCommAttachmentTag((int) $obj->id) : '';
-				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd).$attachmentTag;
+				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd).$attachmentTag.':project-read:'.(int) $this->canReadProjectDescription($obj);
 			}
 		}
 
@@ -929,14 +1017,17 @@ class CdavLib
 	{
 		global $conf;
 
-		if(!isModEnabled('project') || getDolGlobalInt('PROJECT_HIDE_TASKS'))
+		if (!isModEnabled('project') || !$this->hasRight('projet', 'lire') || getDolGlobalInt('PROJECT_HIDE_TASKS')) {
 			return false;
+		}
 
 		if(intval(CDAV_TASK_SYNC)==0 || (intval(CDAV_TASK_SYNC)==1 && $elem_source=='pt'))
 			return false;
 
 		if(intval(CDAV_TASK_SYNC)==0 || (intval(CDAV_TASK_SYNC)==2 && $elem_source=='pe'))
 			return false;
+		$projectIds = $this->nativeReadableProjectIds();
+		if (!$projectIds) return false;
 
 		// TODO : replace GROUP_CONCAT by
 		$sql = 'SELECT
@@ -947,6 +1038,7 @@ class CdavLib
 					p.ref proj_ref,
 					p.title proj_title,
 					p.description proj_desc,
+					p.rowid AS cdav_project_id,
 					s.nom AS soc_nom,
 					s.address soc_address,
 					s.zip soc_zip,
@@ -963,13 +1055,13 @@ class CdavLib
 						LEFT JOIN '.MAIN_DB_PREFIX.'socpeople AS sp ON (sp.rowid=gec.fk_socpeople)
 						WHERE gec.element_id=pt.rowid AND gtc.element="project_task" AND sp.lastname IS NOT NULL) AS other_contacts
 				FROM '.MAIN_DB_PREFIX.'projet_task AS pt
-				LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = pt.fk_projet)
+				LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = pt.fk_projet AND p.entity IN ('.getEntity('project').'))
 				LEFT JOIN '.MAIN_DB_PREFIX.'societe AS s ON (s.rowid = p.fk_soc)
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'element_contact as ec ON (ec.element_id=pt.rowid)
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_type_contact as tc ON (tc.rowid=ec.fk_c_type_contact AND tc.element="project_task" AND tc.source="internal")
 				WHERE tc.element="project_task" AND tc.source="internal" AND ec.fk_socpeople='.intval($calid).'
-				AND pt.entity IN ('.getEntity('project').')';
+				AND pt.entity IN ('.getEntity('project').') AND p.rowid IN ('.implode(',', $projectIds).')';
 		if($oid!==false)
 		{
 			$sql.=' AND pt.rowid = '.intval($oid);
@@ -994,11 +1086,14 @@ class CdavLib
 	{
 		global $conf;
 
-		if(!isModEnabled('ficheinter'))
+		if (!isModEnabled('intervention') || !$this->hasRight('ficheinter', 'lire')) {
 			return false;
+		}
 
 		if(intval(CDAV_INTERV_SYNC)==0)
 			return false;
+		$interventionIds = $this->nativeReadableInterventionIds($calid);
+		if (!$interventionIds) return false;
 
 		$sql = 'SELECT
 					"fi" elem_source,
@@ -1015,6 +1110,7 @@ class CdavLib
 					p.ref proj_ref,
 					p.title proj_title,
 					p.description proj_desc,
+					p.rowid AS cdav_project_id,
 					s.nom AS soc_nom,
 					s.address soc_address,
 					s.zip soc_zip,
@@ -1032,14 +1128,14 @@ class CdavLib
 						WHERE gec.element_id=fi.rowid AND gtc.element="fichinter" AND sp.lastname IS NOT NULL) AS other_contacts
 				FROM '.MAIN_DB_PREFIX.'fichinter AS fi
 				INNER JOIN '.MAIN_DB_PREFIX.'fichinterdet AS fid ON fid.fk_fichinter = fi.rowid
-				LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = fi.fk_projet)
+				LEFT JOIN '.MAIN_DB_PREFIX.'projet AS p ON (p.rowid = fi.fk_projet AND p.entity IN ('.getEntity('project').'))
 				LEFT JOIN '.MAIN_DB_PREFIX.'societe AS s ON (s.rowid = fi.fk_soc)
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as cos ON cos.rowid = s.fk_pays
 				LEFT JOIN '.MAIN_DB_PREFIX.'element_contact as ec ON (ec.element_id=fi.rowid)
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_type_contact as gtc ON (gtc.rowid=ec.fk_c_type_contact AND gtc.element="fichinter" AND gtc.source="internal")
 				WHERE gtc.element="fichinter" AND gtc.source="internal" AND ec.fk_socpeople='.intval($calid).'
 				AND fid.date IS NOT NULL
-				AND fi.entity IN ('.getEntity('intervention').')';
+				AND fi.entity IN ('.getEntity('intervention').') AND fi.rowid IN ('.implode(',', $interventionIds).')';
 		if($oid!==false)
 		{
 			$sql.=' AND fid.rowid = '.intval($oid);

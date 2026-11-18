@@ -9,6 +9,87 @@ use Sabre\VObject;
 class CalendarWritePolicy
 {
 	/**
+	 * Reconcile user browser alarms without adopting or replacing native reminders.
+	 *
+	 * @param array<array<string,mixed>> $existing Native rows with optional DAV provenance
+	 * @param array<array<string,mixed>> $requested Parsed supported DISPLAY alarms
+	 * @param int $calendarId Reminder recipient whose calendar is being written
+	 * @return array<string,array> Native IDs to preserve/delete and genuinely new alarms
+	 */
+	public static function planReminders(array $existing, array $requested, $calendarId)
+	{
+		$create = array();
+		foreach ($requested as $reminder) {
+			$key = self::reminderKey((int) $reminder['value'], (string) $reminder['unit']);
+			if ($key === null) {
+				throw new Forbidden('This calendar alarm cannot be represented by a native Dolibarr reminder.');
+			}
+			$create[$key] = $reminder;
+		}
+		$requestedKeys = array_fill_keys(array_keys($create), true);
+		$rows = array();
+		$pendingKeys = array();
+		foreach ($existing as $row) {
+			if ((int) $row['fk_user'] !== (int) $calendarId || (string) $row['typeremind'] !== 'browser'
+				|| !empty($row['fk_soc']) || !empty($row['fk_contact'])) {
+				continue;
+			}
+			$key = self::reminderKey((int) $row['offsetvalue'], (string) $row['offsetunit']);
+			if ($key === null) {
+				continue;
+			}
+			$row['key'] = $key;
+			$rows[] = $row;
+			if ((int) $row['status'] === 0) {
+				$pendingKeys[$key] = true;
+			}
+		}
+		$delete = array();
+		$preserve = array();
+		foreach ($rows as $row) {
+			$id = (int) $row['rowid'];
+			$owned = $id > 0 && (int) ($row['cdav_reminder_id'] ?? 0) === $id;
+			$requestedHere = isset($requestedKeys[$row['key']]);
+			if ((int) $row['status'] === 0 && !$requestedHere) {
+				if (!$owned) {
+					throw new Forbidden('A reminder created in Dolibarr must be changed or removed in Dolibarr.');
+				}
+				$delete[] = $id;
+				continue;
+			}
+			if ($requestedHere) {
+				if ((int) $row['status'] !== 0 && !isset($pendingKeys[$row['key']])) {
+					throw new Forbidden('A processed Dolibarr reminder cannot be rearmed by a calendar client.');
+				}
+				unset($create[$row['key']]);
+			}
+			$preserve[] = $id;
+		}
+		return array('delete' => $delete, 'preserve' => $preserve, 'create' => array_values($create));
+	}
+
+	/**
+	 * Calendar days remain distinct from fixed elapsed hours across DST changes.
+	 *
+	 * @param int $value Positive native offset
+	 * @param string $unit Native offset unit
+	 * @return string|null Equivalent supported alarm key
+	 */
+	private static function reminderKey($value, $unit)
+	{
+		if ($value <= 0) return null;
+		if ($unit === 'w' || $unit === 'd') {
+			$days = $value * ($unit === 'w' ? 7 : 1);
+			return $days <= 3650 ? 'days:'.$days : null;
+		}
+		if ($unit === 'h' || $unit === 'i') {
+			$seconds = $value * ($unit === 'h' ? 3600 : 60);
+			return $seconds <= 10 * 365 * 86400 ? 'seconds:'.$seconds : null;
+		}
+		return null;
+	}
+
+	/**
 	 * Recover editable notes without importing the generated customer/project context.
 	 *
 	 * @param array<string,mixed> $parts Authoritative description envelope from the exporter
