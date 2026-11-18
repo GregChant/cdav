@@ -28,6 +28,7 @@ use Sabre\DAV\Exception\Forbidden;
 require_once __DIR__.'/CDavBusinessPolicy.php';
 require_once __DIR__.'/CDavCalendarWritePolicy.php';
 require_once __DIR__.'/CDavInvitationPolicy.php';
+require_once __DIR__.'/CDavCalendarReadCache.php';
 
 class Dolibarr extends AbstractBackend implements SyncSupport {
 
@@ -99,6 +100,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	/** @var array<string,array> Scheduling receipts captured under the native lock. */
 	private $committedSchedulingChanges = array();
 
+	/** @var \Dolibarr\CDav\CalendarReadCache|null One request's bounded read representations. */
+	private $calendarReadCache = null;
+
 	/**
 	 * List of CalDAV properties, and how they map to database fieldnames
 	 * Add your own properties by simply adding on to this array.
@@ -118,17 +122,21 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	/**
 	 * Creates the backend
 	 *
-	 * @param user
-	 * @param db
-	 * @param langs
+	 * @param object $user Authenticated native user
+	 * @param object $db Native database connection
+	 * @param object $langs Native translations
+	 * @param object $cdavLib Native calendar exporter
+	 * @param bool $cacheReads Whether this HTTP request permits read reuse
 	 */
-	function __construct($user,$db,$langs, $cdavLib) {
+	public function __construct($user, $db, $langs, $cdavLib, bool $cacheReads = false)
+	{
 		global $conf;
 
 		$this->user = $user;
 		$this->db = $db;
 		$this->langs = $langs;
 		$this->cdavLib = $cdavLib;
+		$this->calendarReadCache = new \Dolibarr\CDav\CalendarReadCache((bool) $cacheReads);
 		$this->syncStore = new \Dolibarr\CDav\SyncStore($db, (int) ($conf->entity ?? 1));
 		$this->managedAttachmentStore = new \Dolibarr\CDav\ManagedAttachmentStore($db, $user);
 		$this->langs->load("users");
@@ -189,7 +197,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			if ((int) $row['rowid'] !== (int) $this->user->id && !$this->_hasAgendaRight('allactions', 'read')) {
 				continue;
 			}
-			$collectionTag = $this->cdavLib->getCalendarCollectionTag((int) $row['rowid']);
+			$objects = array();
+			foreach ($this->getCalendarObjects((int) $row['rowid']) as $object) {
+				$objects[(string) $object['uri']] = (string) ($object['etag'] ?? '');
+			}
+			ksort($objects, SORT_STRING);
+			$collectionTag = hash('sha256', CDAV_URI_KEY.'|'.serialize($objects));
 
 			$calendar = [
 				'id'                                                                 => $row['rowid'],
@@ -205,10 +218,6 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				'{http://apple.com/ns/ical/}calendar-color'                          => ($row['color']=='')?'':('#'.$row['color']),
 
 			];
-			$objects = array();
-			foreach ($this->getCalendarObjects((int) $row['rowid']) as $object) {
-				$objects[(string) $object['uri']] = (string) ($object['etag'] ?? '');
-			}
 			$syncToken = $this->syncStore->synchronize('cal', (int) $row['rowid'], $objects);
 			if ($syncToken !== null) {
 				$calendar['{DAV:}sync-token'] = $syncToken;
@@ -231,6 +240,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @return string
 	 */
 	function createCalendar($principalUri, $calendarUri, array $properties) {
+		$this->_disableCalendarReadCache();
 
 		debug_log("createCalendar( $principalUri )");
 
@@ -254,6 +264,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @return void
 	 */
 	function updateCalendar($calendarId, \Sabre\DAV\PropPatch $propPatch) {
+		$this->_disableCalendarReadCache();
 
 		debug_log("updateCalendar( $calendarId )");
 
@@ -270,6 +281,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @return void
 	 */
 	function deleteCalendar($calendarId) {
+		$this->_disableCalendarReadCache();
 
 		debug_log("deleteCalendar( $calendarId )");
 
@@ -311,10 +323,76 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 
 		debug_log("getCalendarObjects( $calendarId )");
 
-		if (!$this->_calendarUserExists($calendarId)) {
+		if (!$this->_hasAgendaRight('myactions', 'read')
+			|| ((int) $calendarId !== (int) $this->user->id && !$this->_hasAgendaRight('allactions', 'read'))
+			|| !$this->_calendarUserExists($calendarId)) {
 			return array();
 		}
-		return $this->cdavLib->getFullCalendarObjects($calendarId, false);
+		$context = $this->_calendarReadContext($calendarId);
+		if ($context === null) return $this->cdavLib->getFullCalendarObjects($calendarId, false);
+		$cached = $this->calendarReadCache->getCollection($context);
+		if ($cached !== null) return $cached;
+		// A new enumeration must not revive membership from an incomplete older scan.
+		$this->calendarReadCache->forgetContext($context);
+		try {
+			$objects = $this->cdavLib->getFullCalendarObjects($calendarId, false, function (array $object, $source) use ($context) {
+				$this->_cacheCalendarReadObject($context, $object, $source);
+			});
+			$uris = array();
+			$canComplete = count($objects) < \Dolibarr\CDav\CalendarReadCache::MAX_ENTRIES;
+			foreach ($objects as &$object) {
+				if ($canComplete) $uris[] = (string) $object['uri'];
+				$full = $this->calendarReadCache->getObject($context, (string) $object['uri']);
+				if ($full !== null && (string) $full['etag'] === (string) $object['etag']) $object = $full;
+			}
+			unset($object);
+			if ($canComplete) $this->calendarReadCache->completeCollection($context, $uris);
+			return $objects;
+		} catch (\Throwable $error) {
+			$this->calendarReadCache->forgetContext($context);
+			throw $error;
+		}
+	}
+
+	/**
+	 * Keep read snapshots separate by authenticated actor, entity, locale and calendar.
+	 * @param int $calendarId Native calendar owner
+	 * @return string|null Request-local context, null when fresh reads are mandatory
+	 */
+	private function _calendarReadContext($calendarId)
+	{
+		if ($this->calendarReadCache === null || !$this->calendarReadCache->isEnabled()) return null;
+		return hash('sha256', serialize(array((int) $this->user->id, $this->_entity(),
+			(string) $this->langs->getDefaultLang(), date_default_timezone_get(), (int) $calendarId)));
+	}
+
+	/**
+	 * Admit only representations whose canonical URI preserves native routing.
+	 * Legacy external mappings can resemble another object's internal source/ID.
+	 *
+	 * @param string $context Authenticated calendar context
+	 * @param array $object Full native calendar representation
+	 * @param string $source Native SQL source, independent of the mapped URI
+	 * @return void
+	 */
+	private function _cacheCalendarReadObject($context, array $object, $source)
+	{
+		if (!$this->calendarReadCache->isEnabled()) return;
+		$internal = $this->_parseInternalObjectUri((string) $object['uri']);
+		if ($internal !== null && ((int) $internal['id'] !== (int) $object['id'] || $internal['source'] !== $source)) {
+			$this->_disableCalendarReadCache();
+			return;
+		}
+		$this->calendarReadCache->putObject($context, $object);
+	}
+
+	/**
+	 * Drop all snapshots permanently before preflight or any native write.
+	 * @return void
+	 */
+	private function _disableCalendarReadCache()
+	{
+		if ($this->calendarReadCache !== null) $this->calendarReadCache->disable();
 	}
 
 	/**
@@ -356,6 +434,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			return $calevent;
 		if (!$this->_calendarUserExists($calid))
 			return $calevent;
+		$context = $this->_calendarReadContext($calid);
+		if ($context !== null) {
+			$cached = $this->calendarReadCache->getObject($context, (string) $objectUri);
+			if ($cached !== null) {
+				$cached['calendarid'] = $calendarId;
+				return $cached;
+			}
+		}
 
 		if($elem_source=='ev') // Calendar Events
 			$sql = $this->cdavLib->getSqlCalEvents($calid, $oid, $internalObject !== null ? false : $objectUri).' ORDER BY a.id LIMIT 1';
@@ -395,6 +481,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			? 'getCalendarObject: not found'
 			: 'getCalendarObject: found id '.((int) $calevent['id']));
 
+		if ($context !== null && $calevent !== null) $this->_cacheCalendarReadObject($context, $calevent, $elem_source);
 		return $calevent;
 	}
 
@@ -446,6 +533,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @return string|null
 	 */
 	function createCalendarObject($calendarId, $objectUri, $calendarData) {
+		$this->_disableCalendarReadCache();
 
 		debug_log("createCalendarObject( $calendarId , $objectUri )");
 		$this->_validateCalendarObjectUri($objectUri);
@@ -658,6 +746,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @return string|null
 	 */
 	function updateCalendarObject($calendarId, $objectUri, $calendarData) {
+		$this->_disableCalendarReadCache();
 
 		debug_log("updateCalendarObject( $calendarId , $objectUri )");
 		$this->_validateCalendarObjectUri($objectUri);
@@ -1050,6 +1139,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	/** Resolve a writable native appointment for the RFC 8607 HTTP plugin. */
 	public function resolveManagedAttachmentTarget($calendarId, $objectUri)
 	{
+		$this->_disableCalendarReadCache();
 		if (!getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS') || !$this->_canWriteCalendar($calendarId)) {
 			throw new Forbidden('Managed attachments are disabled or this calendar is read-only');
 		}
@@ -1073,6 +1163,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 */
 	public function validateProtectedCalendarWrite($calendarId, $objectUri, $calendarData, $creating = false)
 	{
+		$this->_disableCalendarReadCache();
 		$existing = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 		$internal = $this->_parseInternalObjectUri((string) $objectUri);
 		if (!$creating && $existing !== null && ($internal === null || $internal['source'] === 'ev')) {
@@ -1405,6 +1496,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	/** Serialize calendar mutations on a native Dolibarr user row. */
 	private function _lockCalendarOwner($calendarId)
 	{
+		$this->_disableCalendarReadCache();
 		$lockResult = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'user WHERE rowid = '.((int) $calendarId)
 			.' AND statut > 0 AND fk_soc IS NULL AND entity IN ('.getEntity('user').') FOR UPDATE');
 		if (!$lockResult || !$this->db->fetch_object($lockResult)) {
@@ -1443,6 +1535,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 */
 	public function expectCalendarVersion($calendarId, $objectUri, $etag)
 	{
+		$this->_disableCalendarReadCache();
 		$this->expectedCalendarEtags[((int) $calendarId).'\n'.(string) $objectUri] = (string) $etag;
 	}
 
@@ -2765,6 +2858,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @return void
 	 */
 	function deleteCalendarObject($calendarId, $objectUri) {
+		$this->_disableCalendarReadCache();
 
 		debug_log("deleteCalendarObject( $calendarId , $objectUri) ");
 		$this->_validateCalendarObjectUri($objectUri);
@@ -3067,6 +3161,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		foreach ($this->getCalendarObjects((int) $calendarId) as $object) {
 			$objects[(string) $object['uri']] = (string) ($object['etag'] ?? '');
 		}
+		ksort($objects, SORT_STRING);
 		return $this->syncStore->getChanges('cal', (int) $calendarId, $syncToken, $limit, $objects);
 	}
 
@@ -3277,6 +3372,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 */
 	public function processSchedulingReply($senderPrincipal, $calendarData)
 	{
+		$this->_disableCalendarReadCache();
 		if (!getDolGlobalInt('CDAV_SCHEDULING') || !$this->_canAccessSchedulingPrincipal($senderPrincipal)
 			|| !$this->_canWriteCalendar((int) $this->user->id)) {
 			throw new Forbidden('Not allowed to answer from this scheduling outbox.');

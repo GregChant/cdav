@@ -1432,6 +1432,8 @@ try {
 	liveHttpStatus($cardDeleteSync, array(207), 'CardDAV tombstone sync');
 	liveAssert(str_contains($cardDeleteSync['body'], rawurlencode($contactUri)) && str_contains($cardDeleteSync['body'], 'HTTP/1.1 404'), 'CardDAV sync did not return the soft-deactivated contact as a tombstone');
 	liveOk('remote company/contact deletion is soft-only, hidden from DAV and journaled as tombstones');
+	require __DIR__.'/calendar_read_live_cases.php';
+	calendarReadLiveChecks($db, $testUser, $davBaseUrl, $login, $password, $calendarPath, $prefix, $created['events']);
 } catch (Throwable $throwable) {
 	$failure = $throwable;
 } finally {

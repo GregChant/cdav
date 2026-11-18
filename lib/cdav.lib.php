@@ -458,6 +458,8 @@ class CdavLib
 			if ($bookingRow !== null) throw $e;
 			dol_syslog(__METHOD__.': unable to export native recurrence: '.$e->getMessage(), LOG_ERR);
 			return $calendarData;
+		} finally {
+			if (isset($calendar)) $calendar->destroy();
 		}
 	}
 
@@ -514,6 +516,8 @@ class CdavLib
 		} catch (\Throwable $e) {
 			dol_syslog(__METHOD__.': unable to export native reminders: '.$e->getMessage(), LOG_ERR);
 			return $calendarData;
+		} finally {
+			if (isset($calendar)) $calendar->destroy();
 		}
 	}
 
@@ -611,6 +615,9 @@ class CdavLib
 				debug_log('Unable to restore CalDAV metadata for event '.$eventId.': '.$e->getMessage());
 			}
 			return $calendarData;
+		} finally {
+			if (isset($generated)) $generated->destroy();
+			if (isset($stored)) $stored->destroy();
 		}
 	}
 
@@ -742,6 +749,8 @@ class CdavLib
 		} catch (\Throwable $e) {
 			dol_syslog(__METHOD__.': unable to export appointment attachments: '.$e->getMessage(), LOG_ERR);
 			return $calendarData;
+		} finally {
+			if (isset($calendar)) $calendar->destroy();
 		}
 	}
 
@@ -1432,14 +1441,15 @@ class CdavLib
 						}
 					}
 					$caldata = $times->serialize();
-					$times->destroy();
-					$calendar->destroy();
 				} else {
 					$caldata = $calendar->serialize();
 				}
 			} catch (\Throwable $e) {
 				if ($booking) throw $e;
 				dol_syslog(__METHOD__.': invalid generated calendar: '.$e->getMessage(), LOG_ERR);
+			} finally {
+				if (isset($times)) $times->destroy();
+				if (isset($calendar)) $calendar->destroy();
 			}
 		}
 
@@ -1465,7 +1475,16 @@ class CdavLib
 		return ((int) $obj->id).'-'.$source.'-'.CDAV_URI_KEY;
 	}
 
-	public function getFullCalendarObjects($calendarId, $bCalendarData)
+	/**
+	 * Export the visible native collection with an optional per-object observer.
+	 * The observer receives the full GET representation without retaining a second list.
+	 *
+	 * @param int $calendarId Native calendar owner
+	 * @param bool $bCalendarData Whether the returned list includes calendar bodies
+	 * @param callable|null $onObject Optional observer receiving one full native record and its native source
+	 * @return array Native collection records in their historical representation
+	 */
+	public function getFullCalendarObjects($calendarId, $bCalendarData, ?callable $onObject = null)
 	{
 		if(function_exists("debug_log"))
 			debug_log("getCalendarObjects( $calendarId , $bCalendarData )");
@@ -1490,6 +1509,7 @@ class CdavLib
 			if($sql=='')
 				continue;
 			$result = $this->db->query($sql);
+			if (!$result) throw new \RuntimeException('Unable to read the native calendar collection.');
 
 			if ($result)
 			{
@@ -1499,30 +1519,20 @@ class CdavLib
 					// stay stable between collection listings and individual GETs.
 					$calendardata = $this->toVCalendar($calid, $obj, true);
 
-					if($bCalendarData)
-					{
-						$calevents[] = [
-							'calendardata' => $calendardata,
-							'uri' => $this->getCalendarObjectUri($obj, $elem_source),
-							'lastmodified' => strtotime($obj->lastupd),
-							'etag' => '"'.md5($calendardata).'"',
-							'calendarid'   => $calendarId,
-							'size' => strlen($calendardata),
-							'component' => strpos($calendardata, 'BEGIN:VEVENT') !== false ? 'vevent' : 'vtodo',
-						];
+					$record = array(
+						'uri' => $this->getCalendarObjectUri($obj, $elem_source),
+						'lastmodified' => strtotime($obj->lastupd),
+						'etag' => '"'.md5($calendardata).'"',
+						'calendarid' => $calendarId,
+						'size' => strlen($calendardata),
+						'component' => strpos($calendardata, 'BEGIN:VEVENT') !== false ? 'vevent' : 'vtodo',
+					);
+					if ($onObject !== null) {
+						$fullRecord = array('id' => $obj->id, 'calendardata' => $calendardata) + $record;
+						if (isset($obj->_cdav_description) && is_array($obj->_cdav_description)) $fullRecord['_cdav_description'] = $obj->_cdav_description;
+						$onObject($fullRecord, $elem_source);
 					}
-					else
-					{
-						$calevents[] = [
-							// 'calendardata' => $calendardata,  not necessary because etag+size are present
-							'uri' => $this->getCalendarObjectUri($obj, $elem_source),
-							'lastmodified' => strtotime($obj->lastupd),
-							'etag' => '"'.md5($calendardata).'"',
-							'calendarid'   => $calendarId,
-							'size' => strlen($calendardata),
-							'component' => strpos($calendardata, 'BEGIN:VEVENT') !== false ? 'vevent' : 'vtodo',
-						];
-					}
+					$calevents[] = $bCalendarData ? array('calendardata' => $calendardata) + $record : $record;
 				}
 			}
 		}
