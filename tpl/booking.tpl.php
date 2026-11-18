@@ -10,6 +10,7 @@ $bookingKey = is_string($bookingKey ?? null) ? $bookingKey : '';
 $bookingDate = is_string($bookingDate ?? null) ? $bookingDate : '';
 $bookingTimezone = new DateTimeZone($bookingConfig['timezone'] ?? 'UTC');
 $bookingLanguage = substr((string) ($langs->defaultlang ?? 'en_US'), 0, 2) === 'fr' ? 'fr' : 'en';
+$bookingProfileLabel = !empty($bookingProfile) && is_string($bookingProfile['label'] ?? null) ? mb_substr($bookingProfile['label'], 0, 120) : '';
 $bookingValues = is_array($bookingValues ?? null) ? $bookingValues : array();
 foreach (array('name', 'email', 'phone', 'subject', 'address') as $bookingValueName) {
 	if (!is_string($bookingValues[$bookingValueName] ?? '')) {
@@ -104,10 +105,24 @@ if (is_array($bookingResult ?? null) && array_key_exists('segments', $bookingRes
 	}
 }
 $bookingToday = (new DateTimeImmutable('now', $bookingTimezone))->format('Y-m-d');
-if (!isset($bookingLastDate)) {
-	$bookingLastDate = (new DateTimeImmutable('@'.\Dolibarr\CDav\BookingAvailability::horizonEnd($bookingConfig, time())))
-		->setTimezone($bookingTimezone)->format('Y-m-d');
+$bookingValidity = array();
+foreach (array('valid_from', 'valid_until') as $bookingValidityField) {
+	$bookingValidityValue = $bookingConfig[$bookingValidityField] ?? '';
+	if (!is_string($bookingValidityValue) || !preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/D', $bookingValidityValue)) continue;
+	$bookingValidityDate = DateTimeImmutable::createFromFormat('!Y-m-d', $bookingValidityValue, $bookingTimezone);
+	if ($bookingValidityDate && $bookingValidityDate->format('Y-m-d') === $bookingValidityValue) $bookingValidity[$bookingValidityField] = $bookingValidityValue;
 }
+$bookingFirstDate = max($bookingToday, $bookingValidity['valid_from'] ?? $bookingToday);
+if (!isset($bookingLastDate)) {
+	try {
+		$bookingLastDate = (new DateTimeImmutable('@'.\Dolibarr\CDav\BookingAvailability::horizonEnd($bookingConfig, time())))
+			->setTimezone($bookingTimezone)->format('Y-m-d');
+	} catch (InvalidArgumentException $bookingValidityException) {
+		$bookingLastDate = (new DateTimeImmutable($bookingToday, $bookingTimezone))->modify('-1 day')->format('Y-m-d');
+	}
+}
+if (isset($bookingValidity['valid_until'])) $bookingLastDate = min($bookingLastDate, $bookingValidity['valid_until']);
+$bookingDateWindowOpen = $bookingFirstDate <= $bookingLastDate;
 $bookingCalendarMonth = null;
 $bookingCalendarDays = array();
 $bookingCalendarPrevious = null;
@@ -142,6 +157,9 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<meta name="robots" content="noindex,nofollow">
 	<title><?php print dol_escape_htmltag($langs->trans('CDavBookingTitle')); ?></title>
+	<?php if ($bookingMultiple && !empty($bookingProfile) && empty($bookingResult)) { ?>
+	<script src="<?php print dol_escape_htmltag(dol_buildpath('/cdav/js/booking.js', 1)); ?>" defer></script>
+	<?php } ?>
 	<?php if (!empty($bookingPublicIdentity['company_favicon'])) { ?>
 	<link rel="icon" href="<?php print dol_escape_htmltag($bookingPublicIdentity['company_favicon']); ?>">
 	<?php } ?>
@@ -151,6 +169,7 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 		main { max-width: 48rem; margin: 2rem auto; padding: 1.5rem; background: white; border: 1px solid #dce2e8; border-radius: .6rem; }
 		h1 { font-size: 1.8rem; line-height: 1.2; margin-top: 0; }
 		h2, legend { font-size: 1.15rem; font-weight: 650; }
+		#booking-profile-name { font-weight: 650; overflow-wrap: anywhere; }
 		a { color: #174a78; }
 		label { display: block; font-weight: 600; }
 		input, textarea, button { font: inherit; }
@@ -158,7 +177,8 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 			width: 100%; padding: .6rem; border: 1px solid #637385; border-radius: .25rem;
 		}
 		textarea { min-height: 6rem; resize: vertical; }
-		button { margin-top: 1rem; padding: .6rem 1rem; border: 1px solid #174a78; border-radius: .3rem; background: #174a78; color: white; cursor: pointer; }
+		button, .booking-again { margin-top: 1rem; padding: .6rem 1rem; border: 1px solid #174a78; border-radius: .3rem; background: #174a78; color: white; cursor: pointer; }
+		.booking-again { display: inline-block; text-decoration: none; }
 		fieldset { padding: 1rem; border: 1px solid #bdc7d1; margin: 1.2rem 0; }
 		.slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .5rem; }
 		.slot { display: flex; gap: .5rem; align-items: center; font-weight: 400; border: 1px solid #bdc7d1; border-radius: .3rem; padding: .6rem; }
@@ -227,6 +247,7 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 	</header>
 	<?php } ?>
 	<h1><?php print dol_escape_htmltag($langs->trans('CDavBookingTitle')); ?></h1>
+	<?php if ($bookingProfileLabel !== '') { ?><p id="booking-profile-name"><?php print dol_escape_htmltag($bookingProfileLabel); ?></p><?php } ?>
 	<?php if ($bookingPublicIdentity !== null) { ?>
 	<section class="professional-card" id="booking-professional" aria-labelledby="booking-professional-name">
 		<?php if ($bookingPublicIdentity['professional_photo'] !== '') { ?><img src="<?php print dol_escape_htmltag($bookingPublicIdentity['professional_photo']); ?>" alt="<?php print dol_escape_htmltag($langs->trans('CDavBookingProfessionalPhotoAlt', $bookingPublicIdentity['professional_name'] ?: $langs->trans('CDavBookingProfessional'))); ?>" width="88" height="88" decoding="async"><?php } ?>
@@ -252,6 +273,7 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 	<?php if (!empty($bookingResult)) { ?>
 		<section class="notice success" role="status" aria-labelledby="booking-confirmation">
 			<h2 id="booking-confirmation"><?php print dol_escape_htmltag($langs->trans('CDavBookingConfirmation')); ?></h2>
+			<?php if (($bookingResult['notification_warning'] ?? false) === true) { ?><p class="notice" id="booking-email-warning" role="status"><?php print dol_escape_htmltag($langs->trans('CDavBookingEmailWarning')); ?></p><?php } ?>
 			<dl>
 				<dt><?php print dol_escape_htmltag($langs->trans('CDavBookingReference')); ?></dt>
 				<dd><?php print dol_escape_htmltag((string) $bookingResult['reference']); ?></dd>
@@ -275,10 +297,23 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 				<?php } ?>
 			</dl>
 			<p><?php print dol_escape_htmltag($langs->trans('CDavBookingKeepReference')); ?></p>
+			<p><a class="booking-again" id="booking-again" href="?key=<?php print rawurlencode($bookingKey); ?>&amp;lang=<?php print rawurlencode($bookingLanguage); ?>&amp;date=<?php print (new DateTimeImmutable('@'.((int) $bookingResult['start'])))->setTimezone($bookingTimezone)->format('Y-m-d'); ?>"><?php print dol_escape_htmltag($langs->trans('CDavBookingBookAgain')); ?></a></p>
 		</section>
 	<?php } elseif (!empty($bookingProfile)) { ?>
 		<p><?php print dol_escape_htmltag($langs->trans($bookingMultiple ? 'CDavBookingUnitDuration' : 'CDavBookingDuration')); ?> : <?php print (int) $bookingConfig['duration']; ?> <?php print dol_escape_htmltag($langs->trans('CDavBookingMinutes')); ?>.<br>
 		<?php print dol_escape_htmltag($langs->trans('CDavBookingTimezone')); ?> : <strong><?php print dol_escape_htmltag($bookingTimezone->getName()); ?></strong>.</p>
+		<?php if ($bookingValidity) { ?>
+		<p class="notice" id="booking-validity"><?php
+		if (isset($bookingValidity['valid_from'], $bookingValidity['valid_until'])) {
+			print dol_escape_htmltag($langs->trans('CDavBookingValidityBetween', $bookingValidity['valid_from'], $bookingValidity['valid_until']));
+		} elseif (isset($bookingValidity['valid_from'])) {
+			print dol_escape_htmltag($langs->trans('CDavBookingValidityFrom', $bookingValidity['valid_from']));
+		} else {
+			print dol_escape_htmltag($langs->trans('CDavBookingValidityUntil', $bookingValidity['valid_until']));
+		}
+		?></p>
+		<?php } ?>
+		<?php if (!$bookingDateWindowOpen) { ?><p class="notice" id="booking-validity-empty" role="status"><?php print dol_escape_htmltag($langs->trans('CDavBookingValidityEmpty')); ?></p><?php } ?>
 		<?php if ($bookingCalendarMonth) { ?>
 		<section class="calendar" aria-labelledby="booking-calendar-heading" aria-describedby="booking-calendar-help">
 			<h2 id="booking-calendar-heading"><?php print dol_escape_htmltag($langs->trans('CDavBookingCalendar')); ?></h2>
@@ -336,8 +371,8 @@ $bookingWeekdays = array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
 			<input type="hidden" name="lang" value="<?php print dol_escape_htmltag($bookingLanguage); ?>">
 			<?php if ($bookingSelectionCsv !== '') { ?><input type="hidden" name="selection" value="<?php print dol_escape_htmltag($bookingSelectionCsv); ?>"><?php } ?>
 			<label for="booking-date"><?php print dol_escape_htmltag($langs->trans('CDavBookingDate')); ?></label>
-			<input type="date" id="booking-date" name="date" required min="<?php print dol_escape_htmltag($bookingToday); ?>" max="<?php print dol_escape_htmltag($bookingLastDate); ?>" value="<?php print dol_escape_htmltag($bookingDate); ?>">
-			<button type="submit"><?php print dol_escape_htmltag($langs->trans('CDavBookingShowSlots')); ?></button>
+			<input type="date" id="booking-date" name="date" required min="<?php print dol_escape_htmltag($bookingFirstDate); ?>" max="<?php print dol_escape_htmltag($bookingLastDate); ?>" value="<?php print dol_escape_htmltag($bookingDate); ?>"<?php if (!$bookingDateWindowOpen) print ' disabled aria-describedby="booking-validity-empty"'; ?>>
+			<button type="submit"<?php if (!$bookingDateWindowOpen) print ' disabled'; ?>><?php print dol_escape_htmltag($langs->trans('CDavBookingShowSlots')); ?></button>
 		</form>
 		<?php if ($bookingMultiple) { ?>
 		<p class="notice"><?php print dol_escape_htmltag($langs->trans($bookingAllowsContiguous && $bookingAllowsSplit ? 'CDavBookingSelectionModesBoth' : ($bookingAllowsContiguous ? 'CDavBookingSelectionModesContiguous' : 'CDavBookingSelectionModesSplit'))); ?></p>
