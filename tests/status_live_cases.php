@@ -55,6 +55,7 @@ function appointmentStatusLiveForm(array $context, int $id, ?string $status = nu
 	$url = substr($context['base_url'], 0, strpos($context['base_url'], '/custom/cdav/')).'/comm/action/card.php?id='.$id.'&action=edit';
 	$handle = curl_init($url);
 	curl_setopt_array($handle, array(CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
+		CURLOPT_USERAGENT => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
 		CURLOPT_COOKIEFILE => '', CURLOPT_TIMEOUT => 15, CURLOPT_CONNECTTIMEOUT => 5));
 	try {
 		$page = curl_exec($handle);
