@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS llx_cdav_booking_profile (
   enabled tinyint NOT NULL DEFAULT 0,
   config text NOT NULL,
   token_hash char(64) DEFAULT NULL,
+  token_ciphertext varchar(160) DEFAULT NULL,
   PRIMARY KEY (rowid),
   KEY idx_cdav_booking_owner (entity, fk_user),
   UNIQUE KEY uk_cdav_booking_token (token_hash),

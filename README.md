@@ -112,6 +112,13 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.4.2 lets administrators retrieve and copy the current public booking
+link for each profile. Renewing and revoking a link remain separate actions.
+Existing links continue to work, and an administrator who has the original URL
+can attach it to its profile without changing it. Reactivate CDav once after
+updating to install the encrypted key column. Back up the private instance key
+alongside the database. See the [French booking guide](doc/reservation-rdv-fr.md).
+
 Version 6.4.1 restores CardDAV member title updates with Dolibarr 24.0.4 and
 uses the corrected native Agenda form from 24.0.2 onward. Address books detect
 card changes within the same second. CalDAV preserves bracketed titles and

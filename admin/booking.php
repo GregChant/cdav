@@ -58,7 +58,6 @@ $bookingOwnerId = $bookingIds['owner_id'];
 $bookingProfileId = $bookingIds['profile_id'];
 $action = GETPOST('action', 'aZ09');
 if ($action === 'save_profile' && GETPOSTINT('refresh_projects') === 1) $action = 'refresh_profile';
-$bookingNewKey = '';
 $bookingPostedConfig = null;
 $bookingPostedMetadata = null;
 $bookingPostedNotice = null;
@@ -123,8 +122,25 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 				setEventMessages($langs->trans('CDavBookingSaved'), null, 'mesgs');
 			}
 		} elseif ($action === 'rotate_token') {
-			$bookingNewKey = $bookingService->rotateToken($bookingOwnerId, $bookingProfileId);
+			$bookingService->rotateToken($bookingOwnerId, $bookingProfileId);
 			setEventMessages($langs->trans('CDavBookingLinkCreated'), null, 'mesgs');
+		} elseif ($action === 'reattach_token') {
+			$bookingExistingLink = $_POST['existing_link'] ?? null;
+			if (!is_string($bookingExistingLink) || strlen($bookingExistingLink) > 2048) {
+				throw new \Dolibarr\CDav\BookingException('CDavBookingLinkMismatch', 422);
+			}
+			$bookingExistingLink = trim($bookingExistingLink);
+			$bookingLinkParts = parse_url($bookingExistingLink);
+			// Extract the key locally and render links from Dolibarr's configured URL.
+			if (!filter_var($bookingExistingLink, FILTER_VALIDATE_URL)
+				|| !in_array(strtolower($bookingLinkParts['scheme'] ?? ''), array('http', 'https'), true)
+				|| isset($bookingLinkParts['user']) || isset($bookingLinkParts['pass']) || isset($bookingLinkParts['fragment'])
+				|| !str_ends_with($bookingLinkParts['path'] ?? '', '/cdav/public/booking.php')
+				|| preg_match_all('/(?:^|&)key=([^&]*)/', $bookingLinkParts['query'] ?? '', $bookingLinkMatches) !== 1) {
+				throw new \Dolibarr\CDav\BookingException('CDavBookingLinkMismatch', 422);
+			}
+			$bookingService->reattachToken($bookingOwnerId, $bookingProfileId, $bookingLinkMatches[1][0]);
+			setEventMessages($langs->trans('CDavBookingLinkAttached'), null, 'mesgs');
 		} elseif ($action === 'disable_profile') {
 			$bookingService->disableProfile($bookingOwnerId, $bookingProfileId);
 			setEventMessages($langs->trans('CDavBookingRevoked'), null, 'mesgs');
@@ -134,7 +150,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 	} catch (Throwable $bookingException) {
 		dol_syslog('CDav booking administration: '.get_class($bookingException), LOG_ERR);
 		$bookingSaveErrorKey = $bookingException instanceof \Dolibarr\CDav\BookingException
-			&& in_array($bookingException->getMessage(), array('CDavBookingProjectNotOpen', 'CDavBookingProjectClearRequired'), true)
+			&& in_array($bookingException->getMessage(), array('CDavBookingProjectNotOpen', 'CDavBookingProjectClearRequired',
+				'CDavBookingLinkMismatch', 'CDavBookingLinkUnreadable'), true)
 			? $bookingException->getMessage() : 'CDavBookingSaveError';
 		setEventMessages($langs->trans($bookingSaveErrorKey), null, 'errors');
 	}
@@ -155,6 +172,17 @@ try {
 	http_response_code($bookingException instanceof \Dolibarr\CDav\BookingException ? $bookingException->getCode() : 503);
 	dol_syslog('CDav booking configuration read: '.get_class($bookingException), LOG_ERR);
 	setEventMessages($langs->trans('CDavBookingUnavailable'), null, 'errors');
+}
+$bookingHasPublication = !empty($bookingProfile['token_hash']);
+$bookingPublicationKey = null;
+$bookingLinkUnreadable = false;
+if ($bookingHasPublication) {
+	try {
+		$bookingPublicationKey = $bookingService->publicationKeyForOwner($bookingOwnerId, $bookingProfileId);
+	} catch (Throwable $bookingException) {
+		$bookingLinkUnreadable = true;
+		dol_syslog('CDav booking publication read: '.get_class($bookingException), LOG_ERR);
+	}
 }
 $bookingDefaultWeekly = array();
 for ($bookingDay = 1; $bookingDay <= 7; $bookingDay++) {
@@ -363,20 +391,43 @@ print '<p><button class="button button-save" type="submit">'.dol_escape_htmltag(
 print '<p class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingEmailSetupHelp')).'</p>';
 
 print '<h2>'.dol_escape_htmltag($langs->trans('CDavBookingPublicLink')).'</h2>';
-print '<p>'.dol_escape_htmltag($langs->trans('CDavBookingRotateHelp')).'</p>';
-if ($bookingNewKey !== '') {
-	$bookingLink = dol_buildpath('/cdav/public/booking.php', 2).'?key='.rawurlencode($bookingNewKey);
-	print '<p><label for="booking_public_link">'.dol_escape_htmltag($langs->trans('CDavBookingCopyLink')).'</label></p>';
-	print '<input class="quatrevingtpercent" type="url" readonly id="booking_public_link" value="'.dol_escape_htmltag($bookingLink).'">';
-	print '<p class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingLinkOnce')).'</p>';
-}
-if ($bookingProfile) {
+if (!$bookingProfile) {
+	print '<p>'.dol_escape_htmltag($langs->trans('CDavBookingLinkSaveFirst')).'</p>';
+} else {
+	if ($bookingHasPublication) {
+		$bookingLinkStatus = !empty($bookingProfile['enabled']) && getDolGlobalInt('CDAV_BOOKING_ENABLED')
+			? 'CDavBookingLinkActive' : 'CDavBookingLinkPaused';
+		print '<p>'.dol_escape_htmltag($langs->trans($bookingLinkStatus)).'</p>';
+	}
+	if ($bookingPublicationKey !== null) {
+		$bookingLink = dol_buildpath('/cdav/public/booking.php', 2).'?key='.rawurlencode($bookingPublicationKey);
+		print '<p><label for="booking_public_link">'.dol_escape_htmltag($langs->trans('CDavBookingLinkUrl')).'</label></p>';
+		print '<input class="quatrevingtpercent" type="url" readonly id="booking_public_link" value="'.dol_escape_htmltag($bookingLink).'"> ';
+		print '<button class="button" type="button" id="booking_copy_link" disabled';
+		print ' data-copied="'.dol_escape_htmltag($langs->trans('CDavBookingLinkCopied')).'"';
+		print ' data-manual-copy="'.dol_escape_htmltag($langs->trans('CDavBookingLinkManualCopy')).'">';
+		print dol_escape_htmltag($langs->trans('CDavBookingCopyLink')).'</button>';
+		print ' <span id="booking_copy_status" role="status"></span>';
+	} elseif ($bookingHasPublication) {
+		print '<p>'.dol_escape_htmltag($langs->trans($bookingLinkUnreadable ? 'CDavBookingLinkUnreadable' : 'CDavBookingLinkLegacy')).'</p>';
+		print '<form method="post" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
+		print '<input type="hidden" name="token" value="'.dol_escape_htmltag(newToken()).'">';
+		print '<input type="hidden" name="owner_id" value="'.$bookingOwnerId.'">';
+		print '<input type="hidden" name="profile_id" value="'.$bookingProfileId.'">';
+		print '<p><label for="booking_existing_link">'.dol_escape_htmltag($langs->trans('CDavBookingExistingLink')).'</label></p>';
+		print '<input class="quatrevingtpercent" type="url" name="existing_link" id="booking_existing_link" required maxlength="2048" autocomplete="off"> ';
+		print '<button class="button" type="submit" name="action" value="reattach_token">'.dol_escape_htmltag($langs->trans('CDavBookingReattach')).'</button></form>';
+	}
+	if ($bookingHasPublication) print '<p>'.dol_escape_htmltag($langs->trans('CDavBookingRotateHelp')).'</p>';
 	print '<form method="post" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
 	print '<input type="hidden" name="token" value="'.dol_escape_htmltag(newToken()).'">';
 	print '<input type="hidden" name="owner_id" value="'.$bookingOwnerId.'">';
 	print '<input type="hidden" name="profile_id" value="'.$bookingProfileId.'">';
-	print '<button class="button" type="submit" name="action" value="rotate_token">'.dol_escape_htmltag($langs->trans('CDavBookingRotate')).'</button> ';
-	print '<button class="button" type="submit" name="action" value="disable_profile">'.dol_escape_htmltag($langs->trans('CDavBookingRevoke')).'</button>';
+	print '<button class="button" type="submit" name="action" value="rotate_token">';
+	print dol_escape_htmltag($langs->trans($bookingHasPublication ? 'CDavBookingRotate' : 'CDavBookingLinkCreate')).'</button> ';
+	if ($bookingHasPublication) {
+		print '<button class="button" type="submit" name="action" value="disable_profile">'.dol_escape_htmltag($langs->trans('CDavBookingRevoke')).'</button>';
+	}
 	print '</form>';
 }
 print '<p class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingScopeHelp')).'</p>';

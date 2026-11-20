@@ -28,6 +28,9 @@ La version 6.3 ajoute la provenance des événements pour protéger les données
 métier lors des écritures CalDAV. Réactiver le module conserve les anciens
 identifiants et applique la protection aux origines inconnues ; voir le
 [guide de protection métier](protection-metier-dav-fr.md).
+Après l'installation de la 6.4.2, désactiver et réactiver CDav une fois pour
+ajouter le stockage chiffré des clés de réservation. Les liens déjà partagés
+gardent leur adresse et leur validité.
 
 La réservation est désactivée par défaut. La recette a validé Dolibarr 23.0.4 et
 24.0.0 sous PHP 8.4.26 et 8.5.11, avec MariaDB 10.6.23 et des tables
@@ -56,7 +59,7 @@ Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
    **Autoriser les réservations pour ce collaborateur** activé.
 5. Activer **Activer la réservation publique**. L'activation globale et celle du
    profil sont toutes deux nécessaires.
-6. Utiliser **Créer ou renouveler le lien**, puis copier l'URL affichée.
+6. Utiliser **Créer le lien public**, puis **Copier le lien**.
 
 | Réglage | Valeur initiale | Plage acceptée |
 |---|---|---|
@@ -240,12 +243,25 @@ https://exemple.ch/custom/cdav/public/booking.php?key=JETON_DE_PUBLICATION
 ```
 
 Le jeton de publication est aléatoire et distinct des accès DAV/ICS. Le module
-conserve son empreinte ; le lien complet est affiché une seule fois, lors de sa
-génération. Le copier avant de quitter la page. Toute personne qui reçoit ce
-lien peut réserver un créneau ; aucun compte Dolibarr client n'est nécessaire.
+conserve son empreinte pour vérifier l'accès public. Il conserve aussi une
+copie chiffrée des clés créées ou rattachées depuis la version 6.4.2. Les
+administrateurs peuvent retrouver et copier le lien actif du profil sélectionné
+dans **Agenda > Rendez-vous en ligne**. Toute personne qui reçoit ce lien peut
+réserver un créneau sans compte Dolibarr.
+
+Pour afficher un lien publié par une ancienne version, coller son URL complète
+dans le champ de rattachement du profil. CDav vérifie qu'elle correspond à la
+clé déjà publiée. L'adresse partagée et les formulaires associés restent valides.
+Si l'URL est perdue, créer un nouveau lien et remplacer les adresses partagées.
+
+Inclure le fichier `DOL_DATA_ROOT/.cdav-private/booking-publication.key` dans la
+sauvegarde des documents Dolibarr pour retrouver les clés depuis la console
+après restauration. Sous Unix, garder les permissions `0700` pour le répertoire
+et `0600` pour le fichier. Les liens publics continuent à fonctionner si ce
+fichier est indisponible. Lorsque le stockage privé est de nouveau accessible,
+un administrateur peut rattacher les URL qu'il possède encore.
 
 Renouveler le lien invalide le précédent et les anciens formulaires associés.
-Si le lien a été perdu, en générer un nouveau et remplacer les liens partagés.
 **Révoquer le lien et désactiver le profil** retire sa publication sans supprimer
 les rendez-vous déjà créés. Réactiver ensuite le profil nécessite de générer un
 nouveau lien. La désactivation globale interrompt les nouvelles réservations de

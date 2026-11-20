@@ -50,6 +50,7 @@ Les rapports HTML/JSON sont conservés comme artefacts de CI. Voir
 | `booking_identity.php` | Coordonnées publiques, logo natif, photo et miniature, bornes des images et isolation des fichiers utilisateur |
 | `booking_details.php` | Objet et adresse du client obligatoires, bornes UTF-8 natives, adresses multilignes normalisées et compatibilité des anciens reçus |
 | `booking_notification.php` | Enveloppes et langues séparées, coordonnées privées, contenu des confirmations et frontière transactionnelle, sans envoyer d'email |
+| `booking_publication.php` | Chiffrement et authentification par profil, clé d'instance privée, restauration et refus du stockage sous la racine Web |
 | `booking_validity.php` | Validité facultative d'un profil, jour/semaine, bornes inclusives, profils illimités, horizon/préavis et changements d'heure |
 | `booking_ui.php` | Rendus FR/EN du formulaire et du calendrier mensuel, CSRF natif, labels, erreurs accessibles et échappement HTML, analysés avec DOM |
 | `booking_selection_js.cjs` | Sélection/désélection par GET, changements rapides, repli manuel, retour navigateur et absence de POST automatique |
@@ -107,8 +108,11 @@ sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.
 Dans Dolibarr, renseigner `localhost` comme hôte SMTP et `9125` comme port.
 Elle vérifie les profils indépendants, liens tiers/projet et droits natifs,
 la concurrence entre profils, les deux messages réels, l'absence de renvoi,
-le rollback et l'échec SMTP après commit. Aucun email ne doit partir vers un
-transport de production lors des qualifications natives.
+le rollback et l'échec SMTP après commit. Elle contrôle la conservation du lien
+lors de la migration, son stockage chiffré, le rattachement et la révocation.
+La suite navigateur vérifie aussi le lien actif après rechargement, la copie
+dans le presse-papiers et le rattachement depuis l'administration. Aucun email
+ne doit partir vers un transport de production lors des qualifications natives.
 
 Le benchmark temporel reste séparé des tests déterministes pour éviter les échecs
 liés à la charge d’un runner partagé :

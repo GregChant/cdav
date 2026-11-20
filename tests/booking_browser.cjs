@@ -36,7 +36,8 @@ function safe(text) {
 }
 
 async function capture(page, filename) {
-  if (output) await page.screenshot({path: path.join(output, filename), fullPage: true});
+  if (output) await page.screenshot({path: path.join(output, filename), fullPage: true,
+    mask: [page.locator('#booking_public_link, #booking_existing_link')]});
 }
 
 async function requireNativeProjectSelector(page, form, phase) {
@@ -391,7 +392,10 @@ async function checkBranding(page) {
       retry: retry.status(), sameReference: true, replayed: true, networkFailure: 'connectionreset'});
     check(errors.length === 0, 'No page script errors: ' + errors.join(';'));
 
+    const adminOrigin = new URL(fixture.admin_url).origin;
+    await desktop.grantPermissions(['clipboard-read', 'clipboard-write'], {origin: adminOrigin});
     const admin = await desktop.newPage();
+    admin.on('pageerror', error => errors.push(safe(error.message)));
     await admin.goto(fixture.home_url);
     await admin.locator('input[name=username]').fill(fixture.login);
     await admin.locator('input[name=password]').fill(fixture.password);
@@ -405,6 +409,32 @@ async function checkBranding(page) {
     check(await admin.locator('input[name=weekly_1_0_start]').inputValue() === '09:00', 'Native professional profile rendered');
     check(await admin.locator('select[name=allow_contiguous]').inputValue() === '0'
       && await admin.locator('select[name=allow_split]').inputValue() === '0', 'Both extended booking modes default to disabled');
+    check((response.headers()['cache-control'] || '').includes('no-store'), 'The authenticated management response must not be cached');
+
+    const knownLink = new URL(fixture.booking_url);
+    knownLink.searchParams.set('key', fixture.key);
+    const knownProfileAdminUrl = fixture.admin_url + '?owner_id=' + fixture.owner_id + '&profile_id=' + fixture.profile_id;
+    const existingLinkInput = admin.locator('#booking_existing_link');
+    const reattachLinkButton = admin.locator('button[name=action][value=reattach_token]');
+    check(await existingLinkInput.count() === 1 && await admin.locator('#booking_public_link').count() === 0,
+      'A legacy link remains active publicly and offers reattachment instead of inventing an admin URL');
+    const wrongLink = new URL(knownLink.href);
+    wrongLink.searchParams.set('key', '0'.repeat(64));
+    await existingLinkInput.fill(wrongLink.href);
+    await follow(admin, () => reattachLinkButton.click());
+    await checkNativeAdministrationError(admin, 'A different public key cannot be reattached to the selected profile');
+    check(await admin.locator('#booking_public_link').count() === 0, 'A refused reattachment does not expose a replacement');
+    await existingLinkInput.fill(knownLink.href);
+    await follow(admin, () => reattachLinkButton.click());
+    await admin.goto(knownProfileAdminUrl);
+    check(await admin.locator('#booking_public_link').inputValue() === knownLink.href
+      && await admin.locator('#booking_public_link').getAttribute('readonly') !== null,
+      'An existing publication is recoverable after a separate GET request with its original URL');
+    await admin.bringToFront();
+    await admin.locator('#booking_copy_link').click();
+    await admin.waitForFunction(expected => navigator.clipboard.readText().then(value => value === expected), knownLink.href);
+    check((await desktop.request.get(knownLink.href)).status() === 200, 'Reattaching the existing URL preserves its public access');
+    results.push({case: 'Existing booking link reattachment', mismatchedKeyRejected: true, sameUrlAfterReload: true, clipboard: true});
     await capture(admin, 'booking-ui-admin-profile.png');
     results.push({case: 'Native admin browser', http: response.status(), profileLoaded: true});
 
@@ -450,6 +480,9 @@ async function checkBranding(page) {
       await follow(admin, () => admin.locator('button[name=action][value=rotate_token]').click());
       const link = await admin.locator('#booking_public_link').inputValue();
       secrets.add(new URL(link).searchParams.get('key'));
+      await admin.goto(fixture.admin_url + '?owner_id=' + fixture.owner_id + '&profile_id=' + id);
+      check(await admin.locator('#booking_public_link').inputValue() === link,
+        'The URL for a newly published profile remains visible on a separate GET request');
       return {id, label, duration, link};
     }
 
@@ -599,12 +632,17 @@ async function checkBranding(page) {
     await follow(admin, () => admin.locator('button[name=action][value=rotate_token]').click());
     const renewedLink = await admin.locator('#booking_public_link').inputValue();
     secrets.add(new URL(renewedLink).searchParams.get('key'));
+    await admin.goto(fixture.admin_url + '?owner_id=' + fixture.owner_id + '&profile_id=' + namedFirst.id);
+    check(await admin.locator('#booking_public_link').inputValue() === renewedLink, 'The renewed URL persists across administration visits');
     check((await namedPage.goto(namedFirst.link)).status() === 404, 'Renewing one profile revokes only its old link');
     namedFirst.link = renewedLink;
     await checkNamedProfile(namedFirst, 75);
     await checkNamedProfile(namedSecond);
     await admin.goto(fixture.admin_url + '?owner_id=' + fixture.owner_id + '&profile_id=' + namedSecond.id);
+    check(await admin.locator('#booking_public_link').inputValue() === namedSecond.link, 'Switching profiles reveals only that profile’s active URL');
     await follow(admin, () => admin.locator('button[name=action][value=disable_profile]').click());
+    check(await admin.locator('#booking_public_link, #booking_existing_link').count() === 0,
+      'A revoked profile has no URL left to copy or reattach');
     check((await namedPage.goto(namedSecond.link)).status() === 404, 'Revoking the selected profile disables its own public link');
     await checkNamedProfile(namedFirst, 75);
     check((await page.goto(publicUrl(fixture.date))).status() === 200, 'Revoking another calendar leaves the initial link active');

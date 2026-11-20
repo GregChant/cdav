@@ -286,7 +286,10 @@ try {
 	$secondaryProfileLabel = 'Visites & maintenance';
 	$tertiaryProfileLabel = 'Consultation projet';
 	$profile = $service->saveProfile($ownerId, $config, true, 0, array('label' => $profileLabel));
-	$key = $service->rotateToken($ownerId, $profile['id']);
+	// Seed a publication created before administrators could retrieve its URL.
+	$key = bin2hex(random_bytes(32));
+	bookingBrowserQuery('UPDATE '.MAIN_DB_PREFIX."cdav_booking_profile SET token_hash = '".$db->escape(hash('sha256', $key))."'"
+		.' WHERE rowid = '.$profile['id'].' AND entity = '.$entity.' AND fk_user = '.$ownerId);
 	$openDay = new DateTimeImmutable('tomorrow', new DateTimeZone('Europe/Zurich'));
 	$closedDay = $openDay->modify('+1 day');
 	$contiguousDay = $openDay->modify('+5 days');

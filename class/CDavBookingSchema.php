@@ -6,7 +6,7 @@ namespace Dolibarr\CDav;
 class BookingSchema
 {
 	/**
-	 * Extend old booking tables before enabling multiple named calendars.
+	 * Extend old booking tables while preserving existing publication hashes.
 	 *
 	 * @param \DoliDB $db Native database connection
 	 * @return int Positive on success, negative on failure
@@ -18,6 +18,7 @@ class BookingSchema
 				'label' => array('type' => 'varchar', 'value' => 120, 'null' => 'NULL', 'default' => 'null'),
 				'fk_soc' => array('type' => 'int', 'null' => 'NULL'),
 				'fk_project' => array('type' => 'int', 'null' => 'NULL'),
+				'token_ciphertext' => array('type' => 'varchar', 'value' => 160, 'null' => 'NULL'),
 			),
 			'cdav_booking_request' => array(
 				'mail_customer' => array('type' => 'tinyint', 'null' => 'NOT NULL', 'default' => '0'),

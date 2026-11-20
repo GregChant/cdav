@@ -5,6 +5,7 @@ namespace Dolibarr\CDav;
 require_once __DIR__.'/CDavBookingAvailability.php';
 require_once __DIR__.'/CDavBookingCalendarReader.php';
 require_once __DIR__.'/CDavBookingDetails.php';
+require_once __DIR__.'/CDavBookingPublication.php';
 
 /** Public errors are translation keys, never SQL, event titles or coordinates. */
 class BookingException extends \RuntimeException
@@ -124,17 +125,29 @@ class BookingService
 	}
 
 	/**
-	 * Read one calendar without selecting a different collaborator's profile.
+	 * Read one profile within the requested collaborator and native entity.
+	 * @param int $ownerId Owner identifier
+	 * @param int|null $profileId Specific profile, or null for the first legacy profile
+	 * @return object|null Stored profile
+	 */
+	private function profileRowForOwner($ownerId, $profileId)
+	{
+		$this->manager();
+		if ($profileId !== null && (!is_int($profileId) || $profileId <= 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
+		$row = $this->db->fetch_object($this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId)
+			.($profileId !== null ? ' AND rowid = '.$profileId : '').' ORDER BY rowid LIMIT 1'));
+		return $row ?: null;
+	}
+
+	/**
+	 * Read the profile settings for administration.
 	 * @param int $ownerId Owner identifier
 	 * @param int|null $profileId Specific profile, or null for the first legacy profile
 	 * @return array|null Profile
 	 */
 	public function profileForOwner($ownerId, $profileId = null)
 	{
-		$this->manager();
-		if ($profileId !== null && (!is_int($profileId) || $profileId <= 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
-		$row = $this->db->fetch_object($this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId)
-			.($profileId !== null ? ' AND rowid = '.$profileId : '').' ORDER BY rowid LIMIT 1'));
+		$row = $this->profileRowForOwner($ownerId, $profileId);
 		return $row ? $this->profile($row) : null;
 	}
 
@@ -254,7 +267,42 @@ class BookingService
 	}
 
 	/**
-	 * Publish a fresh random key, storing only its hash.
+	 * Return the current publication key for an administrator of this entity.
+	 * @param int $ownerId Owner identifier
+	 * @param int|null $profileId Specific profile, or null for the first legacy profile
+	 * @return string|null Recovered key, or null for unpublished and hash-only profiles
+	 */
+	public function publicationKeyForOwner($ownerId, $profileId = null): ?string
+	{
+		$row = $this->profileRowForOwner($ownerId, $profileId);
+		if (!$row || empty($row->token_hash) || empty($row->token_ciphertext)) return null;
+		return BookingPublication::open((string) $row->token_ciphertext, $this->entity, (int) $row->fk_user, (int) $row->rowid, (string) $row->token_hash);
+	}
+
+	/**
+	 * Store a recoverable copy of a known existing publication without changing its address.
+	 * @param int $ownerId Owner identifier
+	 * @param int|null $profileId Specific profile, or null for the first legacy profile
+	 * @param string $key Key supplied by the administrator
+	 * @return void
+	 */
+	public function reattachToken($ownerId, $profileId, string $key): void
+	{
+		$row = $this->profileRowForOwner($ownerId, $profileId);
+		$hash = hash('sha256', $key);
+		if (!$row || !preg_match('/^[a-f0-9]{64}$/D', $key) || !hash_equals((string) $row->token_hash, $hash)) {
+			throw new BookingException('CDavBookingLinkMismatch', 422);
+		}
+		$ciphertext = BookingPublication::seal($key, $this->entity, (int) $row->fk_user, (int) $row->rowid, $hash);
+		$result = $this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET token_ciphertext = '.$this->quote($ciphertext)
+			.' WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.((int) $row->rowid)
+			.' AND token_hash = '.$this->quote($hash));
+		// A concurrent rotation or revocation invalidates the expected hash.
+		if ((int) $this->db->affected_rows($result) !== 1) throw new BookingException('CDavBookingLinkMismatch', 422);
+	}
+
+	/**
+	 * Publish a fresh random key with its hash and encrypted administration copy.
 	 * @param int $ownerId Owner identifier
 	 * @param int|null $profileId Specific profile, or null for the legacy first profile
 	 * @return string New publication key
@@ -266,8 +314,12 @@ class BookingService
 		$profile = $this->profileForOwner($ownerId, $profileId);
 		if (!$profile) throw new BookingException('CDavBookingNotFound', 404);
 		$key = bin2hex(random_bytes(32));
-		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET token_hash = '.$this->quote(hash('sha256', $key))
+		$hash = hash('sha256', $key);
+		$ciphertext = BookingPublication::seal($key, $this->entity, $profile['owner_id'], $profile['id'], $hash);
+		$result = $this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET token_hash = '.$this->quote($hash)
+			.', token_ciphertext = '.$this->quote($ciphertext)
 			.' WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.$profile['id']);
+		if ((int) $this->db->affected_rows($result) !== 1) throw new BookingException('CDavBookingNotFound', 404);
 		return $key;
 	}
 
@@ -282,7 +334,8 @@ class BookingService
 		$this->manager();
 		$profile = $this->profileForOwner($ownerId, $profileId);
 		if (!$profile) throw new BookingException('CDavBookingNotFound', 404);
-		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET enabled = 0, token_hash = NULL WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.$profile['id']);
+		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET enabled = 0, token_hash = NULL, token_ciphertext = NULL WHERE entity = '
+			.$this->entity.' AND fk_user = '.((int) $ownerId).' AND rowid = '.$profile['id']);
 	}
 
 	/**

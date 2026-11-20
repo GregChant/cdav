@@ -1,7 +1,7 @@
-/* Convert the notice display while the booking engine keeps whole minutes. */
 (function () {
 	'use strict';
 
+	/* Convert the notice display while the booking engine keeps whole minutes. */
 	function enhanceNotice() {
 		var input = document.getElementById('notice');
 		var unit = document.getElementById('notice_unit');
@@ -29,6 +29,33 @@
 		unit.dataset.noticeReady = '1';
 	}
 
-	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', enhanceNotice, {once: true});
-	else enhanceNotice();
+	function enhanceCopy() {
+		var link = document.getElementById('booking_public_link');
+		var button = document.getElementById('booking_copy_link');
+		var status = document.getElementById('booking_copy_status');
+		if (!link || !button || !status || !button.disabled) return;
+		button.addEventListener('click', async function () {
+			try {
+				if (navigator.clipboard) {
+					await navigator.clipboard.writeText(link.value);
+					status.textContent = button.dataset.copied;
+					return;
+				}
+			} catch (error) {
+				// Clipboard access can be unavailable or denied by the browser.
+			}
+			link.focus();
+			link.select();
+			status.textContent = button.dataset.manualCopy;
+		});
+		button.disabled = false;
+	}
+
+	function enhanceBookingAdmin() {
+		enhanceNotice();
+		enhanceCopy();
+	}
+
+	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', enhanceBookingAdmin, {once: true});
+	else enhanceBookingAdmin();
 }());

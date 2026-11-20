@@ -219,12 +219,14 @@ function profilesLiveRace(array $forms, array $starts, int $ownerId): array
  * Require a public-safe rejection from one administration operation.
  * @param callable $operation Operation under test
  * @param int $status Expected public HTTP status
+ * @param string|null $reason Expected translation key when specified
  * @return void
  */
-function profilesLiveReject(callable $operation, int $status): void
+function profilesLiveReject(callable $operation, int $status, ?string $reason = null): void
 {
 	try { $operation(); } catch (\Dolibarr\CDav\BookingException $exception) {
-		profilesLiveCheck($exception->getCode() === $status, 'A rejected profile operation must keep its safe status');
+		profilesLiveCheck($exception->getCode() === $status && ($reason === null || $exception->getMessage() === $reason),
+			'A rejected profile operation must keep its safe status and reason');
 		return;
 	}
 	throw new RuntimeException('An invalid profile operation was unexpectedly accepted');
@@ -414,14 +416,41 @@ try {
 	profilesLiveCheck($first['id'] !== $second['id'] && $key1 !== $key2 && count($service->profilesForOwner($owner->id)) === 2,
 		'One collaborator must have independent profile identifiers and links');
 	profilesLiveCheck($service->profileForOwner($owner->id)['id'] === $first['id'], 'The old API must target only its stable first profile');
+	$publicationTable = MAIN_DB_PREFIX.'cdav_booking_profile';
+	$stored = profilesLiveRow('SELECT token_hash, token_ciphertext FROM '.$publicationTable.' WHERE rowid = '.$first['id']);
+	profilesLiveCheck($stored && $stored->token_hash === hash('sha256', $key1) && !empty($stored->token_ciphertext)
+		&& !str_contains((string) $stored->token_ciphertext, $key1), 'Native publication storage must hold the hash and an encrypted copy');
+	profilesLiveCheck($service->publicationKeyForOwner($owner->id) === $key1
+		&& $service->publicationKeyForOwner($owner->id, $second['id']) === $key2, 'Each administrator read must recover the exact selected key');
+	profilesLiveCheck(!array_key_exists('token_ciphertext', $service->publicProfile($key1)), 'The public profile must not carry the encrypted administration copy');
+	$foreign = new \Dolibarr\CDav\BookingService($db, $entity + 100);
+	profilesLiveCheck($foreign->publicationKeyForOwner($owner->id, $first['id']) === null, 'Publication recovery must stay in the selected entity');
+	$GLOBALS['user'] = $owner;
+	try {
+		profilesLiveReject(static function () use ($service, $owner, $first) {
+			$service->publicationKeyForOwner($owner->id, $first['id']);
+		}, 403);
+		profilesLiveReject(static function () use ($service, $owner, $first, $key1) {
+			$service->reattachToken($owner->id, $first['id'], $key1);
+		}, 403);
+	} finally {
+		$GLOBALS['user'] = $admin;
+	}
 	$secondConfig = array_replace($config, array('step' => 15));
 	$service->saveProfile($owner->id, $secondConfig, true, $second['id'], array('label' => 'Autre calendrier'));
 	profilesLiveCheck($service->publicProfile($key1)['config']['step'] === 30 && $service->publicProfile($key2)['config']['step'] === 15,
 		'Changing one profile must preserve the other profile settings');
+	profilesLiveCheck($service->publicationKeyForOwner($owner->id, $second['id']) === $key2, 'Saving profile settings must preserve its original publication');
 	$service->disableProfile($owner->id, $second['id']);
 	profilesLiveReject(static function () use ($service, $key2) {
 		$service->publicProfile($key2);
 	}, 404);
+	$revoked = profilesLiveRow('SELECT token_hash, token_ciphertext FROM '.$publicationTable.' WHERE rowid = '.$second['id']);
+	profilesLiveCheck($revoked && $revoked->token_hash === null && $revoked->token_ciphertext === null
+		&& $service->publicationKeyForOwner($owner->id, $second['id']) === null, 'Revocation clears both stored publication fields');
+	profilesLiveReject(static function () use ($service, $owner, $second, $key2) {
+		$service->reattachToken($owner->id, $second['id'], $key2);
+	}, 422, 'CDavBookingLinkMismatch');
 	profilesLiveCheck($service->publicProfile($key1)['id'] === $first['id'], 'Revoking one profile must leave the first link active');
 	$service->saveProfile($owner->id, $config, true, $second['id']);
 	$key2 = $service->rotateToken($owner->id, $second['id']);
@@ -437,6 +466,10 @@ try {
 		$service->disableProfile($owner->id, $restrictedProfile['id']);
 	}, 404);
 	profilesLiveCheck($service->profileForOwner($owner->id, $restrictedProfile['id']) === null, 'A forged profile identifier must never select another collaborator');
+	profilesLiveCheck($service->publicationKeyForOwner($owner->id, $restrictedProfile['id']) === null, 'An administrator must retrieve links only for the selected collaborator');
+	profilesLiveReject(static function () use ($service, $owner, $restrictedProfile, $restrictedKey) {
+		$service->reattachToken($owner->id, $restrictedProfile['id'], $restrictedKey);
+	}, 422, 'CDavBookingLinkMismatch');
 	profilesLiveCheck($service->publicProfile($restrictedKey)['id'] === $restrictedProfile['id'], 'Forged mutations must leave the other collaborator publication unchanged');
 	$proof['checks'][] = 'P01 independent profiles, targeted editing and revocation, legacy API and owner isolation';
 
@@ -480,10 +513,14 @@ try {
 	} finally {
 		$conf->modules = $moduleSnapshot;
 	}
+	// Existing publications start with a usable hash and an empty administration copy.
+	profilesLiveQuery('UPDATE '.$publicationTable.' SET token_ciphertext = NULL WHERE rowid = '.$linked['id']);
 	profilesLiveCheck(\Dolibarr\CDav\BookingSchema::migrate($db) > 0 && \Dolibarr\CDav\BookingSchema::migrate($db) > 0,
 		'Repeated native migration must remain idempotent');
 	profilesLiveCheck($service->publicProfile($key1)['id'] === $first['id'] && $service->publicProfile($key3)['id'] === $linked['id'],
 		'Migration must preserve every existing profile identifier and key');
+	profilesLiveCheck($service->publicationKeyForOwner($owner->id, $linked['id']) === null
+		&& $service->publicationKeyForOwner($owner->id, $first['id']) === $key1, 'Migration must preserve both hash-only and recoverable publications');
 	$proof['checks'][] = 'P02 native business scope, strict metadata, CRM rights rechecked, unlinked module independence and idempotent schema';
 
 	$day = (new DateTimeImmutable('now', new DateTimeZone('Europe/Zurich')))->modify('+3 days')->setTime(0, 0);
@@ -491,6 +528,21 @@ try {
 		return $day->modify('+'.$offset.' days')->setTime($hour, $minute)->getTimestamp();
 	};
 	$form = profilesLiveForm($key3, $day->format('Y-m-d'));
+	profilesLiveReject(static function () use ($service, $owner, $linked, $key2) {
+		$service->reattachToken($owner->id, $linked['id'], $key2);
+	}, 422, 'CDavBookingLinkMismatch');
+	$service->reattachToken($owner->id, $linked['id'], $key3);
+	$attached = profilesLiveRow('SELECT token_hash, token_ciphertext FROM '.$publicationTable.' WHERE rowid = '.$linked['id']);
+	profilesLiveCheck($attached && $attached->token_hash === hash('sha256', $key3) && !empty($attached->token_ciphertext)
+		&& !str_contains((string) $attached->token_ciphertext, $key3)
+		&& $service->publicationKeyForOwner($owner->id, $linked['id']) === $key3, 'Reattaching must preserve the existing hash and recover the exact key');
+	profilesLiveQuery('UPDATE '.$publicationTable." SET token_ciphertext = 'unreadable-fixture' WHERE rowid = ".$linked['id']);
+	profilesLiveReject(static function () use ($service, $owner, $linked) {
+		$service->publicationKeyForOwner($owner->id, $linked['id']);
+	}, 503, 'CDavBookingLinkUnreadable');
+	profilesLiveCheck($service->publicProfile($key3)['id'] === $linked['id'], 'An unreadable administration copy must leave the public URL available');
+	$service->reattachToken($owner->id, $linked['id'], $key3);
+	profilesLiveCheck($service->publicationKeyForOwner($owner->id, $linked['id']) === $key3, 'An administrator may restore an unreadable copy with the existing key');
 	$starts = array($at(0, 9, 30), $at(0, 13, 30));
 	$accepted = profilesLivePost($form, $starts);
 	profilesLiveCheck($accepted['status'] === 201 && count($accepted['json']['segments']) === 2
@@ -651,6 +703,7 @@ try {
 	profilesLiveCheck(!array_key_exists('valid_from', $unlimited['config']) && !array_key_exists('valid_until', $unlimited['config']),
 		'Empty validity fields must normalize to the historical unlimited configuration');
 	$proof['checks'][] = 'P08 inclusive local validity dates, first possible month, forged-slot rejection, normal reservation and stale-ticket protection';
+	$proof['checks'][] = 'P09 encrypted profile URLs, scoped administration, legacy reattachment, unreadable copy, old ticket and revocation';
 } catch (Throwable $exception) {
 	$failure = $exception;
 } finally {
