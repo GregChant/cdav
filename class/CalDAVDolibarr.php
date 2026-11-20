@@ -30,6 +30,7 @@ require_once __DIR__.'/CDavCalendarWritePolicy.php';
 require_once __DIR__.'/CDavInvitationPolicy.php';
 require_once __DIR__.'/CDavCalendarReadCache.php';
 require_once __DIR__.'/CDavAppointmentStatus.php';
+require_once dirname(__DIR__).'/lib/cdav_transport.lib.php';
 
 class Dolibarr extends AbstractBackend implements SyncSupport {
 
@@ -1181,6 +1182,11 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$this->_disableCalendarReadCache();
 		$existing = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 		$internal = $this->_parseInternalObjectUri((string) $objectUri);
+		$documentsUrl = (string) ($existing['_cdav_description']['documents_url'] ?? '');
+		if ($documentsUrl !== '') {
+			$existing['calendardata'] = \Dolibarr\CDav\CalendarWritePolicy::calendarWithoutDocumentsLink((string) $existing['calendardata'], $documentsUrl);
+			$calendarData = \Dolibarr\CDav\CalendarWritePolicy::calendarWithoutDocumentsLink((string) $calendarData, $documentsUrl);
+		}
 		if (!$creating && $existing !== null && ($internal === null || $internal['source'] === 'ev')) {
 			try {
 				$invitation = \Dolibarr\CDav\InvitationPolicy::plan((string) $existing['calendardata'], (string) $calendarData,
@@ -1605,18 +1611,20 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
-	 * Couple an RFC 8607 POST to the exact calendar representation it modified.
+	 * Couple a conditional or attachment-preserving write to the calendar version it read.
 	 * The native user-row lock makes this check and the following ActionComm update atomic.
 	 *
 	 * @param int $calendarId Calendar owner
 	 * @param string $objectUri Resource basename
 	 * @param string $etag Expected calendar representation hash
+	 * @param bool $unlessSet Keep a pre-existing client precondition
 	 * @return void
 	 */
-	public function expectCalendarVersion($calendarId, $objectUri, $etag)
+	public function expectCalendarVersion($calendarId, $objectUri, $etag, $unlessSet = false)
 	{
 		$this->_disableCalendarReadCache();
-		$this->expectedCalendarEtags[((int) $calendarId).'\n'.(string) $objectUri] = (string) $etag;
+		$key = ((int) $calendarId).'\n'.(string) $objectUri;
+		if (!$unlessSet || !isset($this->expectedCalendarEtags[$key])) $this->expectedCalendarEtags[$key] = (string) $etag;
 	}
 
 	private function _assertCalendarVersion($calendarId, $objectUri)
@@ -1630,7 +1638,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$current = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 		if ($current === null || !hash_equals((string) $expected, (string) $current['etag'])) {
 			throw new \Sabre\DAV\Exception\PreconditionFailed(
-				'The calendar object changed while its managed attachment was being updated',
+				'The calendar object changed while its write was being prepared',
 				'If-Match'
 			);
 		}
@@ -2415,9 +2423,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!function_exists('dol_buildpath')) {
 			return false;
 		}
-		$davBase = rtrim(\dol_buildpath('/cdav/server.php/agenda-documents/', 3), '/').'/';
-		if (str_starts_with((string) $url, $davBase)) {
-			return (bool) preg_match('#^\d+/[^/]+$#D', substr((string) $url, strlen($davBase)));
+		foreach (\cdav_attachment_base_urls('agenda-documents') as $davBase) {
+			if (str_starts_with((string) $url, $davBase) && preg_match('#^\d+/[^/]+$#D', substr((string) $url, strlen($davBase)))) {
+				return true;
+			}
 		}
 		$document = parse_url(\dol_buildpath('document.php', 3));
 		$candidate = parse_url((string) $url);
@@ -2553,6 +2562,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->_schedulingTableAvailable()) {
 			return;
 		}
+		$calendarData = \Dolibarr\CDav\CalendarWritePolicy::calendarWithoutDocumentsLink((string) $calendarData, $this->cdavLib->actionCommDocumentsUrl((int) $eventId));
 		$sql = 'INSERT INTO '.MAIN_DB_PREFIX.'cdav_scheduling (fk_actioncomm, calendardata)
 			VALUES ('.((int) $eventId).', \''.$this->db->escape((string) $calendarData).'\')
 			ON DUPLICATE KEY UPDATE calendardata = VALUES(calendardata)';

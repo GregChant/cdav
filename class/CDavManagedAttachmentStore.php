@@ -2,6 +2,8 @@
 
 namespace Dolibarr\CDav;
 
+require_once dirname(__DIR__).'/lib/cdav_transport.lib.php';
+
 /** RFC 8607 metadata backed by Dolibarr's native Agenda document directory. */
 class ManagedAttachmentStore
 {
@@ -323,7 +325,7 @@ class ManagedAttachmentStore
 
 	public function attachmentUrl($managedId)
 	{
-		return dol_buildpath('/cdav/server.php/attachments/'.rawurlencode((string) $managedId), 3);
+		return \cdav_attachment_base_urls('attachments')[0].rawurlencode((string) $managedId);
 	}
 
 	public function originalFilename($row)
@@ -356,6 +358,7 @@ class ManagedAttachmentStore
 	{
 		$calendar = \Sabre\VObject\Reader::read((string) $calendarData);
 		$referenced = array();
+		$attachmentBases = null;
 		foreach ($calendar->getComponents() as $component) {
 			if (in_array($component->name, array('VEVENT', 'VTODO'), true)) {
 				foreach ($component->select('ATTACH') as $attachment) {
@@ -364,7 +367,15 @@ class ManagedAttachmentStore
 					// An authorized editor may preserve another uploader's references;
 					// removal and byte replacement still require upload ownership.
 					$this->getById($id, (int) $eventId, false);
-					if (!hash_equals($this->attachmentUrl($id), trim((string) $attachment))) {
+					$attachmentUrl = trim((string) $attachment);
+					$validUrl = false;
+					foreach (($attachmentBases ??= \cdav_attachment_base_urls('attachments')) as $attachmentBase) {
+						if (hash_equals($attachmentBase.rawurlencode($id), $attachmentUrl)) {
+							$validUrl = true;
+							break;
+						}
+					}
+					if (!$validUrl) {
 						throw new \Sabre\DAV\Exception\Conflict('Managed attachment URL does not match its MANAGED-ID');
 					}
 					$referenced[$id] = true;

@@ -214,6 +214,7 @@ CDavBookingConfirmation=Votre rendez-vous est réservé
 CDavBookingConfirmed=Votre rendez-vous a été enregistré dans l’agenda du collaborateur.
 CDavBookingReference=Référence
 CDavCalendarAppointment=Rendez-vous
+CDavCalendarDocuments=Documents du rendez-vous
 CDavCalendarClientContact=Client et contact
 CDavCalendarProject=Projet
 CDavCalendarBookingReference=Référence de réservation

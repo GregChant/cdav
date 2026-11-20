@@ -214,6 +214,7 @@ CDavBookingConfirmation=Your appointment is booked
 CDavBookingConfirmed=Your appointment has been saved in the collaborator’s calendar.
 CDavBookingReference=Reference
 CDavCalendarAppointment=Appointment
+CDavCalendarDocuments=Appointment documents
 CDavCalendarClientContact=Client and contact
 CDavCalendarProject=Project
 CDavCalendarBookingReference=Booking reference

@@ -26,3 +26,18 @@ function cdav_is_secure_transport()
 	$proto = strtolower(trim(explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''))[0]));
 	return $proto === 'https' || strtolower(trim((string) ($_SERVER['HTTP_X_FORWARDED_SSL'] ?? ''))) === 'on';
 }
+
+/**
+ * Resolve the installed DAV script first, then append its attachment collection.
+ * The previous PATH_INFO-based URL remains recognizable in stored calendars.
+ * @param string $collection DAV attachment collection name
+ * @return string[] Current and legacy collection URLs, with a trailing slash
+ */
+function cdav_attachment_base_urls($collection)
+{
+	$script = 'cdav/server.php';
+	return array_unique(array(
+		rtrim(dol_buildpath($script, 3), '/').'/'.$collection.'/',
+		rtrim(dol_buildpath($script.'/'.$collection.'/', 3), '/').'/',
+	));
+}

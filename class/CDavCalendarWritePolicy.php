@@ -91,6 +91,56 @@ class CalendarWritePolicy
 	}
 
 	/**
+	 * Remove the optional generated footer from an appointment description.
+	 * @param string $description Original decoded DESCRIPTION
+	 * @param string $url Reserved documents URL for this exact appointment
+	 * @return string Description without its generated footer
+	 */
+	private static function withoutDocumentsFooter(string $description, string $url): string
+	{
+		if ($url === '') return $description;
+		$text = rtrim(str_replace(array("\r\n", "\r"), "\n", $description), "\n");
+		$suffix = ' : '.$url;
+		if (!str_ends_with($text, $suffix)) return $description;
+		$separator = strrpos($text, "\n\n");
+		$labelStart = $separator === false ? 0 : $separator + 2;
+		$labelLength = strlen($text) - strlen($suffix) - $labelStart;
+		if ($labelLength <= 0 || str_contains(substr($text, $labelStart, $labelLength), "\n")) return $description;
+		return $separator === false ? '' : substr($text, 0, $separator);
+	}
+
+	/**
+	 * Keep the server-generated documents footer outside saved data and write comparisons.
+	 * @param string $data Complete iCalendar data
+	 * @param string $url Reserved documents URL for this exact appointment
+	 * @return string Calendar with only matching generated DESCRIPTION footers removed
+	 */
+	public static function calendarWithoutDocumentsLink(string $data, string $url): string
+	{
+		// Long URLs and their fragment may be split across iCalendar folded lines.
+		if ($url === '' || !str_contains($data, '#')
+			|| !str_contains((string) preg_replace('/\r?\n[ \t]/', '', $data), '#cdav-documents')) return $data;
+		$calendar = VObject\Reader::read($data);
+		$changed = false;
+		try {
+			foreach ($calendar->getComponents() as $component) {
+				if ($component->name !== 'VEVENT') continue;
+				foreach ($component->select('DESCRIPTION') as $property) {
+					$original = (string) $property;
+					$description = self::withoutDocumentsFooter($original, $url);
+					if ($description !== $original) {
+						$property->setValue($description);
+						$changed = true;
+					}
+				}
+			}
+			return $changed ? $calendar->serialize() : $data;
+		} finally {
+			$calendar->destroy();
+		}
+	}
+
+	/**
 	 * Recover editable notes without importing the generated customer/project context.
 	 *
 	 * @param array<string,mixed> $parts Authoritative description envelope from the exporter
@@ -101,6 +151,7 @@ class CalendarWritePolicy
 	public static function nativeNoteForReplacement(array $parts, $description, $replacementPrefix = null)
 	{
 		$description = str_replace(array("\r\n", "\r"), "\n", (string) $description);
+		$description = self::withoutDocumentsFooter($description, (string) ($parts['documents_url'] ?? ''));
 		$text = (string) $parts['text'];
 		$native = (string) $parts['native_note'];
 		if ($description === $text) {

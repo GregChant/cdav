@@ -87,6 +87,23 @@ function liveDavPath(array $segments, $trailingSlash = false)
 	return $path.($trailingSlash ? '/' : '');
 }
 
+/** Follow the actual URI advertised by the isolated CalDAV server. */
+function liveAdvertisedAttachmentPath($calendarData, $davBaseUrl, $expectedPath)
+{
+	$calendar = Sabre\VObject\Reader::read($calendarData);
+	try {
+		foreach ($calendar->VEVENT->select('ATTACH') as $attachment) {
+			$url = (string) $attachment;
+			if (!str_ends_with($url, '/'.$expectedPath)) continue;
+			liveAssert($url === $davBaseUrl.$expectedPath, 'The advertised attachment URL did not use the installed DAV script URL');
+			return substr($url, strlen($davBaseUrl));
+		}
+		throw new RuntimeException('The expected attachment URI was absent from the calendar resource');
+	} finally {
+		$calendar->destroy();
+	}
+}
+
 /** Build one authenticated cURL handle shared by sequential and concurrent tests. */
 function liveHttpHandle($baseUrl, $login, $password, $method, $path, $body, array $headers, array &$responseHeaders)
 {
@@ -418,6 +435,7 @@ try {
 	$propfindBody = '<?xml version="1.0" encoding="utf-8"?>'
 		.'<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
 		.'<d:prop><d:displayname/><d:current-user-principal/><cs:getctag/></d:prop></d:propfind>';
+	$syncBody = '<?xml version="1.0" encoding="utf-8"?><d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>';
 	$limitPropfindBody = '<?xml version="1.0" encoding="utf-8"?>'
 		.'<d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:c="urn:ietf:params:xml:ns:caldav">'
 		.'<d:prop><card:max-resource-size/><c:max-resource-size/></d:prop></d:propfind>';
@@ -725,7 +743,7 @@ try {
 	liveAssert(is_file($agendaOutputRoot.'/'.$eventId.'/'.$inlineDocument->filename)
 		&& file_get_contents($agendaOutputRoot.'/'.$eventId.'/'.$inlineDocument->filename) === 'Hello',
 		'Inline attachment bytes were not materialized in the Agenda document directory');
-	$inlinePath = liveDavPath(array('attachments', $inlineDocument->managed_id));
+	$inlinePath = liveAdvertisedAttachmentPath($eventGet['body'], $davBaseUrl, liveDavPath(array('attachments', $inlineDocument->managed_id)));
 	$inlineGet = liveHttp($davBaseUrl, $login, $password, 'GET', $inlinePath);
 	liveHttpStatus($inlineGet, array(200), 'Inline attachment authenticated download');
 	liveAssert($inlineGet['body'] === 'Hello' && str_contains($unfoldedEvent, 'MANAGED-ID='.$inlineDocument->managed_id),
@@ -776,12 +794,46 @@ try {
 	}
 	liveAssert(str_contains($renderedWithDocument, 'https://dolibarr.example.test/document.php?modulepart=actions')
 		&& str_contains($renderedWithDocument, $physicalFilename), 'A physical native Dolibarr appointment document was not exported through document.php as ATTACH');
-	$nativeDocumentPath = liveDavPath(array('agenda-documents', (string) $eventId, $physicalFilename));
+	$eventWithDocument = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
+	liveHttpStatus($eventWithDocument, array(200), 'Appointment with native document');
+	$documentsTabUrl = rtrim((string) $conf->file->dol_main_url_root, '/').'/comm/action/document.php?id='.$eventId.'#cdav-documents';
+	$eventWithDocumentCalendar = Sabre\VObject\Reader::read($eventWithDocument['body']);
+	liveAssert(substr_count((string) $eventWithDocumentCalendar->VEVENT->DESCRIPTION, $documentsTabUrl) === 1,
+		'Multiple attachments must generate one native Documents tab link in the appointment description');
+	$eventWithDocumentCalendar->destroy();
+	$anonymousDocuments = liveHttp($documentsTabUrl, '', '', 'GET', '');
+	liveAssert(!str_contains($anonymousDocuments['body'], $physicalFilename)
+		&& (in_array($anonymousDocuments['status'], array(302, 303, 401, 403), true)
+			|| ($anonymousDocuments['status'] === 200 && str_contains($anonymousDocuments['body'], 'name="username"'))),
+		'The advertised native Documents link must require a Dolibarr session');
+	$nativeDocumentPath = liveAdvertisedAttachmentPath($eventWithDocument['body'], $davBaseUrl,
+		liveDavPath(array('agenda-documents', (string) $eventId, $physicalFilename)));
 	$nativeDocumentGet = liveHttp($davBaseUrl, $login, $password, 'GET', $nativeDocumentPath);
 	liveHttpStatus($nativeDocumentGet, array(200), 'Native appointment document Basic download');
 	liveAssert($nativeDocumentGet['body'] === file_get_contents($physicalFile), 'Native appointment document bytes changed in the DAV download');
 	liveAssert(str_contains((string) ($nativeDocumentGet['headers']['content-disposition'] ?? ''), $physicalFilename),
 		'Native document download lost its filename');
+	$documentSync = liveHttp($davBaseUrl, $login, $password, 'REPORT', $calendarPath, $syncBody, array('Depth: 0', 'Content-Type: application/xml; charset=utf-8'));
+	liveHttpStatus($documentSync, array(207), 'Calendar sync before native attachment replacement');
+	$documentSyncToken = liveSyncToken($documentSync['body']);
+	liveAssert($documentSyncToken !== '', 'The native attachment sync fixture did not provide a token');
+	$replacementBytes = str_replace('isolated', 'exported', $nativeDocumentGet['body']);
+	liveAssert(file_put_contents($physicalFile, $replacementBytes) === strlen($nativeDocumentGet['body']), 'Unable to replace the native document in place');
+	$replacedFileGet = liveHttp($davBaseUrl, $login, $password, 'GET', $nativeDocumentPath);
+	liveHttpStatus($replacedFileGet, array(200), 'Replacement native document download');
+	liveAssert($replacedFileGet['body'] === $replacementBytes && $replacedFileGet['headers']['etag'] !== $nativeDocumentGet['headers']['etag'],
+		'A same-name, same-size native document replacement retained old bytes or ETag');
+	$replacedEventGet = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
+	liveHttpStatus($replacedEventGet, array(200), 'Calendar resource after native attachment replacement');
+	liveAssert($replacedEventGet['headers']['etag'] !== $eventWithDocument['headers']['etag'], 'Replacing only a native file did not change the calendar ETag');
+	liveAssert(substr_count(liveUnfold($replacedEventGet['body']), $documentsTabUrl) === 1,
+		'The native Documents link changed after replacing an attached file');
+	$incrementalDocumentSync = str_replace('<d:sync-token/>', '<d:sync-token>'.htmlspecialchars($documentSyncToken, ENT_XML1).'</d:sync-token>', $syncBody);
+	$documentChange = liveHttp($davBaseUrl, $login, $password, 'REPORT', $calendarPath, $incrementalDocumentSync, array('Depth: 0', 'Content-Type: application/xml; charset=utf-8'));
+	liveHttpStatus($documentChange, array(207), 'Incremental calendar sync after native attachment replacement');
+	liveAssert(liveSyncToken($documentChange['body']) !== $documentSyncToken && str_contains($documentChange['body'], rawurlencode($eventUri)),
+		'Replacing only a native file was not reported by incremental calendar sync');
+	liveAssert(file_put_contents($physicalFile, $nativeDocumentGet['body']) !== false, 'Unable to restore the isolated native document');
 	$foreignNativeDocumentGet = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'GET', $nativeDocumentPath);
 	liveAssert(in_array($foreignNativeDocumentGet['status'], array(403, 404), true), 'A user without appointment access downloaded its native document');
 	$nativeDocumentPut = liveHttp($davBaseUrl, $login, $password, 'PUT', $nativeDocumentPath, 'overwrite');
@@ -802,13 +854,21 @@ try {
 	liveAssert(str_contains(liveUnfold($eventReverse['body']), $manualAttachmentUrl), 'A native Dolibarr appointment link was not exported as CalDAV ATTACH');
 	liveAssert(str_contains(liveUnfold($eventReverse['body']), 'agenda-documents/'.$eventId.'/'.rawurlencode($physicalFilename)),
 		'CalDAV did not export an authenticated DAV URL for the native appointment document');
+	$noteBeforeDocumentRoundTrip = (string) liveRow($db, 'SELECT note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->note;
 	$nativeDocumentRoundTrip = liveHttp($davBaseUrl, $login, $password, 'PUT', $eventPath, $eventReverse['body'], array('Content-Type: text/calendar'));
 	liveHttpStatus($nativeDocumentRoundTrip, array(200, 204), 'Appointment edit retaining native document URL');
+	liveAssert((string) liveRow($db, 'SELECT note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->note === $noteBeforeDocumentRoundTrip,
+		'A CalDAV echo of the generated Documents link modified the native note');
+	$roundTripMetadata = liveRow($db, 'SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.$eventId);
+	liveAssert($roundTripMetadata !== null && !str_contains(liveUnfold((string) $roundTripMetadata->calendardata), $documentsTabUrl),
+		'A CalDAV echo stored the generated Documents link in calendar metadata');
 	liveAssert(unlink($physicalFile), 'Unable to remove the isolated native document');
 	$afterNativeDocumentRemoval = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
 	liveHttpStatus($afterNativeDocumentRemoval, array(200), 'Appointment after native document removal');
 	liveAssert(!str_contains(liveUnfold($afterNativeDocumentRemoval['body']), $physicalFilename),
 		'A deleted native document remained as a stale ATTACH after a calendar round trip');
+	liveAssert(substr_count(liveUnfold($afterNativeDocumentRemoval['body']), $documentsTabUrl) === 1,
+		'The native Documents link must remain unique while other attachments are still present');
 	liveAssert(file_put_contents($physicalFile, $nativeDocumentGet['body']) !== false, 'Unable to restore the isolated native document');
 
 	// Partner-facing subscriptions must retain occupancy and recurrence while
@@ -825,7 +885,8 @@ try {
 			'Free-busy subscription exposed '.$privateProperty);
 	}
 	liveAssert(!str_contains($busyData, $attendeeEmail) && !str_contains($busyData, $physicalFilename)
-		&& !str_contains($busyData, 'Meeting room B') && !str_contains($busyData, $attachmentUrl),
+		&& !str_contains($busyData, 'Meeting room B') && !str_contains($busyData, $attachmentUrl)
+		&& !str_contains($busyData, $documentsTabUrl),
 		'Free-busy subscription exposed private appointment details');
 
 	$updatedStart = $start + 7200;
@@ -877,12 +938,13 @@ try {
 	liveHttpStatus($managedAdd, array(201), 'RFC 8607 attachment-add');
 	$managedId = (string) ($managedAdd['headers']['cal-managed-id'] ?? '');
 	liveAssert((bool) preg_match('/^[a-f0-9]{64}$/', $managedId), 'Managed attachment did not return an unguessable Cal-Managed-ID');
-	$managedPath = liveDavPath(array('attachments', $managedId));
+	$managedEvent = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
+	liveHttpStatus($managedEvent, array(200), 'Calendar resource with managed attachment');
+	$managedPath = liveAdvertisedAttachmentPath($managedEvent['body'], $davBaseUrl, liveDavPath(array('attachments', $managedId)));
 	$managedGet = liveHttp($davBaseUrl, $login, $password, 'GET', $managedPath);
 	liveHttpStatus($managedGet, array(200), 'Managed attachment protected GET');
 	liveAssert($managedGet['body'] === '%PDF-managed-v1' && (string) ($managedGet['headers']['content-type'] ?? '') === 'application/pdf', 'Managed attachment bytes/type were altered');
 	liveAssert(str_contains((string) ($managedGet['headers']['content-disposition'] ?? ''), 'managed-'.$token.'.pdf'), 'Managed attachment download name is missing or unsafe');
-	$managedEvent = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
 	liveAssert(str_contains(liveUnfold($managedEvent['body']), 'MANAGED-ID='.$managedId)
 		&& str_contains(liveUnfold($managedEvent['body']), 'FILENAME=managed-'.$token.'.pdf'), 'Managed ATTACH metadata was not written into the calendar resource');
 	$managedRow = liveRow($db, 'SELECT filename, file_size FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE managed_id = \''.$db->escape($managedId).'\'');
@@ -947,6 +1009,27 @@ try {
 		liveAssert(dolibarr_set_const($db, 'CDAV_MANAGED_ATTACHMENT_MAX_COUNT', '3', 'chaine', 0, '', $entity) > 0, 'Unable to restore the document count limit');
 	}
 	liveOk('RFC 8607 add/read/update/remove, ETag concurrency, immutable byte URLs, ACL and active-content rejection');
+	$outlookCurrent = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
+	liveHttpStatus($outlookCurrent, array(200), 'Calendar before an Outlook edit without attachments');
+	$outlookCalendar = Sabre\VObject\Reader::read($outlookCurrent['body']);
+	$outlookCalendar->VEVENT->remove('ATTACH');
+	$outlookTitle = $prefix.' Outlook attachment-safe edit';
+	$outlookCalendar->VEVENT->SUMMARY = $outlookTitle;
+	$outlookUpdate = liveHttp($davBaseUrl, $login, $password, 'PUT', $eventPath, $outlookCalendar->serialize(), array(
+		'Content-Type: text/calendar; charset=utf-8', 'User-Agent: CalDavSynchronizer/4.5',
+	));
+	$outlookCalendar->destroy();
+	liveHttpStatus($outlookUpdate, array(200, 204), 'Outlook edit without ATTACH');
+	$outlookStored = liveHttp($davBaseUrl, $login, $password, 'GET', $eventPath);
+	liveHttpStatus($outlookStored, array(200), 'Calendar after an Outlook edit without attachments');
+	$outlookStoredData = liveUnfold($outlookStored['body']);
+	liveAssert(str_contains($outlookStoredData, $outlookTitle), 'The Outlook edit did not update the event title');
+	liveAssert(str_contains($outlookStoredData, 'MANAGED-ID='.$replacementInlineRow->managed_id), 'An Outlook edit removed the managed attachment reference');
+	liveAssert(str_contains($outlookStoredData, $physicalFilename), 'An Outlook edit removed the native appointment document');
+	liveAssert(str_contains($outlookStoredData, $replacementAttachmentUrl), 'An Outlook edit removed the previously mirrored HTTPS link');
+	liveAssert(file_get_contents($agendaOutputRoot.'/'.$eventId.'/'.$replacementInlineRow->filename) === 'Hello changed',
+		'An Outlook edit without ATTACH changed the managed file');
+	liveOk('Outlook CalDav Synchronizer edits retain native documents, links and managed attachments');
 
 	// A local iTIP attendee gets a persistent inbox object; no iMIP transport is installed.
 	$scheduledUri = $prefix.'-scheduled.ics';
@@ -963,6 +1046,10 @@ try {
 	liveAssert($scheduledMap !== null, 'Scheduled event mapping is missing');
 	$scheduledId = (int) $scheduledMap->fk_object;
 	$created['events'][] = $scheduledId;
+	$eventWithoutDocument = liveHttp($davBaseUrl, $login, $password, 'GET', $scheduledPath);
+	liveHttpStatus($eventWithoutDocument, array(200), 'Appointment without native documents');
+	liveAssert(!str_contains(liveUnfold($eventWithoutDocument['body']), '#cdav-documents'),
+		'A scheduled event without documents should not include the Documents link');
 	$inboxObject = liveRow($db, 'SELECT uri, calendardata FROM '.MAIN_DB_PREFIX.'cdav_schedule_object WHERE entity = '.$entity
 		.' AND fk_principal = '.$limitedUserId." AND direction = 'I' ORDER BY rowid DESC LIMIT 1");
 	$outboxAudit = liveRow($db, 'SELECT uri, calendardata FROM '.MAIN_DB_PREFIX.'cdav_schedule_object WHERE entity = '.$entity
@@ -1114,7 +1201,7 @@ try {
 		.'</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>';
 	$calendarQuery = liveHttp($davBaseUrl, $login, $password, 'REPORT', $calendarPath, $calendarQueryBody, array('Depth: 1', 'Content-Type: application/xml; charset=utf-8'));
 	liveHttpStatus($calendarQuery, array(207), 'CalDAV calendar-query REPORT');
-	liveAssert(str_contains($calendarQuery['body'], rawurlencode($eventUri)) && str_contains($calendarQuery['body'], $prefix.' Phone appointment'), 'CalDAV time-range query did not return the appointment');
+	liveAssert(str_contains($calendarQuery['body'], rawurlencode($eventUri)) && str_contains($calendarQuery['body'], $outlookTitle), 'CalDAV time-range query did not return the appointment');
 
 	$todoQueryBody = '<?xml version="1.0" encoding="utf-8"?>'
 		.'<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
@@ -1133,7 +1220,6 @@ try {
 	liveHttpStatus($calendarMultiget, array(207), 'CalDAV calendar-multiget REPORT');
 	liveAssert(substr_count($calendarMultiget['body'], 'HTTP/1.1 200') >= 2 && str_contains($calendarMultiget['body'], 'HTTP/1.1 404'), 'CalDAV multiget did not return both component types and the missing status');
 
-	$syncBody = '<?xml version="1.0" encoding="utf-8"?><d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>';
 	$initialSync = liveHttp($davBaseUrl, $login, $password, 'REPORT', $addressBookPath, $syncBody, array('Depth: 0', 'Content-Type: application/xml; charset=utf-8'));
 	liveHttpStatus($initialSync, array(207), 'Initial RFC 6578 CardDAV sync');
 	$initialSyncToken = liveSyncToken($initialSync['body']);
@@ -1281,7 +1367,7 @@ try {
 	liveHttpStatus($limitedCalendar, array(207), 'Restricted own calendar discovery');
 	$foreignGet = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'GET', $eventPath);
 	liveAssert(in_array($foreignGet['status'], array(403, 404), true), 'Restricted user read another user calendar object');
-	$foreignPut = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'PUT', $eventPath, str_replace('Phone appointment', 'Unauthorized change', $eventFresh['body']), array('Content-Type: text/calendar'));
+	$foreignPut = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'PUT', $eventPath, str_replace($outlookTitle, $prefix.' Unauthorized change', $eventFresh['body']), array('Content-Type: text/calendar'));
 	liveAssert(in_array($foreignPut['status'], array(403, 404), true), 'Restricted user updated another user calendar object');
 	$foreignDelete = liveHttp($davBaseUrl, $limitedLogin, $limitedPassword, 'DELETE', $eventPath);
 	liveAssert(in_array($foreignDelete['status'], array(403, 404), true), 'Restricted user deleted another user calendar object');

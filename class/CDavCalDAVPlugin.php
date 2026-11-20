@@ -3,6 +3,7 @@
 namespace Dolibarr\CDav;
 
 require_once __DIR__.'/CDavMultiGetReport.php';
+require_once __DIR__.'/CDavRequestGuardPlugin.php';
 
 /** CalDAV compatibility fixes layered on Dolibarr's bundled Sabre plugin. */
 class CalDAVPlugin extends \Sabre\CalDAV\Plugin
@@ -58,8 +59,68 @@ class CalDAVPlugin extends \Sabre\CalDAV\Plugin
 		list(, $calendarUri) = \Sabre\Uri\split((string) $calendarPath);
 		list(, $objectUri) = \Sabre\Uri\split((string) $request->getPath());
 		if (preg_match('/^(\d+)-cal-/', $calendarUri, $match)) {
-			$this->backend->validateProtectedCalendarWrite((int) $match[1], $objectUri, $calendar->serialize(), (bool) $isNew);
+			$calendarId = (int) $match[1];
+			$restored = !$isNew && $request->getMethod() === 'PUT'
+				&& preg_match('#^CalDavSynchronizer/\d+\.\d+(?:\.\d+){0,2}(?:\s|$)#i', (string) $request->getHeader('User-Agent'))
+				&& $this->restoreOutlookAttachments($calendar, $calendarId, $objectUri);
+			$calendarData = $calendar->serialize();
+			if ($restored) {
+				if (strlen($calendarData) > $this->maxResourceSize) {
+					throw new RequestEntityTooLarge('The calendar data exceeds the CalDAV resource size limit');
+				}
+				$modified = true;
+			}
+			$this->backend->validateProtectedCalendarWrite($calendarId, $objectUri, $calendarData, (bool) $isNew);
 		}
+	}
+
+	/**
+	 * Restore attachments omitted when the Outlook add-in rebuilds an existing event.
+	 * @param \Sabre\VObject\Component\VCalendar $calendar Incoming Outlook calendar
+	 * @param int $calendarId Native calendar owner
+	 * @param string $objectUri Resource name
+	 * @return bool Whether attachments were restored
+	 */
+	private function restoreOutlookAttachments($calendar, int $calendarId, string $objectUri): bool
+	{
+		$targets = array();
+		foreach ($calendar->getComponents() as $component) {
+			if (!in_array($component->name, array('VEVENT', 'VTODO'), true)) continue;
+			if (isset($component->ATTACH)) return false;
+			$targets[$this->attachmentComponentKey($component)] = $component;
+		}
+		if (!$targets) return false;
+		$existing = $this->backend->getCalendarObject($calendarId, $objectUri);
+		if ($existing === null) return false;
+		$before = \Sabre\VObject\Reader::read((string) $existing['calendardata']);
+		$restored = false;
+		try {
+			foreach ($before->getComponents() as $component) {
+				if (!in_array($component->name, array('VEVENT', 'VTODO'), true) || !isset($component->ATTACH)) continue;
+				$key = $this->attachmentComponentKey($component);
+				if (!isset($targets[$key])) {
+					throw new \Sabre\DAV\Exception\Conflict('An Outlook update would discard an appointment instance with attachments');
+				}
+				foreach ($component->select('ATTACH') as $attachment) $targets[$key]->add(clone $attachment);
+				$restored = true;
+			}
+		} finally {
+			$before->destroy();
+		}
+		if (!$restored) return false;
+		$this->backend->expectCalendarVersion($calendarId, $objectUri, (string) $existing['etag'], true);
+		return true;
+	}
+
+	/**
+	 * Match attachments to the same event or recurrence exception.
+	 * @param \Sabre\VObject\Component $component Calendar event or task
+	 * @return string Component identity
+	 */
+	private function attachmentComponentKey($component): string
+	{
+		return $component->name.'|'.(string) $component->UID.'|'
+			.(isset($component->{'RECURRENCE-ID'}) ? $component->{'RECURRENCE-ID'}->serialize() : '');
 	}
 
 	/**

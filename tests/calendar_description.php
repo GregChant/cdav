@@ -27,7 +27,8 @@ register_shutdown_function(static function () use ($languageRoot) {
 	if (is_dir($languageRoot)) rmdir($languageRoot);
 });
 $conf = (object) array('entity' => 1, 'global' => new stdClass(), 'modules' => array('project' => true), 'cache' => array(),
-	'file' => (object) array('dol_document_root' => array($root, $languageRoot), 'dol_url_root' => array('', '/custom'),
+	'modules_parts' => array('hooks' => array()),
+	'file' => (object) array('dol_document_root' => array('main' => $root, 'alt0' => $languageRoot), 'dol_url_root' => array('main' => '', 'alt0' => '/custom'),
 		'dol_main_url_root' => DOL_MAIN_URL_ROOT, 'character_set_client' => 'UTF-8'));
 require $root.'/includes/sabre/autoload.php';
 require $root.'/core/lib/functions.lib.php';
@@ -44,6 +45,14 @@ class DescriptionDatabase
 	public $interventionCandidates = array();
 	public $interventionAllowed = array();
 	public $tagRow = null;
+	/**
+	 * Provide the native prefix required by the Link API.
+	 * @return string Test database prefix
+	 */
+	public function prefix()
+	{
+		return MAIN_DB_PREFIX;
+	}
 	/**
 	 * Expose only the optional booking receipt tables.
 	 * @param string $table Requested table
@@ -107,6 +116,15 @@ class DescriptionDatabase
 	public function fetch_object($result)
 	{
 		return array_shift($result->rows);
+	}
+	/**
+	 * Count the native Link cursor results without a database.
+	 * @param object $result Cursor
+	 * @return int Number of fixture rows
+	 */
+	public function num_rows($result)
+	{
+		return count($result->rows);
 	}
 	// phpcs:enable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
 }
@@ -367,6 +385,49 @@ foreach (array('fr_FR' => array('Rendez-vous', 'Client et contact', 'Projet', 'R
 		'Explicitly clearing an editable field must remove only its generated label/value');
 }
 descriptionAssert($collectionTags['fr_FR'] !== $collectionTags['en_US'], 'Changing the native user language must invalidate the calendar collection tag');
+
+$documentRoot = $languageRoot.'/agenda';
+$eventDocumentRoot = $documentRoot.'/'.$event->id;
+descriptionAssert(mkdir($eventDocumentRoot, 0700, true), 'Unable to prepare an Agenda file fixture');
+$conf->agenda = (object) array('dir_output' => $documentRoot);
+$document = $eventDocumentRoot.'/appointment.pdf';
+$documentsUrl = DOL_MAIN_URL_ROOT.'/comm/action/document.php?id='.$event->id.'#cdav-documents';
+$nativeHtml = '<p>Keep this <strong>native</strong> note.</p>';
+try {
+	foreach (array('fr_FR' => 'Documents du rendez-vous', 'en_US' => 'Appointment documents') as $language => $documentsLabel) {
+		descriptionAssert(file_put_contents($document, 'Agenda fixture') !== false, 'Unable to prepare a native appointment document');
+		$documentLangs = new Translate('', $conf);
+		$documentLangs->setDefaultLang($language);
+		$documentLib = new CdavLib($user, $db, $documentLangs, true);
+		$documentsEvent = clone $event;
+		$documentsEvent->note = $nativeHtml;
+		$calendar = Sabre\VObject\Reader::read($documentLib->toVCalendar(7, $documentsEvent, true));
+		$description = (string) $calendar->VEVENT->DESCRIPTION;
+		$calendar->destroy();
+		descriptionAssert(substr_count($description, $documentsUrl) === 1 && str_contains($description, $documentsLabel),
+			'An authenticated CalDAV event with a native document must contain one localized Documents link');
+		descriptionAssert(!str_contains($documentsEvent->_cdav_description['text'], $documentsUrl)
+			&& Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($documentsEvent->_cdav_description, $description) === $nativeHtml,
+			'The generated Documents line must stay outside the native note and survive an exact client echo');
+		$icsLib = new CdavLib($user, $db, $documentLangs);
+		descriptionAssert(!str_contains($icsLib->toVCalendar(7, $documentsEvent, true), '#cdav-documents')
+			&& !str_contains($documentLib->toVCalendar(7, $documentsEvent, true, true), '#cdav-documents'),
+			'Full ICS and time-only booking exports must omit the authenticated CalDAV Documents link');
+		$taskWithDocument = clone $documentsEvent;
+		$taskWithDocument->percent = 25;
+		descriptionAssert(!str_contains($documentLib->toVCalendar(7, $taskWithDocument, true), '#cdav-documents'),
+			'Native Agenda tasks must omit the appointment Documents link');
+		descriptionAssert(unlink($document), 'Unable to remove the last appointment document fixture');
+		descriptionAssert(!str_contains($documentLib->toVCalendar(7, $documentsEvent, true), '#cdav-documents')
+			&& Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($documentsEvent->_cdav_description, $description) === $nativeHtml,
+			'A stale client echo after the last document was removed must leave native notes intact');
+	}
+} finally {
+	if (is_file($document)) unlink($document);
+	rmdir($eventDocumentRoot);
+	rmdir($documentRoot);
+	unset($conf->agenda);
+}
 
 $task = clone $event;
 $task->elem_source = 'pt';

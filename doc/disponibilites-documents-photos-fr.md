@@ -72,6 +72,13 @@ serveur CDav et accepte la même authentification que l'agenda, sans exiger une
 session de navigateur. L'accès est contrôlé sur le rendez-vous. Les liens HTTPS
 natifs restent également exportés.
 
+Lorsque le rendez-vous contient au moins un fichier ou un lien dans l’onglet
+**Documents**, la description CalDAV affiche **Documents du rendez-vous** avec
+l’adresse de cet onglet. Ce lien unique reste valable lorsque les fichiers
+changent. Il ouvre Dolibarr et applique les droits Agenda de l’utilisateur
+connecté. CDav génère cette ligne à l’export et conserve les notes natives lors
+d’un aller-retour de synchronisation.
+
 Pour permettre les dépôts depuis un client, activer **Pièces jointes gérées des
 rendez-vous** dans **Configuration du module CDav**, puis régler la taille
 maximale, le nombre de fichiers par rendez-vous et le quota par utilisateur.
@@ -85,18 +92,27 @@ Deux mécanismes sont pris en charge :
   Un nouvel envoi identique réutilise le document.
 
 Les droits natifs d'écriture Agenda s'appliquent, y compris pour un utilisateur
-non administrateur sur ses propres rendez-vous. Un compte qui ne peut pas
-consulter le rendez-vous ne peut pas télécharger ses documents. Les limites,
-contrôles de nom/type de fichier et contrôles antivirus natifs restent appliqués.
+non administrateur sur ses propres rendez-vous. Par défaut, les rendez-vous
+créés dans Dolibarr et les anciens événements d'origine incertaine restent
+protégés. Leurs documents se modifient dans Dolibarr. Voir le
+[guide de protection des rendez-vous](protection-metier-dav-fr.md#rendez-vous).
+Le téléchargement exige un droit de lecture sur le rendez-vous. Les limites,
+contrôles de nom et de type de fichier et contrôles antivirus natifs s'appliquent.
 Lorsque les dépôts sont désactivés, un envoi binaire est refusé explicitement.
 Un lien HTTPS externe reste un lien ; son contenu distant n'est pas téléchargé
 automatiquement dans Dolibarr.
 
-Le comportement de l'interface varie selon le client et le connecteur : un
-logiciel peut afficher ou télécharger une pièce jointe sans proposer son ajout.
-Cela doit être essayé sur les versions utilisées de Thunderbird, Apple,
-DAVx⁵ et du connecteur Outlook. La prise en charge des formats serveur ne garantit
-pas que chaque client expose toutes ces actions.
+### Outlook et Android
+
+- **Outlook avec CalDav Synchronizer** synchronise le rendez-vous. Le connecteur
+  recrée le contenu iCalendar sans reprendre les propriétés `ATTACH` lors d'une
+  modification Outlook. CDav conserve les pièces jointes existantes lorsqu'une
+  modification de ce connecteur omet ces propriétés. Les fichiers se gèrent dans
+  l'onglet **Documents** de Dolibarr. [Code du connecteur Outlook](https://github.com/aluxnimm/outlookcaldavsynchronizer/blob/c7bb23187c6b3a409fcb1c9f2d9cb1160f759a69/CalDavSynchronizer/Implementation/Events/EventEntityMapper.cs#L185-L207)
+- **DAVx⁵ avec un agenda Android standard** conserve certaines propriétés
+  iCalendar en arrière-plan. Le fournisseur de calendriers Android ne permet
+  pas aux agendas d'échanger, d'afficher ou de modifier ces pièces jointes de
+  façon standard. [Documentation DAVx⁵](https://manual.davx5.com/integration.html#extended-event-properties)
 
 Les abonnements ICS restent en lecture seule ; les URL de documents natifs
 qu'ils contiennent utilisent les contrôles d'accès de Dolibarr.

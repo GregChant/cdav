@@ -7,12 +7,13 @@
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 require_once dirname(__DIR__).'/class/CDavAppointmentStatus.php';
+require_once __DIR__.'/cdav_transport.lib.php';
 
 
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-native-recurrence-v8';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-agenda-documents-v10';
 
 	/** Series ID written by the native Agenda form when saving separate occurrences. */
 	private const AGENDA_SERIES_ID_PATTERN = '^[0-9]{14}$';
@@ -652,13 +653,32 @@ class CdavLib
 	}
 
 	/**
+	 * Build a browser link to the Agenda document tab using the configured origin.
+	 * @param int $eventId Native Agenda identifier
+	 * @return string Authenticated document tab URL, or empty when unavailable
+	 */
+	public function actionCommDocumentsUrl(int $eventId): string
+	{
+		if ($eventId <= 0) return '';
+		$url = dol_buildpath('comm/action/document.php', 3);
+		$parts = parse_url($url);
+		if (!is_array($parts) || !in_array(strtolower($parts['scheme'] ?? ''), array('http', 'https'), true)
+			|| empty($parts['host']) || isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])) return '';
+		return $url.'?id='.$eventId.'#cdav-documents';
+	}
+
+	/**
 	 * Add native Dolibarr appointment documents to the iCalendar master item.
 	 *
 	 * External links use the Link API. Physical files use the protected DAV
 	 * download endpoint for CalDAV, or native document.php for ICS consumers.
 	 * Existing ATTACH values are kept and deduplicated.
+	 * @param int $eventId Native Agenda identifier
+	 * @param string $calendarData Calendar with native fields and DAV metadata
+	 * @param string $documentsUrl Optional authenticated browser fallback
+	 * @return string Enriched iCalendar data
 	 */
-	private function addActionCommAttachments($eventId, $calendarData)
+	private function addActionCommAttachments($eventId, $calendarData, string $documentsUrl)
 	{
 		global $conf;
 
@@ -676,13 +696,18 @@ class CdavLib
 			}
 
 			$seen = array();
+			$nativeDavBases = cdav_attachment_base_urls('agenda-documents');
+			$managedDavBases = cdav_attachment_base_urls('attachments');
+			$eventPath = rawurlencode((string) $eventId).'/';
 			foreach ($component->select('ATTACH') as $attachment) {
-				$nativeDavPrefix = rtrim(dol_buildpath('/cdav/server.php/agenda-documents/'.rawurlencode((string) $eventId), 3), '/').'/';
-				if (!isset($attachment['MANAGED-ID']) && str_starts_with(trim((string) $attachment), $nativeDavPrefix)) {
-					// Native documents are reconstructed below. A client may echo this
-					// URI back into stored metadata before the native file is deleted.
-					$component->remove($attachment);
-					continue;
+				if (!isset($attachment['MANAGED-ID'])) {
+					foreach ($nativeDavBases as $nativeDavBase) {
+						if (str_starts_with(trim((string) $attachment), $nativeDavBase.$eventPath)) {
+							// Rebuild native files below, including after a client echoes an old URL.
+							$component->remove($attachment);
+							continue 2;
+						}
+					}
 				}
 				if (isset($attachment['MANAGED-ID']) && preg_match('/^[a-f0-9]{64}$/D', (string) $attachment['MANAGED-ID'])
 					&& $this->db->DDLInfoTable(MAIN_DB_PREFIX.'cdav_managed_attachment')) {
@@ -697,6 +722,7 @@ class CdavLib
 						$component->remove($attachment);
 						continue;
 					}
+					$attachment->setValue($managedDavBases[0].rawurlencode((string) $attachment['MANAGED-ID']));
 					$attachment['SIZE'] = (string) filesize($managedPath);
 					$attachment['X-CDAV-CONTENT-HASH'] = hash_file('sha256', $managedPath);
 				}
@@ -720,6 +746,7 @@ class CdavLib
 			if ($linkReader->fetchAll($links, 'action', (int) $eventId) < 0) {
 				throw new \RuntimeException('Unable to read native appointment links');
 			}
+			$hasDocuments = !empty($links);
 			foreach ($links as $link) {
 				$url = trim((string) $link->url);
 				$parts = parse_url($url);
@@ -755,10 +782,11 @@ class CdavLib
 				}
 				foreach (dol_dir_list($directory, 'files', 0, '', '(\.meta|_preview.*\.png)$') as $file) {
 					$filename = basename((string) $file['name']);
-					if (isset($managedFiles[$filename])) continue;
 					if ($filename === '' || $filename[0] === '.' || is_link($directory) || is_link($directory.'/'.$filename)) continue;
+					$hasDocuments = true;
+					if (isset($managedFiles[$filename])) continue;
 					$url = $this->davDocumentUrls
-						? dol_buildpath('/cdav/server.php/agenda-documents/'.rawurlencode((string) $eventId).'/'.rawurlencode($filename), 3)
+						? $nativeDavBases[0].$eventPath.rawurlencode($filename)
 						: $documentBase.'?modulepart=actions&attachment=1&file='
 							.urlencode($eventId.'/'.$filename).'&entity='.((int) $conf->entity);
 					if (isset($seen[$url])) {
@@ -773,6 +801,11 @@ class CdavLib
 					));
 					$seen[$url] = true;
 				}
+			}
+			if ($hasDocuments && $documentsUrl !== '') {
+				$description = (string) $component->DESCRIPTION;
+				$component->DESCRIPTION = $description.($description !== '' ? "\n\n" : '')
+					.$this->langs->transnoentitiesnoconv('CDavCalendarDocuments').' : '.$documentsUrl;
 			}
 
 			return $calendar->serialize();
@@ -1342,6 +1375,9 @@ class CdavLib
 			$description = '';
 			if (!$booking) {
 				$obj->_cdav_description = $this->getCalendarDescriptionParts($obj);
+				if ($this->davDocumentUrls && $type === 'VEVENT' && $bHeader) {
+					$obj->_cdav_description['documents_url'] = $this->actionCommDocumentsUrl((int) $obj->id);
+				}
 				$description = $obj->_cdav_description['text'];
 			}
 			$caldata.="DESCRIPTION:".$this->escapeICalendarText($description)."\n";
@@ -1353,7 +1389,7 @@ class CdavLib
 				$caldata = $this->applyNativeRecurrence((int) $obj->id, $caldata, $booking ? $obj : null);
 				if (!$booking) {
 					$caldata = $this->addNativeReminders((int) $obj->id, (int) $calid, $caldata);
-					$caldata = $this->addActionCommAttachments((int) $obj->id, $caldata);
+					$caldata = $this->addActionCommAttachments((int) $obj->id, $caldata, $obj->_cdav_description['documents_url'] ?? '');
 				}
 			}
 		}

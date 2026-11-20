@@ -112,6 +112,12 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.4.3 adds a link to the native Documents tab in the CalDAV description
+of appointments with documents. Dolibarr applies its regular login and Agenda
+permissions. CDav preserves attachments omitted by Outlook CalDav Synchronizer
+during updates and exports working file URLs when installed under `custom`.
+See the [French appointment documents guide](doc/disponibilites-documents-photos-fr.md).
+
 Version 6.4.2 lets administrators retrieve and copy the current public booking
 link for each profile. Renewing and revoking a link remain separate actions.
 Existing links continue to work, and an administrator who has the original URL
