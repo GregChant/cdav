@@ -201,6 +201,27 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 		$toggleRight($allId, true);
 		$taskView(true, 'native all-project reader');
 		liveOk('BL27 task assignments cannot bypass native project read scope in EVENT/TODO GET or calendar-multiget');
+
+		$taskOwnerHttp = static function ($method, $body = null, $headers = array()) use ($context, $taskPaths) {
+			return liveHttp($context['base_url'], $context['login'], $context['password'], $method, $taskPaths[1], $body, $headers);
+		};
+		$taskViewForOwner = $taskOwnerHttp('GET');
+		liveHttpStatus($taskViewForOwner, array(200), 'Project task title read');
+		$taskCalendar = Sabre\VObject\Reader::read($taskViewForOwner['body']);
+		$newTitle = '[Client] '.$prefix.' Renamed task';
+		$taskCalendar->VTODO->SUMMARY = $newTitle;
+		$taskHeaders = array('Content-Type: text/calendar; charset=utf-8');
+		liveHttpStatus($taskOwnerHttp('PUT', $taskCalendar->serialize(), $taskHeaders), array(200, 204), 'Project task bracketed title write');
+		$taskCalendar->destroy();
+		$taskViewForOwner = $taskOwnerHttp('GET');
+		liveHttpStatus($taskViewForOwner, array(200), 'Project task decorated title read');
+		$taskCalendar = Sabre\VObject\Reader::read($taskViewForOwner['body']);
+		liveAssert((string) $taskCalendar->VTODO->SUMMARY === '['.$project->title.'] '.$newTitle, 'Task export lost the native prefix or the user-supplied bracketed title');
+		$taskCalendar->destroy();
+		liveHttpStatus($taskOwnerHttp('PUT', $taskViewForOwner['body'], $taskHeaders), array(200, 204), 'Project task decorated title echo');
+		liveAssert((string) liveRow($db, 'SELECT label FROM '.MAIN_DB_PREFIX.'projet_task WHERE rowid = '.((int) $task->id))->label === $newTitle,
+			'Project task echo stored the generated prefix in the native title');
+		liveOk('Project task title preserves brackets and strips only the generated project prefix');
 	} finally {
 		foreach (array_keys($grantedRights) as $rightId) {
 			liveAssert($limited->delrights((int) $rightId, '', '', $entity) > 0, 'Unable to restore native project reader permissions');

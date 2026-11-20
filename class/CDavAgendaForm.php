@@ -4,7 +4,7 @@ namespace Dolibarr\CDav;
 
 require_once DOL_DOCUMENT_ROOT.'/core/class/html.form.class.php';
 
-/** Bridge Dolibarr 24's per-event assignee session to its legacy native renderer. */
+/** Bridge Dolibarr 24.0.0 and 24.0.1 per-event assignees to the native renderer. */
 class AgendaForm extends \Form
 {
 	// phpcs:disable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps -- Native Form override.

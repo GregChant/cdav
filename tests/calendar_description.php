@@ -63,6 +63,17 @@ class DescriptionDatabase
 		return addslashes($value);
 	}
 	/**
+	 * Mirror the native regex predicate for the booking query shape.
+	 * @param string $subject SQL expression to match
+	 * @param string $pattern Native Agenda series ID format
+	 * @param int $sqlstring Whether the subject is an SQL expression
+	 * @return string Native SQL predicate
+	 */
+	public function regexpsql($subject, $pattern, $sqlstring = 0)
+	{
+		return '('.$subject." REGEXP '".$this->escape($pattern)."')";
+	}
+	/**
 	 * Format a timestamp through the native database boundary.
 	 * @param int $timestamp Native timestamp
 	 * @return string
@@ -397,9 +408,24 @@ descriptionAssert($intervention->_cdav_description['native_note'] === $intervent
 	'Public intervention notes must remain outside the editable line-description region');
 descriptionAssert($lib->getCalendarDescriptionPrefixForFields($intervention->_cdav_description, 'Forged parent title', 'Forged CRM address')
 	=== $intervention->_cdav_description['note_prefix'], 'Intervention parent titles and derived locations must remain immutable');
+
+$nativeSeries = clone $event;
+$nativeSeries->recurid = '20261118074500';
+$nativeSeries->recurrule = 'FREQ=WEEKLY_BYDAY5';
+$nativeSeries->recurdateend = '2026-12-18 23:59:59';
+$seriesCalendar = Sabre\VObject\Reader::read($lib->toVCalendar(7, $nativeSeries, true, true));
+descriptionAssert(!isset($seriesCalendar->VEVENT->RRULE), 'A row materialized by the native Agenda recurrence form must occupy only its stored dates');
+$seriesCalendar->destroy();
+$nativeSeries->recurid = '';
+$seriesCalendar = Sabre\VObject\Reader::read($lib->toVCalendar(7, $nativeSeries, true, true));
+descriptionAssert(str_starts_with((string) $seriesCalendar->VEVENT->RRULE, 'FREQ=WEEKLY;BYDAY=FR'), 'A standalone declarative native recurrence must still expand');
+$seriesCalendar->destroy();
+
 $bookingSql = $lib->getSqlCalEvents(7, false, false, array(strtotime('2026-11-20'), strtotime('2026-11-22')));
 descriptionAssert(strpos($bookingSql, 'sp.email') === false && strpos($bookingSql, 's.email') === false,
 	'Anonymous booking SQL must not select newly displayed contact or company emails');
+descriptionAssert(str_contains($bookingSql, "NOT (COALESCE(a.recurid,'') REGEXP '^[0-9]{14}$')"),
+	'Materialized native recurrence rows without iCalendar metadata must match the actual booking date window');
 
 // Project links may be visible on Agenda while project contents remain private.
 $aclRow = clone $event;

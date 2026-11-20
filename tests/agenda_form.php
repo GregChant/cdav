@@ -12,7 +12,7 @@ require __DIR__.'/bootstrap.php';
 cdavTestStrictErrors($root);
 define('DOL_DOCUMENT_ROOT', $root);
 require $root.'/version.inc.php';
-require dirname(__DIR__).'/class/CDavAgendaForm.php';
+require $root.'/core/class/html.form.class.php';
 require dirname(__DIR__).'/class/actions_cdav.class.php';
 
 use Dolibarr\CDav\AgendaForm;
@@ -81,44 +81,52 @@ class AgendaFormTranslations
 
 $db = new stdClass();
 $langs = new AgendaFormTranslations();
-$form = new AgendaForm($db);
-$first = array(42 => array('id' => 42, 'transparency' => 1));
-$second = array(73 => array('id' => 73, 'transparency' => 0));
-$_SESSION = array('assignedtouser' => json_encode(array(99 => array('id' => 99, 'transparency' => 0))),
-	'assignedtouser_10' => json_encode($first), 'assignedtouser_11' => json_encode($second));
-$original = $_SESSION;
-foreach (array('assignedtouser_10', 'assignedtouser_11', 'assignedtouser_10') as $sessionkeyassignedtouser) {
-	$selected = $sessionkeyassignedtouser === 'assignedtouser_10' ? $first : $second;
-	$html = $form->select_dolusers_forevent('view', 'assignedtouser', 1, array(), 0, '', array(), '0', 0, 0, '', 1, $selected);
-	$owner = key($selected);
-	agendaFormAssert(str_contains($html, 'Collaborator '.$owner) && !str_contains($html, 'Collaborator 99'), 'The native renderer used another tab or the legacy selection');
-	agendaFormAssert(str_contains($html, 'name="transparency"') && str_contains($html, 'name="transparency" checked') === (bool) $selected[$owner]['transparency'], 'The native availability checkbox lost the selected tab occupancy');
-	agendaFormAssert($_SESSION === $original, 'Rendering changed a per-event selection or leaked its temporary legacy view');
-}
-User::$fail = true;
-$failed = false;
-try {
-	$form->select_dolusers_forevent('view');
-} catch (RuntimeException $error) {
-	$failed = $error->getMessage() === 'Fictitious native renderer failure';
-} finally {
-	User::$fail = false;
-}
-agendaFormAssert($failed && $_SESSION === $original, 'A parent renderer failure did not restore the legacy selection');
-unset($_SESSION['assignedtouser']);
-$form->select_dolusers_forevent('view');
-agendaFormAssert(!array_key_exists('assignedtouser', $_SESSION), 'The bridge created a persistent legacy selection when none existed');
-$_SESSION = $original;
-unset($GLOBALS['sessionkeyassignedtouser']);
-$native = new Form($db);
-agendaFormAssert($form->select_dolusers_forevent('view') === $native->select_dolusers_forevent('view'), 'Without a native per-event key the original renderer must remain authoritative');
-
 $form = new Form($db);
+$native = $form;
 $form->error = 'preserved native property';
 $hooks = new ActionsCDav();
 $object = null;
 $action = 'edit';
 $hooks->llxHeader(array('currentcontext' => 'actioncard'), $object, $action, null);
-agendaFormAssert(($form instanceof AgendaForm) === ((int) DOL_VERSION === 24) && $form->error === 'preserved native property', 'Header integration changed Dolibarr 23 or discarded existing native Form properties');
+$usesPerEventSession = (int) DOL_VERSION === 24;
+$needsBridge = $usesPerEventSession && version_compare(explode('-', DOL_VERSION, 2)[0], '24.0.2', '<');
+agendaFormAssert($needsBridge ? $form instanceof AgendaForm : $form === $native, 'The header should replace the native Form only in Dolibarr 24.0.0 and 24.0.1');
+agendaFormAssert($form->error === 'preserved native property', 'Header integration discarded existing native Form properties');
 
-echo "[OK] Native Agenda renderer, independent tab selections, availability and restoration on failure.\n";
+$first = array(42 => array('id' => 42, 'transparency' => 1));
+$second = array(73 => array('id' => 73, 'transparency' => 0));
+$_SESSION = array('assignedtouser' => json_encode(array(99 => array('id' => 99, 'transparency' => 0))),
+	'assignedtouser_10' => json_encode($first), 'assignedtouser_11' => json_encode($second));
+$original = $_SESSION;
+if ($usesPerEventSession) {
+	foreach (array('assignedtouser_10', 'assignedtouser_11', 'assignedtouser_10') as $sessionkeyassignedtouser) {
+		$selected = $sessionkeyassignedtouser === 'assignedtouser_10' ? $first : $second;
+		$html = $form->select_dolusers_forevent('view', 'assignedtouser', 1, array(), 0, '', array(), '0', 0, 0, '', 1, $selected);
+		$owner = key($selected);
+		agendaFormAssert(str_contains($html, 'Collaborator '.$owner) && !str_contains($html, 'Collaborator 99'), 'The native renderer used another tab or the legacy selection');
+		agendaFormAssert(str_contains($html, 'name="transparency"') && str_contains($html, 'name="transparency" checked') === (bool) $selected[$owner]['transparency'], 'The native availability checkbox lost the selected tab occupancy');
+		agendaFormAssert($_SESSION === $original, 'Rendering changed a per-event selection or leaked its temporary legacy view');
+	}
+}
+
+if ($needsBridge) {
+	User::$fail = true;
+	$failed = false;
+	try {
+		$form->select_dolusers_forevent('view');
+	} catch (RuntimeException $error) {
+		$failed = $error->getMessage() === 'Fictitious native renderer failure';
+	} finally {
+		User::$fail = false;
+	}
+	agendaFormAssert($failed && $_SESSION === $original, 'A parent renderer failure did not restore the legacy selection');
+	unset($_SESSION['assignedtouser']);
+	$form->select_dolusers_forevent('view');
+	agendaFormAssert(!array_key_exists('assignedtouser', $_SESSION), 'The bridge created a persistent legacy selection when none existed');
+	$_SESSION = $original;
+}
+unset($GLOBALS['sessionkeyassignedtouser']);
+$html = $form->select_dolusers_forevent('view');
+agendaFormAssert(str_contains($html, 'Collaborator 99'), 'Without a native per-event list the original renderer must remain authoritative');
+
+echo "[OK] Native Agenda renderer and per-version assignee compatibility.\n";

@@ -240,6 +240,15 @@ foreach (array('3.0', '4.0') as $version) {
 	}
 }
 
+$member = (object) array('civility_code' => 'MR', 'civility_id' => 'MR');
+foreach (array('MME', '') as $civility) {
+	$card = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:native-refactor\r\nN:Doe;Jane;;".$civility.";\r\nFN:Jane Doe\r\nEND:VCARD\r\n";
+	$data = $invoke('_parseDataMember', array($card, 'U'));
+	$invoke('_applyMemberData', array($member, $data, true));
+	cardRefactorAssert($member->civility_code === $civility && $member->civility_id === $civility,
+		'Member civility replacement did not reach both native Dolibarr properties');
+}
+
 preg_match_all('/\$obj->([a-z_]+)/i', file_get_contents(dirname(__DIR__).'/class/CardDAVDolibarr.php'), $matches);
 $row = (object) array_fill_keys(array_unique($matches[1]), '');
 foreach (array('rowid' => 9, 'entity' => 1, 'lastupd' => '2026-11-18 09:00:00', 'lastname' => 'Doe', 'firstname' => 'Jane',

@@ -200,6 +200,9 @@ sameValue('jane@example.test', $event['participants'][0]['email'], 'Attendee ema
 sameValue('ACCEPTED', $event['participants'][0]['partstat'], 'Attendee PARTSTAT must be retained');
 sameValue(1, count($event['attachment_links']), 'Only safe HTTPS appointment attachments may become Dolibarr links');
 sameValue('agenda.pdf', $event['attachment_links'][0]['label'], 'The standard attachment filename must be retained');
+$bracketedTitle = '[Client] External meeting';
+$bracketedEvent = invokeParser($calendarBackend, '_parseData', array(str_replace('SUMMARY:External meeting', 'SUMMARY:'.$bracketedTitle, $eventData), null));
+sameValue($bracketedTitle, $bracketedEvent['label'], 'An Agenda appointment must retain a user-supplied bracketed title');
 
 $compatibleEventData = str_replace(
 	"ATTACH;FILENAME=agenda.pdf:https://files.example.test/agenda.pdf\r\n",
@@ -255,10 +258,11 @@ sameValue(1, $allDay['fullday'], 'Date-only events must stay all-day');
 sameValue(86400, $allDay['end'] - $allDay['start'], 'A date-only event without DTEND lasts one day');
 
 $todo = invokeParser($calendarBackend, '_parseData', array(
-	"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CDav tests//EN\r\nBEGIN:VTODO\r\nUID:todo-1\r\nDUE;VALUE=DATE:20261012\r\nSUMMARY:Task\r\nPERCENT-COMPLETE:150\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+	"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CDav tests//EN\r\nBEGIN:VTODO\r\nUID:todo-1\r\nDUE;VALUE=DATE:20261012\r\nSUMMARY:[Client] Task\r\nPERCENT-COMPLETE:150\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
 	null,
 ));
 sameValue(100, $todo['percent'], 'Task completion must be clamped');
+sameValue('[Client] Task', $todo['label'], 'An Agenda to-do must retain a user-supplied bracketed title');
 
 $rejected = false;
 try {

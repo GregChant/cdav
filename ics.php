@@ -34,6 +34,11 @@ function base64url_decode($data) {
 $cdavBootstrapFile = __FILE__;
 require __DIR__.'/lib/cdav_bootstrap.inc.php';
 
+if (!isModEnabled('cdav') || !isModEnabled('agenda')) {
+	http_response_code(404);
+	exit;
+}
+
 require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
 require_once __DIR__.'/class/CDavFreeBusyFilter.php';

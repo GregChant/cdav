@@ -435,9 +435,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				'principaluri'												  => $principalUri,
 				'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookName', $companyName),
 				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavContactsAddressBookDescription', $companyName, $this->user->login),
-				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('contact'),
 			];
-			$this->_addAddressBookSyncToken($addressBooks[count($addressBooks) - 1]);
+			$this->_addAddressBookSyncProperties($addressBooks[count($addressBooks) - 1]);
 		}
 
 		if (CDAV_THIRD_SYNC > 0 && $this->_hasRight('societe', 'read'))
@@ -448,9 +447,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				'principaluri'												  => $principalUri,
 				'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavThirdPartiesAddressBookName', $companyName),
 				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavThirdPartiesAddressBookDescription', $companyName, $this->user->login),
-				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('thirdparty'),
 			];
-			$this->_addAddressBookSyncToken($addressBooks[count($addressBooks) - 1]);
+			$this->_addAddressBookSyncProperties($addressBooks[count($addressBooks) - 1]);
 		}
 
 		if (CDAV_MEMBER_SYNC > 0 && $this->_hasRight('adherent', 'read'))
@@ -461,52 +459,35 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				'principaluri'												  => $principalUri,
 				'{DAV:}displayname'											  => $this->langs->transnoentitiesnoconv('CDavMembersAddressBookName', $companyName),
 				'{' . CardDAV\Plugin::NS_CARDDAV . '}addressbook-description' => $this->langs->transnoentitiesnoconv('CDavMembersAddressBookDescription', $companyName, $this->user->login),
-				'{http://calendarserver.org/ns/}getctag'					  => $this->_getAddressBookCollectionTag('member'),
 			];
-			$this->_addAddressBookSyncToken($addressBooks[count($addressBooks) - 1]);
+			$this->_addAddressBookSyncProperties($addressBooks[count($addressBooks) - 1]);
 		}
 
 		return $addressBooks;
 
 	}
 
-	/** Add a sync token only when all RFC 6578 technical tables are present. */
-	private function _addAddressBookSyncToken(array &$addressBook)
+	/** Build both collection properties from the same visible card representations. */
+	private function _addAddressBookSyncProperties(array &$addressBook)
 	{
-		$objects = array();
-		foreach ($this->getCards((int) $addressBook['id']) as $card) {
-			$objects[(string) $card['uri']] = (string) ($card['etag'] ?? '');
-		}
-		$token = $this->syncStore->synchronize('card', (int) $addressBook['id'], $objects);
+		$addressbookId = (int) $addressBook['id'];
+		$objects = $this->_getAddressBookCardEtags($addressbookId);
+		$addressBook['{http://calendarserver.org/ns/}getctag'] = sha1(serialize(array(CDAV_URI_KEY, self::CARD_SERIALIZATION_VERSION, $addressbookId, $objects)));
+		$token = $this->syncStore->synchronize('card', $addressbookId, $objects);
 		if ($token !== null) {
 			$addressBook['{DAV:}sync-token'] = $token;
 		}
 	}
 
-	/**
-	 * A collection tag must also change when a card is removed or when its
-	 * categories change. MAX(tms) alone misses both cases.
-	 */
-	private function _getAddressBookCollectionTag($type)
+	/** Return stable URI => ETag pairs for collection discovery and sync reports. */
+	private function _getAddressBookCardEtags($addressbookId)
 	{
-		if ($type === 'contact') {
-			$sql = $this->_getSqlContacts();
-		} elseif ($type === 'thirdparty') {
-			$sql = $this->_getSqlThirdparties();
-		} else {
-			$sql = $this->_getSqlMembers();
+		$objects = array();
+		foreach ($this->getCards($addressbookId) as $card) {
+			$objects[(string) $card['uri']] = (string) ($card['etag'] ?? '');
 		}
-		$result = $this->db->query($sql);
-		$tokens = array();
-		if ($result) {
-			while ($row = $this->db->fetch_object($result)) {
-				$tokens[] = ((int) $row->rowid).':'.((string) $row->lastupd).':'.((string) $row->category_ids)
-					.':'.((string) $row->ref_ext).':'.((string) $row->cdav_uuidext).':'.((string) $row->cdav_sourceuid)
-					.':'.hash('sha256', $this->_photoPropertyForRow($type, $row));
-			}
-		}
-		sort($tokens, SORT_STRING);
-		return sha1(CDAV_URI_KEY.'|'.self::CARD_SERIALIZATION_VERSION.'|'.$type.'|'.implode('|', $tokens));
+		ksort($objects, SORT_STRING);
+		return $objects;
 	}
 
 	private function _getCardObjectUri($obj, $type)
@@ -1367,8 +1348,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$sql = 'SELECT p.*, co.label country_label, '.$lastUpdatedSql.' lastupd, s.code_client soc_code_client, s.code_fournisseur soc_code_fournisseur,
 					COALESCE(s.nom, p.societe) soc_nom, s.name_alias soc_name_alias, s.address soc_address, s.zip soc_zip, s.town soc_town, cos.label soc_country_label, s.phone soc_phone, s.fax soc_fax,
 					s.email soc_email, s.url soc_url, s.client soc_client, s.fournisseur soc_fournisseur, s.note_private soc_note_private, s.note_public soc_note_public,
-					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label,
-					GROUP_CONCAT(DISTINCT cc.fk_categorie ORDER BY cc.fk_categorie ASC SEPARATOR \',\') category_ids'.$mappingSelect.'
+					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label'.$mappingSelect.'
 				FROM '.MAIN_DB_PREFIX.'adherent as p
 				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'c_country as co ON co.rowid = p.country
@@ -1399,8 +1379,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			: '';
 		$lastUpdatedSql = $hasMappingTable ? 'GREATEST(s.tms, COALESCE(cm.tms, s.tms))' : 's.tms';
 		$sql = 'SELECT s.*, co.label country_label, '.$lastUpdatedSql.' lastupd, cfj.libelle as forme_juridique,
-					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label,
-					GROUP_CONCAT(DISTINCT cs.fk_categorie ORDER BY cs.fk_categorie ASC SEPARATOR \',\') category_ids'.$mappingSelect.'
+					GROUP_CONCAT(DISTINCT cat.label ORDER BY cat.label ASC SEPARATOR \',\') category_label'.$mappingSelect.'
 				FROM '.MAIN_DB_PREFIX.'societe as s
 				'.$mappingJoin.'
 				LEFT JOIN '.MAIN_DB_PREFIX.'societe_commerciaux as sc ON sc.fk_soc = s.rowid
@@ -1956,7 +1935,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	{
 		$member->lastname = (string) $data['lastname'];
 		$member->firstname = (string) $data['firstname'];
-		$member->civility_id = (string) $data['civility'];
+		$member->civility_code = (string) $data['civility'];
+		$member->civility_id = $member->civility_code; // Used by earlier versions of Adherent::update().
 		$member->phone = (string) $data['phone'];
 		$member->phone_perso = (string) $data['phone_perso'];
 		$member->phone_mobile = (string) $data['phone_mobile'];
@@ -2598,11 +2578,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if ((int) $syncLevel !== 1) {
 			return null;
 		}
-		$objects = array();
-		foreach ($this->getCards((int) $addressbookId) as $card) {
-			$objects[(string) $card['uri']] = (string) ($card['etag'] ?? '');
-		}
-		return $this->syncStore->getChanges('card', (int) $addressbookId, $syncToken, $limit, $objects);
+		$addressbookId = (int) $addressbookId;
+		return $this->syncStore->getChanges('card', $addressbookId, $syncToken, $limit, $this->_getAddressBookCardEtags($addressbookId));
 	}
 
 }

@@ -816,6 +816,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				return;
 			}
 			if (isset($currentObject['_cdav_description'])) {
+				$summaryPrefix = (string) ($currentObject['_cdav_description']['summary_prefix'] ?? '');
+				if ($summaryPrefix !== '' && ($calendarData['label'] === $summaryPrefix || str_starts_with($calendarData['label'], $summaryPrefix.' '))) {
+					$calendarData['label'] = ltrim(substr($calendarData['label'], strlen($summaryPrefix)));
+				}
 				$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($currentObject['_cdav_description'], $calendarData['label'], $calendarData['location']);
 				$calendarData['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($currentObject['_cdav_description'], $calendarData['description'], $replacementPrefix);
 				$calendarData['_native_note_resolved'] = true;
@@ -2810,9 +2814,6 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 
 		$label = isset($component->SUMMARY) ? trim((string) $component->SUMMARY) : '';
-		if (substr($label, 0, 1) === '[' && strpos($label, ']') !== false) {
-			$label = trim(substr($label, strpos($label, ']') + 1));
-		}
 		$location = isset($component->LOCATION)
 			? trim(str_replace(array("\r", "\t", "\n"), ' ', (string) $component->LOCATION))
 			: '';

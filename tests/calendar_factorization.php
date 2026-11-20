@@ -106,12 +106,15 @@ $labels = $descriptions = $durations = array();
 $cases = array(
 	array(array('label' => 'Line label', 'prod_label' => 'Product label', 'description' => "Line details\nSecond line", 'prod_description' => 'Product details', 'cdav_duration' => '2h', 'prod_duration' => '1h'), array('Line label', "Line details\nSecond line", '2h')),
 	array(array('prod_label' => 'Product fallback', 'prod_description' => 'Product details', 'prod_duration' => '45i'), array('Product fallback', 'Product details', '45i')),
-	array(array('description' => "Description title\nFull detail", 'cdav_duration' => '1d'), array('Description title', "Description title\nFull detail", '1d')),
+	array(array('fk_product' => null, 'description' => "Description title\nFull detail", 'cdav_duration' => '1d'), array('Description title', "Description title\nFull detail", '1d')),
 	array(array(), array('Task', '', '')),
+	array(array('fk_product' => '790', 'label' => 'Catalog service'), array('Catalog service', '', ''), 789),
 );
 foreach ($cases as $index => $case) {
-	calendarFactorizationInvoke($hook, 'appendCommercialTask', array((object) $case[0], &$labels, &$descriptions, &$durations));
+	calendarFactorizationInvoke($hook, 'appendCommercialTask', array((object) $case[0], $case[2] ?? 0, &$labels, &$descriptions, &$durations));
 	calendarFactorizationAssert(array($labels[$index], $descriptions[$index], $durations[$index]) === $case[1], 'Order/proposal service tasks must retain their original label, description and duration priorities');
 }
 calendarFactorizationAssert(count($labels) === count($cases) && count($descriptions) === count($labels) && count($durations) === count($labels), 'Commercial task values must remain aligned in document order');
+calendarFactorizationInvoke($hook, 'appendCommercialTask', array((object) array('fk_product' => '789'), 789, &$labels, &$descriptions, &$durations));
+calendarFactorizationAssert(count($labels) === count($cases) && count($descriptions) === count($cases) && count($durations) === count($cases), 'The configured WEEE product should be excluded from task generation');
 fwrite(STDOUT, "[PASS] Calendar factorization preserves native dates, event/todo semantics, identities and commercial task priorities.\n");

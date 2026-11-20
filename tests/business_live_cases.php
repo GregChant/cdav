@@ -514,7 +514,7 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		$memberBook = liveDavPath(array('addressbooks', $context['login'], 'members'), true);
 		$memberUri = $prefix.'-business-member.vcf';
 		$memberCard = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:member-business-".$context['token']
-			."\r\nFN:Business Member\r\nN:Member;Business;;;\r\nORG:".$company['nom']
+			."\r\nFN:Business Member\r\nN:Member;Business;;MR;\r\nORG:".$company['nom']
 			."\r\nEMAIL:member-".$context['token']."@example.test\r\nTEL;TYPE=work:+41225550222\r\nEND:VCARD\r\n";
 		$memberPath = $memberBook.rawurlencode($memberUri);
 		liveHttpStatus($http('PUT', $memberPath, $memberCard, $cardHeaders), array(201, 204), 'BL17 member creation with free company link');
@@ -524,6 +524,8 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		$members[] = $memberId;
 		$memberState = liveRow($db, 'SELECT fk_soc, fk_adherent_type, statut FROM '.MAIN_DB_PREFIX.'adherent WHERE rowid = '.$memberId);
 		liveAssert((int) $memberState->fk_soc === $companyId, 'Initial member company link was not established');
+		$civilitySql = 'SELECT civility FROM '.MAIN_DB_PREFIX.'adherent WHERE rowid = '.$memberId;
+		liveAssert(liveRow($db, $civilitySql)->civility === 'MR', 'CardDAV member creation did not save the initial civility');
 		liveAssert((array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'societe WHERE rowid = '.$companyId) === $company,
 			'Creating a member overwrote the linked native company');
 		$memberGet = $http('GET', $memberPath);
@@ -532,7 +534,12 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		unset($memberEdit->ORG);
 		unset($memberEdit->TEL);
 		$memberEdit->add('TEL', '+41225550333', array('TYPE' => 'work'));
+		$memberEdit->N->setParts(array('Member', 'Business', '', 'MME', ''));
 		liveHttpStatus($http('PUT', $memberPath, $memberEdit->serialize(), $cardHeaders), array(200, 204), 'BL17 member coordinate update');
+		liveAssert(liveRow($db, $civilitySql)->civility === 'MME', 'CardDAV update did not replace the existing member civility');
+		$memberEdit->N->setParts(array('Member', 'Business', '', '', ''));
+		liveHttpStatus($http('PUT', $memberPath, $memberEdit->serialize(), $cardHeaders), array(200, 204), 'BL17 member civility removal');
+		liveAssert(liveRow($db, $civilitySql)->civility === null, 'CardDAV update did not clear the existing member civility');
 		liveAssert((array) liveRow($db, 'SELECT fk_soc, fk_adherent_type, statut FROM '.MAIN_DB_PREFIX.'adherent WHERE rowid = '.$memberId) === (array) $memberState,
 			'Member coordinate editing changed lifecycle, membership type or company links');
 		liveAssert((array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'societe WHERE rowid = '.$companyId) === $company,

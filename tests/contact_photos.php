@@ -25,6 +25,7 @@ require $dolibarrRoot.'/includes/sabre/autoload.php';
 // Use the actual filename sanitizer and module/configuration helpers.
 require $dolibarrRoot.'/core/lib/functions.lib.php';
 require dirname(__DIR__).'/class/CardDAVDolibarr.php';
+require dirname(__DIR__).'/class/CDavSyncStore.php';
 require dirname(__DIR__).'/class/CDavVCardStore.php';
 
 function debug_log($message) {}
@@ -77,6 +78,7 @@ $conf = (object) array('entity' => 1, 'global' => (object) array(), 'modules' =>
 $db = new PhotoTestDatabase();
 $user = new class {
 	public $id = 1;
+	public $login = 'photo-user';
 	public $allowed = true;
 	public function hasRight($module, $level, $detail = '') { return $this->allowed; }
 };
@@ -86,12 +88,16 @@ $langs = new class {
 };
 $backend = (new ReflectionClass(PhotoTestBackend::class))->newInstanceWithoutConstructor();
 foreach (array('entity' => 1, 'db' => $db, 'langs' => $langs,
+	'syncStore' => new Dolibarr\CDav\SyncStore($db, 1),
 	'vcardStore' => new Dolibarr\CDav\VCardStore($db, 1)) as $property => $value) {
 	$reflection = new ReflectionProperty(Sabre\CardDAV\Backend\Dolibarr::class, $property);
 	if (PHP_VERSION_ID < 80500) $reflection->setAccessible(true);
 	$reflection->setValue($backend, $value);
 }
 $backend->user = $user;
+$collectionTag = static function () use ($backend, $user) {
+	return $backend->getAddressBooksForUser('principals/'.$user->login)[0]['{http://calendarserver.org/ns/}getctag'];
+};
 // Fill optional native fields with empty SQL values, as the real SELECT does.
 preg_match_all('/\$obj->([a-z_]+)/i', file_get_contents(dirname(__DIR__).'/class/CardDAVDolibarr.php'), $fields);
 $db->row = (object) array_fill_keys(array_unique($fields[1]), '');
@@ -116,15 +122,22 @@ try {
 		'Echoing an inherited company logo must not create a personal contact photo');
 	photoAssert($gif, photoInvoke($backend, '_contactPhotoForImport', array($nativeContact, $gif, $inherited['carddata'])),
 		'A different image sent by the client must remain eligible for native photo import');
-	$beforeTag = photoInvoke($backend, '_getAddressBookCollectionTag', array('contact'));
+	$beforeTag = $collectionTag();
 	file_put_contents($companyDir.'/company.png', $gif);
 	clearstatcache();
 	$changed = $backend->getCard(1, '1-ct-photo-tests');
 	photoAssert($gif, cardPhoto($changed), 'The image media type must follow its actual file contents');
 	photoAssert(false, $changed['etag'] === $inherited['etag'], 'Replacing a company logo must change the contact ETag');
-	photoAssert(false, $beforeTag === photoInvoke($backend, '_getAddressBookCollectionTag', array('contact')),
+	photoAssert(false, $beforeTag === $collectionTag(),
 		'Replacing a logo without changing SQL timestamps must change the collection tag');
 	photoAssert($changed['etag'], $backend->getCards(1)[0]['etag'], 'Collection and individual card ETags must agree');
+	$beforeTag = $collectionTag();
+	$db->row->lastname = 'Martin';
+	$nameChanged = $backend->getCard(1, '1-ct-photo-tests');
+	photoAssert(false, $changed['etag'] === $nameChanged['etag'], 'Changing a contact name must change its ETag');
+	$afterTag = $collectionTag();
+	photoAssert(false, $beforeTag === $afterTag, 'A contact change within the same SQL timestamp must change the collection tag');
+	photoAssert($afterTag, $collectionTag(), 'Repeated reads of unchanged cards must preserve the collection tag');
 
 	$db->row->photo = 'portrait.png';
 	file_put_contents($contactDir.'/portrait.png', $png);

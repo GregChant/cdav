@@ -14,11 +14,11 @@ bash tests/qa.sh
 ## Protection contre les régressions
 
 Le [workflow GitHub](../.github/workflows/qa.yml) exécute cette commande pour
-chaque pull request et chaque push sur `23.0` ou `master`, sur les quatre
-combinaisons Dolibarr 23.0.4 / 24.0.0 × PHP 8.4 / 8.5. Un échec de test, de
-syntaxe ou de PHPCS fait échouer le job. Les quatre jobs continuent indépendamment
-pour rendre visibles les incompatibilités propres à une combinaison.
-Un cinquième job exécute `bash tests/duplication.sh` avec jscpd 5.4.3 : la
+chaque pull request et chaque push sur `23.0` ou `master`, avec PHP 8.4 et 8.5
+sur Dolibarr 23.0.4, 24.0.0 et la révision `f747b0d6` de la branche officielle
+`24.0`, qui déclare la version 24.0.4. Un échec de test, de syntaxe ou de PHPCS
+fait échouer le job. Les six combinaisons sont exécutées indépendamment.
+Un job dédié exécute `bash tests/duplication.sh` avec jscpd 5.4.3. La
 production doit rester à zéro correspondance au seuil 10 lignes / 100 tokens,
 même après modification de la référence. Les tests ont un rapport séparé.
 Les rapports HTML/JSON sont conservés comme artefacts de CI. Voir
@@ -104,6 +104,7 @@ La [qualification 6.4.0](../doc/validation-etats-rendez-vous.md) documente les
 
 La suite `booking_profiles_live.php` exige aussi un serveur SMTP local de test
 sur `127.0.0.1:9125` et `CDAV_BOOKING_MAIL_SINK` vers son répertoire privé.
+Dans Dolibarr, renseigner `localhost` comme hôte SMTP et `9125` comme port.
 Elle vérifie les profils indépendants, liens tiers/projet et droits natifs,
 la concurrence entre profils, les deux messages réels, l'absence de renvoi,
 le rollback et l'échec SMTP après commit. Aucun email ne doit partir vers un

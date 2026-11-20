@@ -7,7 +7,7 @@
 class ActionsCDav
 {
 	/**
-	 * Bridge the native Agenda renderer after access checks and Form initialization.
+	 * Bridge early Dolibarr 24 Agenda renderers after access checks and Form initialization.
 	 *
 	 * @param array $parameters Native header hook context
 	 * @param CommonObject|null $object Current object when supplied by the framework
@@ -18,7 +18,9 @@ class ActionsCDav
 	public function llxHeader($parameters, &$object, &$action, $hookmanager)
 	{
 		global $db, $form;
+		// Dolibarr 24.0.2 forwards the assignee list to its native renderer.
 		if (($parameters['currentcontext'] ?? '') !== 'actioncard' || !defined('DOL_VERSION') || (int) DOL_VERSION !== 24
+			|| version_compare(explode('-', DOL_VERSION, 2)[0], '24.0.2', '>=')
 			|| !is_object($form) || get_class($form) !== 'Form') return 0;
 		require_once __DIR__.'/CDavAgendaForm.php';
 		$nativeForm = new \Dolibarr\CDav\AgendaForm($db);
@@ -67,17 +69,19 @@ class ActionsCDav
 	}
 
 	/**
-	 * Append service task values using the same commercial-line/product fallback.
-	 * Orders and proposals keep their own queries, source links and exclusion rules.
+	 * Append eligible service task values using the commercial-line/product fallback.
 	 *
 	 * @param object $line Selected order/proposal service line and product defaults
+	 * @param int $weeeProductId Configured WEEE product identifier, or zero when absent
 	 * @param array $labels Task labels, in commercial document order
 	 * @param array $descriptions Native task descriptions
 	 * @param array $durations Original native duration strings
 	 * @return void
 	 */
-	private function appendCommercialTask($line, array &$labels, array &$descriptions, array &$durations)
+	private function appendCommercialTask($line, int $weeeProductId, array &$labels, array &$descriptions, array &$durations)
 	{
+		if ($weeeProductId > 0 && (int) ($line->fk_product ?? 0) === $weeeProductId) return;
+
 		if (!empty($line->label)) {
 			$label = $line->label;
 		} elseif (!empty($line->prod_label)) {
@@ -245,10 +249,7 @@ class ActionsCDav
 						$rElmts[$det->prop_source] = $det->rowid;
 					//else echo "\n\n NOSOURCE";
 
-					if (isset($WEEE_PRODUCT_ID) && $WEEE_PRODUCT_ID == $det->fk_product)
-						continue;
-
-					$this->appendCommercialTask($det, $rTasksLib, $rTasksDesc, $rTasksDuree);
+					$this->appendCommercialTask($det, $WEEE_PRODUCT_ID, $rTasksLib, $rTasksDesc, $rTasksDuree);
 				}
 				unset($det);
 				$db->free($querydet);
@@ -281,13 +282,7 @@ class ActionsCDav
 				//echo "\n\n $sqldet \n\n";
 				$querydet = $db->query($sqldet);
 				while ($querydet && ($det = $db->fetch_object($querydet)) !== null) {
-					if (isset($WEEE_PRODUCT_ID) && $WEEE_PRODUCT_ID == $det->fk_product)
-						continue;
-
-					//if( !isset($CDAV_EXTRAFIELD_DURATION) || $CDAV_EXTRAFIELD_DURATION != true || empty($det->duration) )
-					//	continue;
-
-					$this->appendCommercialTask($det, $rTasksLib, $rTasksDesc, $rTasksDuree);
+					$this->appendCommercialTask($det, $WEEE_PRODUCT_ID, $rTasksLib, $rTasksDesc, $rTasksDuree);
 				}
 				unset($det);
 				$db->free($querydet);

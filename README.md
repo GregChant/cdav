@@ -112,6 +112,15 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.4.1 restores CardDAV member title updates with Dolibarr 24.0.4 and
+uses the corrected native Agenda form from 24.0.2 onward. Address books detect
+card changes within the same second. CalDAV preserves bracketed titles and
+exports each native recurring occurrence on its stored dates, so public booking
+frees the original slot of a moved occurrence. The release also fixes task
+generation for free-text service lines, reports duration field installation
+errors and closes ICS feeds when CDav or Agenda is disabled. The regression
+matrix includes the pre-release Dolibarr 24.0.4 branch revision `f747b0d6`.
+
 Version 6.4.0 adds a native Agenda extra field for tentative, confirmed and
 cancelled appointments, synchronized with standard CalDAV event states and
 Outlook CalDav Synchronizer's availability hints. Global state changes require

@@ -51,12 +51,15 @@ jobs:
       fail-fast: false
       matrix:
         php: ['8.4', '8.5']
-        dolibarr: ['23.0.4', '24.0.0']
+        dolibarr: ['23.0.4', '24.0.0', '24.0.4 (pre-release)']
         include:
           - dolibarr: '23.0.4'
             core-ref: cb82037066c1c71f7c867482e9e92975222dfc14
           - dolibarr: '24.0.0'
             core-ref: 769c7db907099643558e77d7002c109cfda919e5
+          # The official 24.0 branch declares 24.0.4 at this revision.
+          - dolibarr: '24.0.4 (pre-release)'
+            core-ref: f747b0d6f5ba79b6b3cb85434ceda6d3de204710
     steps:
       - name: Checkout CDav
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

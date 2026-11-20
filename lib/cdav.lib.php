@@ -12,7 +12,10 @@ require_once dirname(__DIR__).'/class/CDavAppointmentStatus.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-appointment-status-v7';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-native-recurrence-v8';
+
+	/** Series ID written by the native Agenda form when saving separate occurrences. */
+	private const AGENDA_SERIES_ID_PATTERN = '^[0-9]{14}$';
 
 	private $db;
 
@@ -439,6 +442,9 @@ class CdavLib
 			}
 		}
 		if (!$row || (!$projectionOwned && empty($row->recurrule))) {
+			return $calendarData;
+		}
+		if (!$projectionOwned && preg_match('/'.self::AGENDA_SERIES_ID_PATTERN.'/D', (string) ($row->recurid ?? ''))) {
 			return $calendarData;
 		}
 		try {
@@ -929,7 +935,8 @@ class CdavLib
 						AND a.entity IN ('.getEntity('agenda').')';
 		if ($bookingRange !== null) {
 			$range = '(COALESCE(a.datep2,a.datep) >= \''.$this->db->idate($bookingRange[0]).'\' AND a.datep < \''.$this->db->idate($bookingRange[1]).'\')';
-			$range = '('.$range.' OR COALESCE(a.recurrule,\'\') <> \'\'';
+			$materializedSeries = $this->db->regexpsql("COALESCE(a.recurid,'')", self::AGENDA_SERIES_ID_PATTERN, 1);
+			$range = '('.$range.' OR (COALESCE(a.recurrule,\'\') <> \'\' AND NOT '.$materializedSeries.')';
 			$occupation = 'arcal.transparency > 0';
 			if ($hasSchedulingMetadata) {
 				$range .= ' OR UPPER(cds.calendardata) LIKE \'%RRULE:%\' OR UPPER(cds.calendardata) LIKE \'%RDATE%\' OR UPPER(cds.calendardata) LIKE \'%RECURRENCE-ID%\'';
@@ -1363,7 +1370,8 @@ class CdavLib
 
 			$caldata = $this->calendarComponentHeader($obj, $type, $bHeader);
 			$caldata.="UID:".$obj->id.'-'.$obj->elem_source.'-'./*$calid.'-cal-'.*/ CDAV_URI_KEY."\n";
-			$summary = '['.$this->cleanDolibarrText($obj->proj_title).'] '.$this->cleanDolibarrText($obj->label);
+			$summaryPrefix = '['.$this->cleanDolibarrText($obj->proj_title).']';
+			$summary = $summaryPrefix.' '.$this->cleanDolibarrText($obj->label);
 			$caldata.="SUMMARY:".$this->escapeICalendarText(trim($summary))."\n";
 			$caldata.="URL:".dol_buildpath("/projet/tasks/task.php?id=".$obj->id."&withproject=".$obj->fk_projet,2)."\n";
 			$caldata.="LOCATION:".$this->cleanAndEscapeICalendarText($location)."\n";
@@ -1404,6 +1412,7 @@ class CdavLib
 			$description = '';
 			if (!$booking) {
 				$obj->_cdav_description = $this->getCalendarDescriptionParts($obj);
+				$obj->_cdav_description['summary_prefix'] = $summaryPrefix;
 				$description = $obj->_cdav_description['text'];
 			}
 			$caldata.="DESCRIPTION:".$this->escapeICalendarText($description)."\n";

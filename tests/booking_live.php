@@ -335,6 +335,7 @@ function bookingNativeEvent($owner, $start, $end, $label, $busy = true, array $r
 	$event->transparency = (int) $busy;
 	$event->userassigned = array($owner->id => array('id' => $owner->id, 'transparency' => (int) $busy));
 	if ($recurrence) {
+		$event->recurid = $recurrence['id'] ?? '';
 		$event->recurrule = $recurrence['rule'];
 		$event->recurdateend = $recurrence['until'];
 	}
@@ -494,6 +495,30 @@ try {
 	$calendarUrl = $davBase.'calendars/'.rawurlencode($owner->login).'/'.rawurlencode($owner->id.'-cal-'.$owner->login).'/';
 	$syncBody = '<?xml version="1.0"?><d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>';
 	$auth = array($owner->login, $password);
+	$seriesDay = $day->modify('+30 days');
+	$earlyOccurrence = $seriesDay->modify('-98 days')->setTime(13, 0)->getTimestamp();
+	$movedOccurrence = $seriesDay->setTime(15, 0)->getTimestamp();
+	$series = array('id' => gmdate('YmdHis'), 'rule' => 'FREQ=WEEKLY_BYDAY'.$seriesDay->format('w'),
+		'until' => $seriesDay->modify('+7 days')->getTimestamp());
+	$earlyEvent = bookingNativeEvent($owner, $earlyOccurrence, $earlyOccurrence + 3600, $prefix.' early native occurrence', true, $series);
+	$movedEvent = bookingNativeEvent($owner, $movedOccurrence, $movedOccurrence + 3600, $prefix.' moved native occurrence', true, $series);
+	require_once dirname(__DIR__).'/lib/cdav_config.lib.php';
+	require_once dirname(__DIR__).'/lib/cdav.lib.php';
+	cdav_initialize_sync_constants();
+	$exporter = new CdavLib($owner, $db, $langs);
+	$windowCalendars = $exporter->getBookingCalendarData((int) $owner->id, $seriesDay->getTimestamp(), $seriesDay->modify('+1 day')->getTimestamp());
+	bookingAssert(count($windowCalendars) === 1, 'A materialized occurrence outside the booking window must not be read as a recurrence master');
+	$movedRead = bookingHttp($calendarUrl.rawurlencode($movedEvent->id.'-ev-'.CDAV_URI_KEY), 'GET', null, '', array(), $auth);
+	bookingStatus($movedRead, array(200), 'Materialized native occurrence CalDAV export');
+	$materializedCalendar = Sabre\VObject\Reader::read($movedRead['body']);
+	bookingAssert(!isset($materializedCalendar->VEVENT->RRULE), 'A native occurrence must be exported once, on its stored dates');
+	$materializedCalendar->destroy();
+	$nativeSeriesForm = bookingForm($key, $seriesDay->format('Y-m-d'));
+	$nativeSlots = array_column($nativeSeriesForm['data']['slots'], 'start');
+	bookingAssert(in_array($seriesDay->setTime(13, 0)->getTimestamp(), $nativeSlots, true) && !in_array($movedOccurrence, $nativeSlots, true),
+		'Public booking must offer the original time of a moved native occurrence and block its new time');
+	bookingAssert($earlyEvent->delete($admin) > 0 && $movedEvent->delete($admin) > 0, 'Unable to remove the isolated native recurrence fixtures');
+	bookingOk('materialized native occurrences keep stored dates in CalDAV and public booking');
 	$initialSync = bookingHttp($calendarUrl, 'REPORT', $syncBody, '', array('Depth: 0', 'Content-Type: application/xml'), $auth);
 	$initialToken = bookingSyncToken($initialSync);
 	$start = $form['data']['slots'][0]['start'];
