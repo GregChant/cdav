@@ -87,6 +87,7 @@ URLForDavX5Tooltip=Scannez le code QR avec une application compatible, comme l�
 CDavAdvancedDavFeatures=Fonctions DAV avancées (activation explicite)
 CDavBusinessProtection=Protection des données métier
 CDavBusinessProtectionMigrationFailed=La mise à niveau de la protection métier CDav a échoué. Vérifiez les droits de modification du schéma de la base de données, puis réactivez le module.
+CDavCalendarUidMigrationFailed=La mise à niveau du stockage des UID de calendrier CDav a échoué. Vérifiez les droits de modification du schéma de la base de données, puis réactivez le module.
 CDavProtectNativeEvents=Protéger les rendez-vous Dolibarr
 CDavProtectNativeEventsHelp=Les rendez-vous créés dans Dolibarr ou par réservation publique peuvent uniquement être déplacés, en conservant leur durée, ou supprimés depuis CalDAV selon les droits accordés. Le sujet, le lieu, les participants et les données métier restent gérés dans Dolibarr. Les anciens rendez-vous dont l’origine est incertaine sont également protégés.
 CDavContactBusinessProtectionHelp=CardDAV conserve les rattachements aux tiers, les catégories, les statuts et la confidentialité des contacts existants. Les contacts liés à un compte utilisateur se gèrent dans Dolibarr.

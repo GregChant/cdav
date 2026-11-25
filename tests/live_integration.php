@@ -215,6 +215,14 @@ function liveHttpStatus(array $response, array $expected, $context)
 	}
 }
 
+/** Read the Sabre diagnostic from an HTTP DAV error. */
+function liveDavErrorMessage(array $response): string
+{
+	$xml = new DOMDocument();
+	liveAssert($xml->loadXML($response['body'], LIBXML_NONET), 'Unable to read the DAV error XML');
+	return (string) $xml->getElementsByTagNameNS('http://sabredav.org/ns', 'message')->item(0)?->textContent;
+}
+
 /** Require one successful conditional mutation and one concurrency loser. */
 function liveAssertSingleConditionalWinner(array $responses, $context)
 {

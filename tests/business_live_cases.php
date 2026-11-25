@@ -247,7 +247,11 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		$origin = liveRow($db, 'SELECT dav_origin FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE fk_object = '.$eventId);
 		liveAssert($origin === null || (int) $origin->dav_origin === 0, 'Moving a native appointment promoted it to DAV ownership');
 		$fresh = $http('GET', $eventPath);
-		liveAssert((int) (string) \Sabre\VObject\Reader::read($fresh['body'])->VEVENT->SEQUENCE === 1,
+		liveHttpStatus($fresh, array(200), 'BL03 protected move readback');
+		$actual = \Sabre\VObject\Reader::read($fresh['body'])->VEVENT;
+		liveAssert($actual->DTSTART->getDateTime()->getTimestamp() === $start && $actual->DTEND->getDateTime()->getTimestamp() === $end,
+			'GET did not return the protected appointment at its new dates');
+		liveAssert((int) (string) $actual->SEQUENCE === 1,
 			'A protected date move trusted the client revision instead of advancing the server sequence');
 		$equivalent = businessLiveCalendar($fresh['body'], static function ($component) use ($start, $end) {
 			$timezone = new DateTimeZone('Europe/Zurich');
@@ -316,6 +320,10 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		foreach ($changes as $name => $mutation) {
 			$response = $http('PUT', $eventPath, businessLiveCalendar($fresh['body'], $mutation), $calendarHeaders);
 			liveHttpStatus($response, array(403), 'BL05 forbidden protected '.$name);
+			if ($name === 'subject') {
+				liveAssert(liveDavErrorMessage($response) === 'This Dolibarr appointment is protected: only moving its dates or deleting it is allowed. Edit its other information in Dolibarr.',
+					'An Outlook-style subject edit did not return the native protection diagnostic');
+			}
 			liveAssert(businessLiveEventState($db, $eventId) === $state, 'Rejected '.$name.' had a native business side effect');
 		}
 		$managedBefore = (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE fk_actioncomm = '.$eventId)->nb;

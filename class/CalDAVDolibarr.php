@@ -20,12 +20,14 @@
 
 namespace Sabre\CalDAV\Backend;
 
+use Dolibarr\CDav\CalendarUid;
 use Sabre\VObject;
 use Sabre\CalDAV;
 use Sabre\DAV;
 use Sabre\DAV\Exception\Forbidden;
 
 require_once __DIR__.'/CDavBusinessPolicy.php';
+require_once __DIR__.'/CDavCalendarUid.php';
 require_once __DIR__.'/CDavCalendarWritePolicy.php';
 require_once __DIR__.'/CDavInvitationPolicy.php';
 require_once __DIR__.'/CDavCalendarReadCache.php';
@@ -960,20 +962,16 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$component = null;
 		$firstOccurence = null;
 		$lastOccurence = null;
-		$uid = null;
 		foreach ($vObject->getComponents() as $component) {
 			if (in_array($component->name, array('VEVENT', 'VTODO'), true)) {
 				$componentType = $component->name;
-				$uid = isset($component->UID) ? trim((string) $component->UID) : '';
 				break;
 			}
 		}
 		if (!$componentType) {
 			throw new \Sabre\DAV\Exception\BadRequest('Only VEVENT and VTODO calendar objects are supported');
 		}
-		if ($uid === '' || strlen($uid) > 255) {
-			throw new \Sabre\DAV\Exception\BadRequest('The calendar UID is missing or too long');
-		}
+		$uid = CalendarUid::read($component);
 		if ($componentType === 'VEVENT') {
 			if (!isset($component->DTSTART)) {
 				throw new \Sabre\DAV\Exception\BadRequest('VEVENT objects must have a DTSTART property');
@@ -1535,6 +1533,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 */
 	private function _upsertCalendarMapping($eventId, $objectUri, $sourceUid, $davCreated = false)
 	{
+		$uidLength = strlen($sourceUid);
+		if ($uidLength > 255 && CalendarUid::storageCapacity($this->db) < $uidLength) {
+			throw new \Sabre\DAV\Exception('Reactivate CDav in Dolibarr to upgrade storage for long calendar UIDs.');
+		}
 		$sql = 'INSERT INTO '.MAIN_DB_PREFIX.'actioncomm_cdav (fk_object, uuidext, sourceuid, dav_origin)
 			VALUES ('.((int) $eventId).', \''.$this->db->escape((string) $objectUri).'\', \''.$this->db->escape((string) $sourceUid).'\', '.($davCreated ? 1 : 0).')
 			ON DUPLICATE KEY UPDATE
@@ -2775,10 +2777,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 
 		$componentType = $component->name;
-		$uid = isset($component->UID) ? trim((string) $component->UID) : '';
-		if ($uid === '' || strlen($uid) > 255) {
-			throw new \Sabre\DAV\Exception\BadRequest('The calendar UID is missing or too long');
-		}
+		$uid = CalendarUid::read($component);
 		$id = null;
 		$elemSource = 'ev';
 		$internalUid = $this->_parseInternalObjectUri($uid);

@@ -87,6 +87,7 @@ URLForDavX5Tooltip=Scan the QR code with a compatible application, such as the f
 CDavAdvancedDavFeatures=Advanced DAV features (explicit opt-in)
 CDavBusinessProtection=Business data protection
 CDavBusinessProtectionMigrationFailed=The CDav business protection upgrade failed. Check database schema alteration permissions, then reactivate the module.
+CDavCalendarUidMigrationFailed=The CDav calendar UID storage upgrade failed. Check database schema alteration permissions, then reactivate the module.
 CDavProtectNativeEvents=Protect Dolibarr appointments
 CDavProtectNativeEventsHelp=Appointments created in Dolibarr or through public booking can only be moved, keeping their duration, or deleted through CalDAV according to existing permissions. The subject, location, participants and business data remain managed in Dolibarr. Older appointments with an uncertain origin are also protected.
 CDavContactBusinessProtectionHelp=CardDAV preserves third-party links, categories, status and privacy on existing contacts. Contacts linked to a user account are managed in Dolibarr.

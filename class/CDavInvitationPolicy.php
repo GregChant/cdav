@@ -7,6 +7,7 @@ use Sabre\DAV\Exception\Forbidden;
 use Sabre\DAV\Exception\PreconditionFailed;
 use Sabre\VObject;
 
+require_once __DIR__.'/CDavCalendarUid.php';
 require_once __DIR__.'/CDavCalendarWritePolicy.php';
 
 /** Authorize invitation responses without trusting client copies of business data. */
@@ -37,7 +38,7 @@ class InvitationPolicy
 			$new = self::master($newEvents);
 			foreach (array_merge($events, $newEvents) as $event) self::status($event);
 			$organizer = self::organizer($old);
-			if (self::uid($old) !== self::uid($new) || self::organizer($new) !== $organizer) {
+			if (CalendarUid::read($old) !== CalendarUid::read($new) || self::organizer($new) !== $organizer) {
 				throw new Forbidden('The invitation UID and organizer cannot be changed.');
 			}
 			$actor = self::email($actorEmail);
@@ -383,12 +384,12 @@ class InvitationPolicy
 		if (count($oldEvents) !== count($newEvents)) return false;
 		$incoming = array();
 		foreach ($newEvents as $event) {
-			$key = self::uid($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
+			$key = CalendarUid::read($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
 			if (isset($incoming[$key])) return false;
 			$incoming[$key] = $event;
 		}
 		foreach ($oldEvents as $event) {
-			$key = self::uid($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
+			$key = CalendarUid::read($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
 			if (!isset($incoming[$key])) return false;
 			$left = new VObject\Component\VCalendar();
 			$right = new VObject\Component\VCalendar();
@@ -477,20 +478,6 @@ class InvitationPolicy
 	{
 		foreach ($events as $event) if (!isset($event->{'RECURRENCE-ID'})) return $event;
 		return $events[0];
-	}
-
-	/**
-	 * Read an unambiguous stable event identity.
-	 *
-	 * @param VObject\Component $event Invitation event
-	 * @return string UID
-	 */
-	private static function uid($event)
-	{
-		if (count($event->select('UID')) !== 1 || trim((string) $event->UID) === '' || strlen((string) $event->UID) > 255) {
-			throw new BadRequest('The invitation UID is missing or ambiguous.');
-		}
-		return trim((string) $event->UID);
 	}
 
 	/**
@@ -645,7 +632,7 @@ class InvitationPolicy
 	{
 		return array('kind' => $kind, 'calendar_data' => $data, 'changed' => $changed,
 			'partstat' => $partstat, 'personal_transparency' => $personal, 'organizer_email' => $organizer,
-			'sequence' => $sequence, 'uid' => self::uid($event), 'actor_is_organizer' => $isOrganizer,
+			'sequence' => $sequence, 'uid' => CalendarUid::read($event), 'actor_is_organizer' => $isOrganizer,
 			'date_changed' => $dateChanged, 'status' => self::status($event), 'external_import' => false);
 	}
 }

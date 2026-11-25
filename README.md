@@ -112,6 +112,10 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.4.4 accepts CalDAV UIDs up to 1,024 bytes, including long Outlook
+GlobalAppointmentIDs. Disable and re-enable CDav after upgrading to widen the
+UID column. The migration preserves existing UIDs and resource URLs.
+
 Version 6.4.3 adds a link to the native Documents tab in the CalDAV description
 of appointments with documents. Dolibarr applies its regular login and Agenda
 permissions. CDav preserves attachments omitted by Outlook CalDav Synchronizer

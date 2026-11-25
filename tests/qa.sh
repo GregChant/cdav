@@ -20,7 +20,7 @@ if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
     phpcs --standard="$CDAV_PHPCS_STANDARD" \
         class/CDavBookingAvailability.php class/CDavBookingCalendarReader.php \
         class/CDavBookingService.php class/CDavBookingIdentity.php class/CDavBookingDetails.php \
-        class/CDavBookingSchema.php class/CDavBookingNotification.php class/CDavBookingPublication.php public/booking.php lib/cdav_transport.lib.php \
+        class/CDavBookingSchema.php class/CDavBookingNotification.php class/CDavBookingPublication.php class/CDavCalendarUid.php public/booking.php lib/cdav_transport.lib.php \
         lib/cdav_bootstrap.inc.php lib/cdav_config.lib.php class/CDavMultiGetReport.php class/CDavCardDAVPlugin.php \
         class/CDavAppointmentStatus.php class/CDavAgendaForm.php core/triggers/interface_99_modCDav_CDavAppointmentStatus.class.php class/CDavCalendarReadCache.php class/CDavBusinessPolicy.php class/CDavCalendarWritePolicy.php class/CDavInvitationPolicy.php class/CDavCalDAVPlugin.php class/CDavSchedulingPlugin.php \
         admin/booking.php tpl/booking.tpl.php \

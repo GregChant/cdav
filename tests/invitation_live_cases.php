@@ -187,7 +187,8 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		return liveHttp($context['base_url'], $context['limited_login'], $context['limited_password'], $method, $path, $body,
 			array_merge(array('Content-Type: text/calendar; charset=utf-8'), $extra));
 	};
-	$uid = $context['prefix'].'-external-mail-uid';
+	// A fictitious Outlook GlobalAppointmentID with data beyond 255 bytes.
+	$uid = '040000008200E00074C5B7101A82E008'.strtoupper(str_repeat(hash('sha256', $context['token']), 5));
 	$path = $context['limited_calendar_path'].rawurlencode($context['prefix'].'-external-mail.ics');
 	$start = strtotime('+35 days 13:00 UTC');
 	$end = $start + 3600;
@@ -196,7 +197,17 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		."\r\nSEQUENCE:0\r\nSUMMARY:External mailbox invitation\r\nDESCRIPTION:Mailbox invitation notes\r\nLOCATION:External meeting location";
 	$raw .= "\r\nORGANIZER:mailto:office365-organizer@example.test\r\nATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=FALSE:mailto:"
 		.$invitee->email."\r\nSTATUS:CONFIRMED\r\nTRANSP:OPAQUE\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-	liveHttpStatus($http('PUT', $path, $raw, array('If-None-Match: *')), array(201, 204), 'INV20 external invitation import');
+	$raw = \Sabre\VObject\Reader::read($raw)->serialize();
+	$creationHeaders = array('If-None-Match: *', 'User-Agent: CalDavSynchronizer/4.5.0');
+	foreach (array('' => 'The calendar UID is missing or ambiguous.', str_repeat('A', 1025) => 'The calendar UID exceeds 1024 bytes.') as $invalidUid => $message) {
+		$invalid = businessLiveCalendar($raw, static function ($component) use ($invalidUid) {
+			$component->UID = $invalidUid;
+		});
+		$rejected = $http('PUT', $path, $invalid, $creationHeaders);
+		liveHttpStatus($rejected, array(400), 'INV20 invalid UID');
+		liveAssert(liveDavErrorMessage($rejected) === $message, 'An invalid UID did not return its specific DAV error');
+	}
+	liveHttpStatus($http('PUT', $path, $raw, $creationHeaders), array(201), 'INV20 Outlook long-UID invitation import');
 	$mapSql = 'SELECT fk_object, dav_origin, sourceuid FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE sourceuid = \''.$db->escape($uid).'\'';
 	$mapping = liveRow($db, $mapSql);
 	liveAssert($mapping !== null && (int) $mapping->dav_origin === 1, 'External import did not record immutable DAV creation provenance');
@@ -216,6 +227,15 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	$before = invitationLiveNoopState($db, $id);
 	$fresh = $http('GET', $path);
 	liveHttpStatus($fresh, array(200), 'INV20 private imported invitation GET');
+	liveAssert((string) \Sabre\VObject\Reader::read($fresh['body'])->VEVENT->UID === $uid,
+		'GET truncated or changed the Outlook UID after creation');
+	$ambiguousAttendee = businessLiveCalendar($fresh['body'], static function ($component) use ($invitee) {
+		$component->add('ATTENDEE', 'mailto:'.$invitee->email);
+	});
+	$rejected = $http('PUT', $path, $ambiguousAttendee);
+	liveHttpStatus($rejected, array(400), 'INV20 duplicate invitee');
+	liveAssert(liveDavErrorMessage($rejected) === 'Invitation attendee identities are missing or duplicated.'
+		&& invitationLiveNoopState($db, $id) === $before, 'The ambiguous invitee did not fail cleanly');
 	for ($attempt = 0; $attempt < 2; $attempt++) {
 		$accepted = invitationLiveAnswer($fresh['body'], (string) $invitee->email, 'ACCEPTED', '-//CalDavSynchronizer//Outlook//EN');
 		liveHttpStatus($http('PUT', $path, $accepted, array('If-Match: '.$fresh['headers']['etag'])), array(200, 204), 'INV21 external accepted response replay');
@@ -247,8 +267,10 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		&& (int) $changed->fk_project === $projectId && (int) $changed->fk_contact === $contactId,
 		'External organizer update lost the native identity, new details or protected business links');
 	$actual = $http('GET', $path);
+	liveHttpStatus($actual, array(200), 'INV23 external organizer update readback');
 	$component = \Sabre\VObject\Reader::read($actual['body'])->VEVENT;
 	liveAssert((string) $component->UID === $uid && (int) $component->SEQUENCE->getValue() === 3
+		&& $component->DTSTART->getDateTime()->getTimestamp() === $updatedStart && (string) $component->SUMMARY === 'Updated external mailbox subject'
 		&& (int) liveRow($db, $mapSql)->fk_object === $id
 		&& (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE sourceuid = \''.$db->escape($uid).'\'')->nb === 1,
 		'An external email update created a second appointment or changed its UID/revision');
@@ -272,7 +294,10 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		'An imported cancellation lost native links/identity or continued blocking availability');
 	$internalUid = $context['prefix'].'-local-organizer-private-uid';
 	$internalPath = $context['limited_calendar_path'].rawurlencode($context['prefix'].'-local-organizer-private.ics');
-	$internal = str_replace(array($uid, 'office365-organizer@example.test'), array($internalUid, (string) $organizer->email), $raw);
+	$internal = businessLiveCalendar($raw, static function ($component) use ($internalUid, $organizer) {
+		$component->UID = $internalUid;
+		$component->ORGANIZER = 'mailto:'.$organizer->email;
+	});
 	liveHttpStatus($http('PUT', $internalPath, $internal), array(201, 204), 'INV25 private copy with a local organizer');
 	$localMap = liveRow($db, 'SELECT fk_object FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE sourceuid = \''.$db->escape($internalUid).'\'');
 	liveAssert($localMap !== null, 'Unable to identify the native private local-organizer appointment');
@@ -288,7 +313,7 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	liveHttpStatus($http('PUT', $internalPath, $internalUpdate), array(403), 'INV25 local organizer import bypass rejected');
 	liveAssert(invitationLiveNoopState($db, $localId) === $before, 'A local invitation gained external organizer import authority');
 	$proof[] = array('case' => 'external mailbox import INV20-INV25', 'result' => 'PASS', 'native_uid_stable' => true, 'duplicate_appointments' => 0);
-	liveOk('INV20-INV25 private external imports, accepted replays, organizer updates/cancellation and local identity isolation');
+	liveOk('INV20-INV25 long Outlook UID round-trip, invalid UID and attendee diagnostics, external updates and local identity isolation');
 }
 
 /**

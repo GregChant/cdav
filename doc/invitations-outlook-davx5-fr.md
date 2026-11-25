@@ -75,6 +75,11 @@ les dates comme seule règle de rapprochement : deux vrais rendez-vous peuvent
 partager ces valeurs. Les réglages des invitations sont décrits dans la
 [documentation officielle du connecteur](https://caldavsynchronizer.org/help/documentation/#managing-meetings-and-invites).
 
+CDav accepte les UID iCalendar jusqu'à 1 024 octets, y compris les identifiants
+Outlook qui dépassent l'ancienne limite de 255 octets. Après la mise à jour,
+réactiver le module CDav dans Dolibarr pour agrandir la colonne des UID. Cette
+migration conserve les UID et les adresses des ressources existantes.
+
 Outlook gère les emails entrants et ses propres réponses email. CDav ne relève
 pas une boîte Microsoft 365 et n'installe pas de passerelle email iMIP. Depuis
 le téléphone, la mise à jour du rendez-vous dans CDav est prise en charge ; un
