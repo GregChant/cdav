@@ -6,7 +6,7 @@ use Sabre\DAV\Exception\BadRequest;
 use Sabre\DAV\Exception\Forbidden;
 use Sabre\VObject;
 
-/** Compare calendar semantics before permitting a move of a protected Agenda item. */
+/** Validate calendar edits while preserving the authoritative native Agenda relationships. */
 class CalendarWritePolicy
 {
 	/**
@@ -91,6 +91,98 @@ class CalendarWritePolicy
 	}
 
 	/**
+	 * Map one relative display alarm to a Dolibarr browser reminder.
+	 *
+	 * @param VObject\Component $alarm Alarm attached to its calendar component
+	 * @param int $start Event start timestamp
+	 * @param bool $strict Accept only properties represented by the personal native reminder
+	 * @return array|null Native offset, or null to retain the alarm as protected protocol data
+	 */
+	public static function nativeReminder($alarm, int $start, bool $strict = false): ?array
+	{
+		if ($alarm->name !== 'VALARM' || !isset($alarm->TRIGGER)
+			|| strtoupper((string) ($alarm->ACTION ?? '')) !== 'DISPLAY'
+			|| isset($alarm->REPEAT) || isset($alarm->DURATION)
+			|| strtoupper((string) ($alarm->TRIGGER['VALUE'] ?? 'DURATION')) !== 'DURATION'
+			|| strtoupper((string) ($alarm->TRIGGER['RELATED'] ?? 'START')) !== 'START'
+			|| !str_starts_with((string) $alarm->TRIGGER, '-')) return null;
+		if ($strict) {
+			foreach ($alarm->children() as $property) {
+				if (!in_array($property->name, array('ACTION', 'DESCRIPTION', 'TRIGGER'), true)
+					|| count($alarm->select($property->name)) !== 1) return null;
+				foreach ($property->parameters() as $parameter) {
+					if ($parameter->name !== 'VALUE' && !($property->name === 'TRIGGER' && $parameter->name === 'RELATED')) return null;
+				}
+			}
+		}
+		try {
+			$interval = VObject\DateTimeParser::parseDuration((string) $alarm->TRIGGER);
+			if ($interval->d > 0 && !$interval->h && !$interval->i && !$interval->s) {
+				if ($interval->d > 3650) return null;
+				$unit = $interval->d % 7 === 0 ? 'w' : 'd';
+				$value = $unit === 'w' ? (int) ($interval->d / 7) : $interval->d;
+			} else {
+				if ($strict && $interval->d) return null; // Mixed day/hour offsets can cross a DST transition.
+				$seconds = $interval->d ? $start - $alarm->getEffectiveTriggerTime()->getTimestamp()
+					: $interval->h * 3600 + $interval->i * 60 + $interval->s;
+				if ($seconds < 60 || $seconds % 60 !== 0 || $seconds > 10 * 365 * 86400) return null;
+				$unit = $seconds % 3600 === 0 ? 'h' : 'i';
+				$value = intdiv($seconds, $unit === 'h' ? 3600 : 60);
+			}
+			return array('start' => $start, 'value' => $value, 'unit' => $unit);
+		} catch (\Throwable $error) {
+			return null;
+		}
+	}
+
+	/**
+	 * Separate a personal reminder request from the shared meeting comparison.
+	 *
+	 * @param string $current Current export for the same authenticated calendar owner
+	 * @param string $incoming Incoming replacement representation
+	 * @return array Shared comparison data and optional requested native offsets
+	 */
+	public static function personalReminderChange(string $current, string $incoming): array
+	{
+		if (stripos($current, 'VALARM') === false && stripos($incoming, 'VALARM') === false) return array($incoming, null);
+		$before = VObject\Reader::read($current);
+		$after = null;
+		try {
+			$after = VObject\Reader::read($incoming);
+			if (count($before->select('VEVENT')) !== 1 || count($after->select('VEVENT')) !== 1
+				|| isset($before->VEVENT->{'RECURRENCE-ID'}) || isset($after->VEVENT->{'RECURRENCE-ID'})
+				|| self::eventStatus($before->VEVENT) === 'CANCELLED' || self::eventStatus($after->VEVENT) === 'CANCELLED') {
+				return array($incoming, null);
+			}
+			$oldAlarms = array();
+			$oldKeys = array();
+			$requested = array();
+			$oldStart = self::dates($before->VEVENT)['start'];
+			$newStart = self::dates($after->VEVENT)['start'];
+			foreach ($before->VEVENT->select('VALARM') as $alarm) {
+				$reminder = self::nativeReminder($alarm, $oldStart, true);
+				if ($reminder === null) continue;
+				$oldAlarms[] = $alarm;
+				$oldKeys[$reminder['value'].$reminder['unit']] = true;
+			}
+			foreach ($after->VEVENT->select('VALARM') as $alarm) {
+				$reminder = self::nativeReminder($alarm, $newStart, true);
+				if ($reminder === null) continue;
+				$requested[$reminder['value'].$reminder['unit']] = $reminder;
+				$after->VEVENT->remove($alarm);
+			}
+			if (!$oldAlarms && !$requested) return array($incoming, null);
+			if (count($requested) > 10) throw new Forbidden('At most ten personal browser reminders can be synchronized.');
+			foreach ($oldAlarms as $alarm) $after->VEVENT->add(clone $alarm);
+			$changed = array_diff_key($requested, $oldKeys) || array_diff_key($oldKeys, $requested);
+			return array($after->serialize(), $changed ? array_values($requested) : null);
+		} finally {
+			$before->destroy();
+			if ($after !== null) $after->destroy();
+		}
+	}
+
+	/**
 	 * Remove the optional generated footer from an appointment description.
 	 * @param string $description Original decoded DESCRIPTION
 	 * @param string $url Reserved documents URL for this exact appointment
@@ -172,6 +264,10 @@ class CalendarWritePolicy
 			$prefixes[] = (string) $replacementPrefix;
 		}
 		foreach (array_unique($prefixes) as $candidatePrefix) {
+			if ($currentNote !== '' && str_starts_with($suffix, "\n\n")
+				&& $description === $candidatePrefix.substr($suffix, 2)) {
+				return '';
+			}
 			if (strlen($description) >= strlen($candidatePrefix) + strlen($suffix)
 				&& str_starts_with($description, $candidatePrefix) && str_ends_with($description, $suffix)) {
 				$note = substr($description, strlen($candidatePrefix), strlen($description) - strlen($candidatePrefix) - strlen($suffix));
@@ -193,9 +289,10 @@ class CalendarWritePolicy
 	 *
 	 * @param string $current Current representation exported by Dolibarr
 	 * @param string $incoming Client replacement representation
+	 * @param bool $allowResize Allow new duration and date type on an editable standalone occurrence
 	 * @return array<string,int> Validated native dates
 	 */
-	public static function assertMoveOnly($current, $incoming)
+	public static function assertMoveOnly($current, $incoming, bool $allowResize = false)
 	{
 		$before = VObject\Reader::read((string) $current);
 		$after = VObject\Reader::read((string) $incoming);
@@ -204,11 +301,13 @@ class CalendarWritePolicy
 			$new = self::item($after);
 			if (self::projection($old) !== self::projection($new)
 				|| self::calendarMethod($before) !== self::calendarMethod($after)) {
-				throw new Forbidden('This Dolibarr appointment is protected: only moving its dates or deleting it is allowed. Edit its other information in Dolibarr.');
+				throw new Forbidden('This change affects protected Dolibarr appointment information. Edit its business links and participants in Dolibarr.');
 			}
 			$oldDates = self::dates($old);
 			$newDates = self::dates($new);
-			if ($oldDates['fullday'] !== $newDates['fullday'] || $oldDates['duration'] !== $newDates['duration']) {
+			$canResize = $allowResize && $old->name === 'VEVENT'
+				&& !isset($old->RRULE) && !isset($old->RDATE) && !isset($old->{'RECURRENCE-ID'});
+			if (!$canResize && ($oldDates['fullday'] !== $newDates['fullday'] || $oldDates['duration'] !== $newDates['duration'])) {
 				throw new Forbidden('Moving a protected Dolibarr appointment must preserve its duration and all-day status.');
 			}
 			unset($newDates['duration']);
@@ -220,14 +319,78 @@ class CalendarWritePolicy
 	}
 
 	/**
-	 * Plan an authorized status change without adopting native business fields.
+	 * Extract editable native values and leave other properties for strict comparison.
+	 *
+	 * @param VObject\Component $current Authoritative event
+	 * @param VObject\Component $comparison Incoming event in the comparison clone
+	 * @param array $descriptionContext Server-composed note boundaries and prefix formatter
+	 * @return array Changed native fields, without client-supplied CRM context
+	 */
+	public static function appointmentFieldChanges($current, $comparison, array $descriptionContext = array()): array
+	{
+		$changes = array();
+		foreach (array('SUMMARY', 'LOCATION', 'PRIORITY', 'TRANSP', 'DESCRIPTION') as $name) {
+			if (count($current->select($name)) > 1 || count($comparison->select($name)) > 1) {
+				throw new BadRequest('An appointment field is ambiguous: '.$name);
+			}
+			$old = (string) ($current->{$name} ?? '');
+			$value = (string) ($comparison->{$name} ?? '');
+			if ($name === 'TRANSP') $value = self::requestedTransparency($current, $comparison);
+			if ($old === $value && isset($current->{$name}) === isset($comparison->{$name})) continue;
+			if ($name === 'SUMMARY' || $name === 'LOCATION') {
+				if ($name === 'LOCATION') $value = str_replace(array("\r\n", "\r"), "\n", $value);
+				$value = trim($value);
+				$singleLine = $name === 'LOCATION' ? str_replace("\n", ' ', $value) : $value;
+				if (($name === 'SUMMARY' && $value === '') || $value === '0'
+					|| mb_strlen($value, 'UTF-8') > ($name === 'SUMMARY' ? 255 : 128)
+					|| preg_match('/[\x00-\x1F\x7F]|<\/?[a-z][^>]*>/i', $singleLine)) {
+					throw new BadRequest('The appointment title or location is invalid for Dolibarr.');
+				}
+				$key = $name === 'SUMMARY' ? 'label' : 'location';
+				$native = $descriptionContext['note_prefix_fields']['original_location'] ?? $old;
+				if ($value !== ($key === 'location' ? $native : $old)) $changes[$key] = $value;
+			} elseif ($name === 'PRIORITY') {
+				if ($value === '' && !isset($comparison->PRIORITY)) $value = '0';
+				if (!preg_match('/^[0-9]$/D', $value)) throw new BadRequest('Priority must be between 0 and 9.');
+				if ((int) $old !== (int) $value) $changes['priority'] = (int) $value;
+			} elseif ($name === 'TRANSP') {
+				if ($value !== strtoupper($old === '' ? 'OPAQUE' : $old)) $changes['transparency'] = (int) ($value === 'OPAQUE');
+			} elseif ($descriptionContext) {
+				$prefix = $descriptionContext['note_prefix'];
+				if (isset($descriptionContext['prefix_for_fields'])) {
+					$original = $descriptionContext['note_prefix_fields'];
+					$prefix = $descriptionContext['prefix_for_fields']($descriptionContext, $changes['label'] ?? $original['original_subject'],
+						$changes['location'] ?? $original['original_location']);
+				}
+				// Repeating a new subject/address in the generated heading leaves the original rich notes intact.
+				if ($value !== $prefix.substr($descriptionContext['text'], strlen($descriptionContext['note_prefix']))) {
+					$note = self::nativeNoteForReplacement($descriptionContext, $value, $prefix);
+					if ($note !== $descriptionContext['native_note']) {
+						// iCalendar DESCRIPTION is plain text. The native notes editor also accepts HTML.
+						$changes['note'] = htmlspecialchars($note, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+					}
+				}
+			} else {
+				continue; // Without authoritative note boundaries DESCRIPTION stays protected.
+			}
+			// Preserve parameters on the comparison clone so a simultaneous metadata change is still checked.
+			if (isset($current->{$name}, $comparison->{$name})) $comparison->{$name}->setValue($old);
+			elseif (isset($current->{$name})) $comparison->add(clone $current->{$name});
+			else $comparison->remove($name);
+		}
+		return $changes;
+	}
+
+	/**
+	 * Plan an authorized standalone update without adopting native relationships.
 	 * The backend must verify ownership before applying any global status change.
 	 *
 	 * @param string $current Current authoritative appointment
 	 * @param string $incoming Client replacement appointment
+	 * @param array $descriptionContext Trusted description boundaries for native note edits
 	 * @return array<string,mixed> Canonical dates, state and server-owned revision
 	 */
-	public static function planStatusChange($current, $incoming)
+	public static function planStatusChange($current, $incoming, array $descriptionContext = array())
 	{
 		$before = VObject\Reader::read((string) $current);
 		$after = null;
@@ -247,6 +410,8 @@ class CalendarWritePolicy
 			$test = self::item($comparison);
 			// Compare every other protected field, including independent occupancy.
 			self::normalizeCancelledSummary($old, $test);
+			$fields = ($oldStatus === 'CANCELLED' || $status === 'CANCELLED') ? array()
+				: self::appointmentFieldChanges($old, $test, $descriptionContext);
 			$old->STATUS = $oldStatus;
 			$test->STATUS = $oldStatus;
 			if ($status === 'CANCELLED') {
@@ -255,8 +420,10 @@ class CalendarWritePolicy
 				$test->remove('VALARM');
 				foreach ($old->select('VALARM') as $alarm) $test->add(clone $alarm);
 			}
-			$dates = self::assertMoveOnly($before->serialize(), $comparison->serialize());
-			$oldDates = self::assertMoveOnly($before->serialize(), $before->serialize());
+			$dates = self::assertMoveOnly($before->serialize(), $comparison->serialize(), $status !== 'CANCELLED');
+			$oldDates = self::dates($old);
+			$resized = $dates['fullday'] !== $oldDates['fullday'] || self::dates($new)['duration'] !== $oldDates['duration'];
+			unset($oldDates['duration']);
 			$dateChanged = $dates !== $oldDates;
 			if (($status === 'CANCELLED' && $dateChanged)
 				|| ($oldStatus === 'CANCELLED' && ($statusChanged || $dateChanged))) {
@@ -269,7 +436,7 @@ class CalendarWritePolicy
 				throw new BadRequest('The appointment revision is invalid or ambiguous.');
 			}
 			$sequence = (int) $sequenceValue;
-			$changed = $statusChanged || $dateChanged;
+			$changed = $statusChanged || $dateChanged || (bool) $fields;
 			if ($changed) {
 				if ($sequence >= 2147483647) throw new Forbidden('The appointment revision cannot be advanced safely.');
 				$sequence++;
@@ -282,7 +449,7 @@ class CalendarWritePolicy
 				if ($status === 'CANCELLED') $old->TRANSP = 'TRANSPARENT';
 			}
 			return array('kind' => !$changed ? 'noop' : ($status === 'CANCELLED' ? 'cancel' : 'status'),
-				'changed' => $changed, 'date_changed' => $dateChanged, 'status' => $status,
+				'changed' => $changed, 'date_changed' => $dateChanged, 'resized' => $resized, 'status' => $status, 'fields' => $fields,
 				'previous_status' => $oldStatus, 'dates' => $dates, 'sequence' => $sequence,
 				'calendar_data' => $before->serialize());
 		} finally {
@@ -406,6 +573,27 @@ class CalendarWritePolicy
 			throw new BadRequest('The Outlook availability hint is ambiguous.');
 		}
 		return isset($event->{$name}) ? strtoupper(trim((string) $event->{$name})) : null;
+	}
+
+	/**
+	 * Prefer an explicit RFC availability edit, then a changed Outlook Show As hint.
+	 *
+	 * @param VObject\Component $current Server export for the affected calendar
+	 * @param VObject\Component $incoming Client replacement event
+	 * @return string Effective personal RFC transparency
+	 */
+	public static function requestedTransparency($current, $incoming): string
+	{
+		if (count($current->select('TRANSP')) > 1 || count($incoming->select('TRANSP')) > 1) throw new BadRequest('Ambiguous appointment transparency.');
+		$old = strtoupper(trim((string) ($current->TRANSP ?? 'OPAQUE')));
+		$value = strtoupper(trim((string) ($incoming->TRANSP ?? $old)));
+		if (!in_array($value, array('OPAQUE', 'TRANSPARENT'), true)) throw new BadRequest('Unsupported appointment transparency.');
+		$busy = self::outlookBusyStatus($incoming);
+		if ($value === $old && $busy !== self::outlookBusyStatus($current)) {
+			if ($busy === 'FREE') return 'TRANSPARENT';
+			if ($busy === 'BUSY' || $busy === 'TENTATIVE') return 'OPAQUE';
+		}
+		return $value;
 	}
 
 	/**
@@ -560,10 +748,11 @@ class CalendarWritePolicy
 		if ($startProperty === null) {
 			throw new Forbidden('Moving a protected Dolibarr appointment requires an explicit date.');
 		}
-		$start = $startProperty->getDateTime();
+		$zone = new \DateTimeZone(date_default_timezone_get());
+		$start = $startProperty->getDateTime($zone);
 		$endProperty = isset($component->DTEND) ? $component->DTEND : ($component->DUE ?? null);
 		if ($endProperty !== null) {
-			$end = $endProperty->getDateTime();
+			$end = $endProperty->getDateTime($zone);
 			if ($endProperty->hasTime() !== $startProperty->hasTime()) {
 				throw new Forbidden('The appointment endpoints must use the same date type.');
 			}
@@ -577,6 +766,9 @@ class CalendarWritePolicy
 			throw new Forbidden('The appointment end cannot precede its start.');
 		}
 		$fullday = !$startProperty->hasTime();
+		if ($fullday && ($start == $end || $end->format('His') !== '000000')) {
+			throw new Forbidden('An all-day appointment must span whole calendar days.');
+		}
 		$duration = $fullday
 			? (int) (new \DateTimeImmutable($start->format('Y-m-d'), new \DateTimeZone('UTC')))->diff(new \DateTimeImmutable($end->format('Y-m-d'), new \DateTimeZone('UTC')))->days
 			: $end->getTimestamp() - $start->getTimestamp();

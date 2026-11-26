@@ -1,6 +1,6 @@
 <?php
 
-/** Public appointment configuration; all mutations require a native admin session. */
+/** Public appointment profiles and administrator-only global activation. */
 define('CSRFCHECK_WITH_TOKEN', 1);
 
 // Use the web path as well as the module path: custom modules may be symlinks.
@@ -35,8 +35,8 @@ require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
 require_once dirname(__DIR__).'/class/CDavBookingService.php';
 
 $langs->loadLangs(array('admin', 'agenda', 'companies', 'projects', 'cdav@cdav'));
-if (!$user->admin || !empty($user->socid) || !empty($user->design)
-	|| !isModEnabled('cdav') || !isModEnabled('agenda')) {
+if (!isModEnabled('cdav') || !isModEnabled('agenda')) {
+	http_response_code(403);
 	accessforbidden();
 }
 header('Cache-Control: private, no-store');
@@ -50,6 +50,7 @@ foreach ($bookingIds as $bookingIdField => $bookingIdDefault) {
 	$bookingRawId = GETPOST($bookingIdField, 'none');
 	if (!is_string($bookingRawId) || !preg_match('/^(?:0|[1-9][0-9]{0,9})$/D', $bookingRawId)
 		|| (int) $bookingRawId > 2147483647 || ($bookingIdField === 'owner_id' && $bookingRawId === '0')) {
+		http_response_code(400);
 		accessforbidden($langs->trans('CDavBookingInvalid'));
 	}
 	$bookingIds[$bookingIdField] = (int) $bookingRawId;
@@ -57,6 +58,10 @@ foreach ($bookingIds as $bookingIdField => $bookingIdDefault) {
 $bookingOwnerId = $bookingIds['owner_id'];
 $bookingProfileId = $bookingIds['profile_id'];
 $action = GETPOST('action', 'aZ09');
+if (!\Dolibarr\CDav\BookingService::canManageProfiles($user, $bookingOwnerId) || ($action === 'save_global' && !$user->admin)) {
+	http_response_code(403);
+	accessforbidden();
+}
 if ($action === 'save_profile' && GETPOSTINT('refresh_projects') === 1) $action = 'refresh_profile';
 $bookingPostedConfig = null;
 $bookingPostedMetadata = null;
@@ -206,18 +211,25 @@ if (!is_string($bookingMetadata['label'])) $bookingMetadata['label'] = '';
 if ($bookingMetadata['label'] === '' && $bookingProfile) $bookingMetadata['label'] = $langs->transnoentitiesnoconv('CDavBookingDefaultProfile');
 $bookingProfileEnabled = $bookingPostedConfig !== null ? GETPOSTINT('profile_enabled') : (int) !empty($bookingProfile['enabled']);
 $bookingThirdparty = new Societe($db);
+$bookingCanReadCompanies = isModEnabled('societe') && ($user->admin || $user->hasRight('societe', 'lire'));
+$bookingCanReadProjects = isModEnabled('project') && ($user->admin || $user->hasRight('projet', 'lire') || $user->hasRight('projet', 'all', 'lire'));
 $bookingThirdpartyId = (int) $bookingMetadata['thirdparty_id'];
-if ($bookingThirdpartyId > 0 && ($bookingThirdparty->fetch($bookingThirdpartyId) <= 0
-	|| (int) $bookingThirdparty->entity !== (int) $conf->entity)) {
+if ($bookingThirdpartyId > 0 && (!$bookingCanReadCompanies || $bookingThirdparty->fetch($bookingThirdpartyId) <= 0
+	|| (int) $bookingThirdparty->entity !== (int) $conf->entity
+	|| (!$user->admin && !checkUserAccessToObject($user, array('societe'), $bookingThirdparty, 'societe')))) {
 	$bookingThirdpartyId = 0;
 }
 $bookingProjectId = $bookingThirdpartyId > 0 ? (int) $bookingMetadata['project_id'] : 0;
 if ($action === 'refresh_profile') $bookingProjectId = 0;
 $bookingCurrentProjectUnavailable = false;
-if (!empty($bookingProfile['project_id'])) {
+if (!empty($bookingProfile['project_id']) && $bookingCanReadProjects) {
 	$bookingCurrentProject = new Project($db);
-	$bookingCurrentProjectUnavailable = $bookingCurrentProject->fetch((int) $bookingProfile['project_id']) <= 0
-		|| (int) $bookingCurrentProject->entity !== (int) $conf->entity || (int) $bookingCurrentProject->status !== Project::STATUS_VALIDATED;
+	if ($bookingCurrentProject->fetch((int) $bookingProfile['project_id']) > 0 && (int) $bookingCurrentProject->entity === (int) $conf->entity) {
+		$bookingCurrentProjectUnavailable = (int) $bookingCurrentProject->status !== Project::STATUS_VALIDATED
+			&& ($user->admin || $bookingCurrentProject->restrictedProjectArea($user, 'read') > 0);
+	} else {
+		$bookingCurrentProjectUnavailable = (bool) $user->admin;
+	}
 	if ($bookingCurrentProjectUnavailable && $bookingProjectId === (int) $bookingProfile['project_id']) $bookingProjectId = 0;
 }
 
@@ -233,21 +245,23 @@ try {
 llxHeader('', $langs->trans('CDavBooking'), '', '', 0, 0, array('/cdav/js/booking_admin.js'));
 print load_fiche_titre($langs->trans('CDavBooking'), '', 'calendar');
 print '<p>'.dol_escape_htmltag($langs->trans('CDavBookingAdminHelp')).'</p>';
-print '<form method="post" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
-print '<input type="hidden" name="token" value="'.dol_escape_htmltag(newToken()).'">';
-print '<input type="hidden" name="action" value="save_global">';
-print '<input type="hidden" name="owner_id" value="'.$bookingOwnerId.'">';
-print '<input type="hidden" name="profile_id" value="'.$bookingProfileId.'">';
-print '<label for="CDAV_BOOKING_ENABLED">'.dol_escape_htmltag($langs->trans('CDavBookingGlobalEnabled')).'</label> ';
-print $form->selectyesno('CDAV_BOOKING_ENABLED', getDolGlobalInt('CDAV_BOOKING_ENABLED'), 1);
-print ' <button class="button" type="submit">'.dol_escape_htmltag($langs->trans('Save')).'</button>';
-print '<p class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingGlobalHelp')).'</p></form>';
+if ($user->admin) {
+	print '<form method="post" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
+	print '<input type="hidden" name="token" value="'.dol_escape_htmltag(newToken()).'">';
+	print '<input type="hidden" name="action" value="save_global">';
+	print '<input type="hidden" name="owner_id" value="'.$bookingOwnerId.'">';
+	print '<input type="hidden" name="profile_id" value="'.$bookingProfileId.'">';
+	print '<label for="CDAV_BOOKING_ENABLED">'.dol_escape_htmltag($langs->trans('CDavBookingGlobalEnabled')).'</label> ';
+	print $form->selectyesno('CDAV_BOOKING_ENABLED', getDolGlobalInt('CDAV_BOOKING_ENABLED'), 1);
+	print ' <button class="button" type="submit">'.dol_escape_htmltag($langs->trans('Save')).'</button>';
+	print '<p class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingGlobalHelp')).'</p></form>';
 
-print '<form method="get" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
-print '<label for="owner_id">'.dol_escape_htmltag($langs->trans('CDavBookingProfessional')).'</label> ';
-print $form->select_dolusers($bookingOwnerId, 'owner_id', 0, null, 0, '', '', (string) $conf->entity,
-	0, 0, '(u.statut:=:1) AND (u.fk_soc:is:NULL)');
-print ' <button class="button" type="submit">'.dol_escape_htmltag($langs->trans('CDavBookingLoadCollaborator')).'</button></form>';
+	print '<form method="get" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
+	print '<label for="owner_id">'.dol_escape_htmltag($langs->trans('CDavBookingProfessional')).'</label> ';
+	print $form->select_dolusers($bookingOwnerId, 'owner_id', 0, null, 0, '', '', (string) $conf->entity,
+		0, 0, '(u.statut:=:1) AND (u.fk_soc:is:NULL)');
+	print ' <button class="button" type="submit">'.dol_escape_htmltag($langs->trans('CDavBookingLoadCollaborator')).'</button></form>';
+}
 
 print '<form method="get" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
 print '<input type="hidden" name="owner_id" value="'.$bookingOwnerId.'">';
@@ -277,15 +291,15 @@ print '<tr><td><label for="profile_label">'.dol_escape_htmltag($langs->trans('CD
 print '<input type="text" required maxlength="120" class="minwidth200 maxwidth400" name="profile_label" id="profile_label" value="'.dol_escape_htmltag($bookingMetadata['label']).'">';
 print '</td></tr>';
 print '<tr><td><label for="thirdparty_id">'.dol_escape_htmltag($langs->trans('CDavBookingThirdparty')).'</label></td><td>';
-if (isModEnabled('societe')) {
+if ($bookingCanReadCompanies) {
 	print $form->select_company($bookingThirdpartyId, 'thirdparty_id', '', '1', 0, 0, array(), 0, 'minwidth200 maxwidth400');
 	print ' <button class="button" type="submit" name="refresh_projects" value="1" formnovalidate>'.dol_escape_htmltag($langs->trans('CDavBookingLoadProjects')).'</button>';
 } else {
-	print '<input type="hidden" name="thirdparty_id" value="0">'.dol_escape_htmltag($langs->trans('None'));
+	print dol_escape_htmltag($langs->trans('None'));
 }
 print '</td></tr>';
 print '<tr><td><label for="project_id">'.dol_escape_htmltag($langs->trans('CDavBookingProject')).'</label></td><td>';
-if (isModEnabled('project') && $bookingThirdpartyId > 0) {
+if ($bookingCanReadProjects && $bookingThirdpartyId > 0) {
 	$bookingFormProject = new FormProjets($db);
 	// Native morefilter sanitization removes SQL whitespace. Keep one exact
 	// company predicate and omit the native disabled (draft) entries in array mode.
@@ -300,7 +314,8 @@ if (isModEnabled('project') && $bookingThirdpartyId > 0) {
 	print Form::selectarray('project_id', $bookingProjectOptions, $bookingProjectId, 1, 0, 0, '', 0, 0, 0, '', 'minwidth200 maxwidth400');
 	print '<br><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectOpenOnly')).'</span>';
 } else {
-	print '<input type="hidden" name="project_id" value="0"><span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectHelp')).'</span>';
+	if ($bookingCanReadProjects && $bookingCanReadCompanies) print '<input type="hidden" name="project_id" value="0">';
+	print '<span class="opacitymedium">'.dol_escape_htmltag($langs->trans('CDavBookingProjectHelp')).'</span>';
 }
 if ($bookingCurrentProjectUnavailable) {
 	print '<div id="booking-project-unavailable" class="warning" role="status">'.dol_escape_htmltag($langs->trans('CDavBookingProjectUnavailable')).'</div>';

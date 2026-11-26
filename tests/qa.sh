@@ -22,7 +22,7 @@ if [[ -n "${CDAV_PHPCS_STANDARD:-}" ]]; then
         class/CDavBookingService.php class/CDavBookingIdentity.php class/CDavBookingDetails.php \
         class/CDavBookingSchema.php class/CDavBookingNotification.php class/CDavBookingPublication.php class/CDavCalendarUid.php public/booking.php lib/cdav_transport.lib.php \
         lib/cdav_bootstrap.inc.php lib/cdav_config.lib.php class/CDavMultiGetReport.php class/CDavCardDAVPlugin.php \
-        class/CDavAppointmentStatus.php class/CDavAgendaForm.php core/triggers/interface_99_modCDav_CDavAppointmentStatus.class.php class/CDavCalendarReadCache.php class/CDavBusinessPolicy.php class/CDavCalendarWritePolicy.php class/CDavInvitationPolicy.php class/CDavCalDAVPlugin.php class/CDavSchedulingPlugin.php \
+        class/CDavAppointmentStatus.php class/CDavAgendaForm.php class/CDavAgendaProjectForm.php core/triggers/interface_99_modCDav_CDavAppointmentStatus.class.php class/CDavCalendarReadCache.php class/CDavBusinessPolicy.php class/CDavCalendarWritePolicy.php class/CDavInvitationPolicy.php class/CDavCalDAVPlugin.php class/CDavSchedulingPlugin.php \
         admin/booking.php tpl/booking.tpl.php \
         tests/sync_bootstrap.php tests/multiget.php tests/calendar_factorization.php tests/calendar_read_cost.php tests/carddav_refactoring.php tests/bootstrap.php tests/booking.php tests/booking_projects.php tests/booking_calendar.php tests/booking_multi.php \
         tests/booking_identity.php tests/booking_details.php tests/booking_notification.php tests/booking_publication.php tests/booking_validity.php tests/booking_ui.php \

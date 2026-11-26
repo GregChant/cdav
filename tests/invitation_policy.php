@@ -82,14 +82,15 @@ function invitationPolicyState(array $plan)
  * @param string $actor Authenticated identity
  * @param string $message Failure detail
  * @param string $exception Expected exception class
- * @param bool $protect Whether native date-only protection is enabled
-	 * @param bool $external Backend-verified private external invitation import
+ * @param bool $protect Whether native business-field protection is enabled
+ * @param bool $external Backend-verified private external invitation import
+ * @param array $context Trusted native description boundaries
  * @return void
  */
-function invitationPolicyRejects($before, $after, $actor, $message, $exception = Forbidden::class, $protect = true, $external = false)
+function invitationPolicyRejects($before, $after, $actor, $message, $exception = Forbidden::class, $protect = true, $external = false, array $context = array())
 {
 	try {
-		InvitationPolicy::plan($before, $after, $actor, $protect, $external);
+		InvitationPolicy::plan($before, $after, $actor, $protect, $external, $context);
 	} catch (Throwable $error) {
 		if ($error instanceof $exception) return;
 		throw $error;
@@ -112,6 +113,21 @@ invitationPolicyAssert($state['sequence'] === 4 && $accepted['sequence'] === 4, 
 invitationPolicyAssert($state['description'] === $original['description'] && $state['alarm'] === $original['alarm'] && $state['uid'] === $original['uid'], 'Accepting must preserve notes, native alarms and the original identity');
 invitationPolicyAssert($state['attendees']['mailto:alice@example.test']['partstat'] === 'ACCEPTED', 'The authoritative actor response must be merged into the current calendar');
 invitationPolicyAssert(InvitationPolicy::plan($accepted['calendar_data'], $accept, 'alice@example.test')['kind'] === 'noop', 'Replaying the same Outlook acceptance must be idempotent');
+
+$acceptedBusy = str_replace('TRANSP:OPAQUE', "TRANSP:OPAQUE\r\nX-MICROSOFT-CDO-BUSYSTATUS:BUSY", $accepted['calendar_data']);
+$outlookFree = str_replace('BUSYSTATUS:BUSY', 'BUSYSTATUS:FREE', $acceptedBusy);
+$free = InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test', true, false, array(), true);
+invitationPolicyAssert($free['kind'] === 'availability' && $free['personal_transparency'] === 0 && $free['sequence'] === $accepted['sequence']
+	&& invitationPolicyState($free) === invitationPolicyState($accepted), 'An Outlook Show As edit must be private and retain the accepted response');
+$acceptedFree = str_replace('TRANSP:OPAQUE', 'TRANSP:TRANSPARENT', $outlookFree);
+$backToBusy = str_replace('TRANSP:TRANSPARENT', 'TRANSP:OPAQUE', $acceptedFree);
+$occupied = InvitationPolicy::plan($acceptedFree, $backToBusy, 'alice@example.test', true, false, array(), true);
+invitationPolicyAssert($occupied['kind'] === 'availability' && $occupied['personal_transparency'] === 1,
+	'DAVx5 may set a participant busy again without another RSVP, even with an echoed Outlook FREE hint');
+invitationPolicyAssert(InvitationPolicy::plan($acceptedFree, $acceptedFree, 'alice@example.test', true, false, array(), true)['kind'] === 'noop'
+	&& InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test')['kind'] === 'noop'
+	&& InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test', false, true, array(), true)['kind'] === 'noop',
+	'An echo, iTIP response or external mailbox import must not apply a new internal personal availability change');
 
 $davx5 = invitationPolicyChange($before, static function ($event) {
 	$event->ATTENDEE['PARTSTAT'] = 'TENTATIVE';
@@ -204,7 +220,56 @@ $title = invitationPolicyChange($before, static function ($event) {
 	$event->SUMMARY = 'DAV-edited subject';
 	$event->select('ATTENDEE')[1]['PARTSTAT'] = 'DECLINED';
 });
-invitationPolicyRejects($before, $title, 'organizer@example.test', 'Native organizer business edits must remain protected');
+$renamed = InvitationPolicy::plan($before, $title, 'organizer@example.test');
+invitationPolicyAssert($renamed['sequence'] === 5 && !$renamed['date_changed'] && $renamed['fields'] === array('label' => 'DAV-edited subject')
+	&& invitationPolicyState($renamed)['summary'] === 'DAV-edited subject' && invitationPolicyState($renamed)['attendees'] === $original['attendees'],
+	'An organizer may rename the shared appointment exactly once while preserving attendee responses');
+invitationPolicyAssert(InvitationPolicy::plan($renamed['calendar_data'], $renamed['calendar_data'], 'organizer@example.test')['kind'] === 'noop',
+	'Replaying the committed invitation must not advance its revision');
+$context = array('text' => $original['description'], 'note_prefix' => '', 'note_suffix' => "\nClient and private project context",
+	'native_note' => 'Native notes', 'notes_editable' => true);
+$notes = invitationPolicyChange($before, static function ($event) {
+	$event->DESCRIPTION = "Updated visit notes\nClient and private project context";
+});
+$noted = InvitationPolicy::plan($before, $notes, 'organizer@example.test', true, false, $context);
+invitationPolicyAssert($noted['fields'] === array('note' => 'Updated visit notes') && $noted['sequence'] === 5 && !$noted['date_changed'],
+	'Only the organizer-edited notes belong in the native field update');
+$combined = invitationPolicyChange($notes, static function ($event) {
+	$event->LOCATION = 'New meeting place';
+	$event->PRIORITY = 2;
+	$event->TRANSP = 'TRANSPARENT';
+	$event->SUMMARY = 'New subject';
+	$event->DTEND = '20261120T110000Z';
+});
+$plan = InvitationPolicy::plan($before, $combined, 'organizer@example.test', true, false, $context);
+invitationPolicyAssert($plan['fields'] === array('label' => 'New subject', 'location' => 'New meeting place', 'priority' => 2,
+	'transparency' => 0, 'note' => 'Updated visit notes') && $plan['date_changed'] && $plan['sequence'] === 5
+	&& invitationPolicyState($plan)['attendees'] === $original['attendees'], 'A combined organizer update must advance one revision and preserve responses');
+$shared = invitationPolicyChange($before, static function ($event) {
+	$event->VALARM->DESCRIPTION = 'Previously stored shared alarm';
+});
+foreach (array('', $shared) as $stored) {
+	$sidecar = InvitationPolicy::nativeMetadata($plan, $stored);
+	$item = VObject\Reader::read($sidecar);
+	try {
+		invitationPolicyAssert(!isset($item->VEVENT->DESCRIPTION) && !isset($item->VEVENT->LOCATION) && !str_contains($sidecar, 'Native reminder')
+			&& str_contains($sidecar, 'Previously stored shared alarm') === ($stored !== '')
+			&& (string) $item->VEVENT->SEQUENCE === '5', 'Shared scheduling storage must exclude the current calendar notes, venue and personal alarms');
+	} finally {
+		$item->destroy();
+	}
+}
+$forged = invitationPolicyChange($combined, static function ($event) {
+	$event->add('ATTENDEE', 'mailto:unexpected@example.test');
+});
+invitationPolicyRejects($before, $forged, 'organizer@example.test', 'Editable organizer fields must not authorize adding a participant', Forbidden::class, true, false, $context);
+invitationPolicyRejects($before, $combined, 'alice@example.test', 'An attendee cannot adopt organizer write permissions', Forbidden::class, true, false, $context);
+foreach (array('', str_repeat('é', 256)) as $invalidTitle) {
+	$invalid = invitationPolicyChange($before, static function ($event) use ($invalidTitle) {
+		$event->SUMMARY = $invalidTitle;
+	});
+	invitationPolicyRejects($before, $invalid, 'organizer@example.test', 'A protected organizer edit must supply a valid native title', BadRequest::class);
+}
 $edited = InvitationPolicy::plan($before, $title, 'organizer@example.test', false);
 invitationPolicyAssert($edited['sequence'] === 5 && invitationPolicyState($edited)['summary'] === 'DAV-edited subject'
 	&& invitationPolicyState($edited)['attendees'] === $original['attendees'], 'DAV-created invitation edits must work without overwriting current responses');
@@ -229,7 +294,8 @@ invitationPolicyAssert(invitationPolicyState($participantPlan)['attendees']['mai
 $resized = invitationPolicyChange($before, static function ($event) {
 	$event->DTEND = '20261120T120000Z';
 });
-invitationPolicyRejects($before, $resized, 'organizer@example.test', 'Native organizer moves must preserve duration');
+invitationPolicyAssert(InvitationPolicy::plan($before, $resized, 'organizer@example.test')['dates']['end'] === strtotime('2026-11-20 12:00 UTC'),
+	'A native organizer may resize a standalone invitation');
 invitationPolicyAssert(InvitationPolicy::plan($before, $resized, 'organizer@example.test', false)['sequence'] === 5, 'DAV-created invitations may retain their ordinary duration editing capability');
 
 $provisional = invitationPolicyChange($before, static function ($event) {
@@ -263,7 +329,7 @@ foreach (array('unknown', 'duplicate', 'business') as $invalidState) {
 	$invalid = invitationPolicyChange($provisional, static function ($event) use ($invalidState) {
 		if ($invalidState === 'unknown') $event->STATUS = 'UNKNOWN';
 		if ($invalidState === 'duplicate') $event->add('STATUS', 'CONFIRMED');
-		if ($invalidState === 'business') $event->LOCATION = 'Untrusted replacement';
+		if ($invalidState === 'business') $event->CLASS = 'PRIVATE';
 	});
 	invitationPolicyRejects($before, $invalid, 'organizer@example.test', 'Invalid state changes must not bypass protected native fields',
 		$invalidState === 'business' ? Forbidden::class : BadRequest::class);
@@ -276,6 +342,7 @@ $cancel = invitationPolicyChange($before, static function ($event) {
 });
 $cancelled = InvitationPolicy::plan($before, $cancel, 'organizer@example.test');
 $cancelState = invitationPolicyState($cancelled);
+invitationPolicyAssert(!str_contains(InvitationPolicy::nativeMetadata($cancelled, $shared), 'VALARM'), 'Cancelling a protected invitation must deactivate stored alarms');
 invitationPolicyAssert($cancelled['kind'] === 'cancel' && $cancelled['sequence'] === 5 && $cancelState['status'] === 'CANCELLED' && $cancelState['transp'] === 'TRANSPARENT', 'Only an organizer cancellation may cancel and free the shared event');
 invitationPolicyAssert($cancelState['uid'] === $original['uid'] && $cancelState['description'] === $original['description'] && $cancelState['attendees'] === $original['attendees'], 'Cancellation must preserve stable identity, native notes and all participant associations');
 invitationPolicyAssert(InvitationPolicy::plan($cancelled['calendar_data'], $cancelled['calendar_data'], 'organizer@example.test')['kind'] === 'noop', 'Replaying a cancellation must be idempotent');

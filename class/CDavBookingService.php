@@ -64,13 +64,28 @@ class BookingService
 	}
 
 	/**
-	 * Require the native administrator for profile management.
+	 * Check whether this internal user can manage the requested owner's profiles.
+	 * @param object $actor Dolibarr user in the current session
+	 * @param int $ownerId Requested owner
+	 * @return bool Authorized for the owner
+	 */
+	public static function canManageProfiles($actor, int $ownerId): bool
+	{
+		if ($ownerId <= 0 || !is_object($actor) || !empty($actor->socid) || !empty($actor->design)) return false;
+		return !empty($actor->admin) || ((int) ($actor->id ?? 0) === $ownerId
+			&& $actor->hasRight('cdav', 'booking', 'manageown')
+			&& $actor->hasRight('agenda', 'myactions', 'read') && $actor->hasRight('agenda', 'myactions', 'write'));
+	}
+
+	/**
+	 * Authorize profile reads and writes before accessing any publication key.
+	 * @param int $ownerId Requested owner
 	 * @return void
 	 */
-	private function manager()
+	private function manager($ownerId)
 	{
 		global $user;
-		if (!is_object($user) || !$user->admin || !empty($user->socid)) {
+		if (!self::canManageProfiles($user, (int) $ownerId)) {
 			throw new BookingException('CDavBookingForbidden', 403);
 		}
 	}
@@ -117,7 +132,7 @@ class BookingService
 	 */
 	public function profilesForOwner($ownerId): array
 	{
-		$this->manager();
+		$this->manager($ownerId);
 		$rows = $this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId).' ORDER BY rowid');
 		$profiles = array();
 		while ($row = $this->db->fetch_object($rows)) $profiles[] = $this->profile($row);
@@ -132,7 +147,7 @@ class BookingService
 	 */
 	private function profileRowForOwner($ownerId, $profileId)
 	{
-		$this->manager();
+		$this->manager($ownerId);
 		if ($profileId !== null && (!is_int($profileId) || $profileId <= 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
 		$row = $this->db->fetch_object($this->query('SELECT * FROM '.MAIN_DB_PREFIX.'cdav_booking_profile WHERE entity = '.$this->entity.' AND fk_user = '.((int) $ownerId)
 			.($profileId !== null ? ' AND rowid = '.$profileId : '').' ORDER BY rowid LIMIT 1'));
@@ -157,9 +172,10 @@ class BookingService
 	 * @param int $projectId Native project identifier, or zero
 	 * @param \User $owner Native collaborator whose business access is required
 	 * @param bool $lock Lock native parent rows in the current mutation transaction
+	 * @param bool $requireOpen Whether this project is being selected for bookings
 	 * @return void
 	 */
-	private function validateBusinessLinks(int $thirdpartyId, int $projectId, \User $owner, bool $lock = false): void
+	private function validateBusinessLinks(int $thirdpartyId, int $projectId, \User $owner, bool $lock = false, bool $requireOpen = true): void
 	{
 		if ($projectId && !$thirdpartyId) throw new BookingException('CDavBookingInvalid', 422);
 		if ($thirdpartyId) {
@@ -178,7 +194,8 @@ class BookingService
 			if (!isModEnabled('project')) throw new BookingException('CDavBookingInvalid', 422);
 			require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
 			if ($lock) {
-				$row = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$projectId.' AND entity = '.$this->entity.' AND fk_soc = '.$thirdpartyId.' AND fk_statut = '.\Project::STATUS_VALIDATED.' FOR UPDATE'));
+				$row = $this->db->fetch_object($this->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$projectId.' AND entity = '.$this->entity
+					.' AND fk_soc = '.$thirdpartyId.($requireOpen ? ' AND fk_statut = '.\Project::STATUS_VALIDATED : '').' FOR UPDATE'));
 				if (!$row) throw new BookingException('CDavBookingProjectNotOpen', 422);
 			}
 			$project = new \Project($this->db);
@@ -186,7 +203,7 @@ class BookingService
 				|| $project->restrictedProjectArea($owner, 'read') <= 0) {
 				throw new BookingException('CDavBookingInvalid', 422);
 			}
-			if ((int) $project->status !== \Project::STATUS_VALIDATED) throw new BookingException('CDavBookingProjectNotOpen', 422);
+			if ($requireOpen && (int) $project->status !== \Project::STATUS_VALIDATED) throw new BookingException('CDavBookingProjectNotOpen', 422);
 		}
 	}
 
@@ -218,7 +235,8 @@ class BookingService
 	 */
 	public function saveProfile($ownerId, array $config, $enabled, $profileId = null, array $metadata = array())
 	{
-		$this->manager();
+		global $user;
+		$this->manager($ownerId);
 		if (array_key_exists('clear_project_link', $metadata) && !is_bool($metadata['clear_project_link'])) throw new BookingException('CDavBookingInvalid', 422);
 		$nativeOwner = $this->owner($ownerId);
 		if ($profileId !== null && (!is_int($profileId) || $profileId < 0 || $profileId > 2147483647)) throw new BookingException('CDavBookingInvalid', 422);
@@ -244,6 +262,10 @@ class BookingService
 				if (!is_int($value) || $value < 0 || $value > 2147483647) throw new BookingException('CDavBookingInvalid', 422);
 				$links[$field] = $value;
 			}
+			if (empty($user->admin) && $existing && ($existing['thirdparty_id'] !== $links['thirdparty_id'] || $existing['project_id'] !== $links['project_id'])) {
+				// A collaborator's selector may omit a link after the owner's CRM access changes.
+				$this->validateBusinessLinks($existing['thirdparty_id'], $existing['project_id'], $nativeOwner, false, false);
+			}
 			$this->assertProjectRemovalConfirmed((int) ($existing['project_id'] ?? 0), $links['project_id'], $metadata['clear_project_link'] ?? false);
 			$this->validateBusinessLinks($links['thirdparty_id'], $links['project_id'], $nativeOwner, true);
 			if ($existing) {
@@ -267,7 +289,7 @@ class BookingService
 	}
 
 	/**
-	 * Return the current publication key for an administrator of this entity.
+	 * Return the current publication key to an authorized profile manager.
 	 * @param int $ownerId Owner identifier
 	 * @param int|null $profileId Specific profile, or null for the first legacy profile
 	 * @return string|null Recovered key, or null for unpublished and hash-only profiles
@@ -283,7 +305,7 @@ class BookingService
 	 * Store a recoverable copy of a known existing publication without changing its address.
 	 * @param int $ownerId Owner identifier
 	 * @param int|null $profileId Specific profile, or null for the first legacy profile
-	 * @param string $key Key supplied by the administrator
+	 * @param string $key Key supplied by an authorized profile manager
 	 * @return void
 	 */
 	public function reattachToken($ownerId, $profileId, string $key): void
@@ -309,7 +331,7 @@ class BookingService
 	 */
 	public function rotateToken($ownerId, $profileId = null)
 	{
-		$this->manager();
+		$this->manager($ownerId);
 		$this->owner($ownerId);
 		$profile = $this->profileForOwner($ownerId, $profileId);
 		if (!$profile) throw new BookingException('CDavBookingNotFound', 404);
@@ -331,7 +353,7 @@ class BookingService
 	 */
 	public function disableProfile($ownerId, $profileId = null)
 	{
-		$this->manager();
+		$this->manager($ownerId);
 		$profile = $this->profileForOwner($ownerId, $profileId);
 		if (!$profile) throw new BookingException('CDavBookingNotFound', 404);
 		$this->query('UPDATE '.MAIN_DB_PREFIX.'cdav_booking_profile SET enabled = 0, token_hash = NULL, token_ciphertext = NULL WHERE entity = '

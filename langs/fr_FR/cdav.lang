@@ -6,6 +6,7 @@ Module562387Desc=Synchronise les agendas, les tâches et les carnets d’adresse
 ModuleCDavName=Synchronisation CDav
 ModuleCDavDesc=Synchronise les agendas, les tâches et les carnets d’adresses de Dolibarr avec CalDAV, CardDAV et ICS.
 CDav=CDav
+Permission562387=Gérer ses propres profils, horaires et liens de rendez-vous en ligne
 
 # URL DAV et ICS
 CardDAVurl=URL CardDAV
@@ -89,7 +90,7 @@ CDavBusinessProtection=Protection des données métier
 CDavBusinessProtectionMigrationFailed=La mise à niveau de la protection métier CDav a échoué. Vérifiez les droits de modification du schéma de la base de données, puis réactivez le module.
 CDavCalendarUidMigrationFailed=La mise à niveau du stockage des UID de calendrier CDav a échoué. Vérifiez les droits de modification du schéma de la base de données, puis réactivez le module.
 CDavProtectNativeEvents=Protéger les rendez-vous Dolibarr
-CDavProtectNativeEventsHelp=Les rendez-vous créés dans Dolibarr ou par réservation publique peuvent uniquement être déplacés, en conservant leur durée, ou supprimés depuis CalDAV selon les droits accordés. Le sujet, le lieu, les participants et les données métier restent gérés dans Dolibarr. Les anciens rendez-vous dont l’origine est incertaine sont également protégés.
+CDavProtectNativeEventsHelp=Les utilisateurs autorisés peuvent modifier le titre, le lieu, les notes libres, la priorité et les horaires depuis CalDAV. Les liens vers le tiers, le projet et la tâche, les participants et les coordonnées structurées de réservation se gèrent dans Dolibarr. La protection couvre aussi les anciens rendez-vous dont l’origine est incertaine.
 CDavContactBusinessProtectionHelp=CardDAV conserve les rattachements aux tiers, les catégories, les statuts et la confidentialité des contacts existants. Les contacts liés à un compte utilisateur se gèrent dans Dolibarr.
 CDavNativeReminders=Rappels natifs Dolibarr
 CDavNativeRemindersHelp=Projette les alarmes DISPLAY relatives compatibles vers les rappels navigateur natifs. Les rappels e-mail et SMS ne sont jamais créés.
@@ -112,7 +113,7 @@ CDavManagedAttachmentQuotaHelp=Volume total maximal des pièces jointes gérées
 
 CDavBooking=Rendez-vous en ligne
 CDavBookingTitle=Prendre rendez-vous
-CDavBookingAdminHelp=Configurez les horaires d’un collaborateur, puis générez le lien à partager avec ses clients. Les occupations proviennent directement de son agenda Dolibarr.
+CDavBookingAdminHelp=Réglez les horaires de réservation du profil, puis générez le lien à partager avec les clients. Les créneaux disponibles tiennent compte des rendez-vous de l’agenda Dolibarr du collaborateur.
 CDavBookingGlobalEnabled=Activer la réservation publique
 CDavBookingGlobalHelp=L’activation globale et l’activation du profil sont toutes deux nécessaires pour accepter des réservations.
 CDavBookingProfessional=Collaborateur
@@ -218,6 +219,7 @@ CDavCalendarAppointment=Rendez-vous
 CDavCalendarDocuments=Documents du rendez-vous
 CDavCalendarClientContact=Client et contact
 CDavCalendarProject=Projet
+CDavCalendarTask=Tâche
 CDavCalendarBookingReference=Référence de réservation
 CDavBookingKeepReference=Conservez cette référence. Pour modifier ou annuler le rendez-vous, contactez directement le collaborateur.
 CDavBookingPrivacy=Vos coordonnées sont enregistrées dans l’agenda du collaborateur avec votre rendez-vous.

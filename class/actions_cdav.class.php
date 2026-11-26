@@ -7,7 +7,7 @@
 class ActionsCDav
 {
 	/**
-	 * Bridge early Dolibarr 24 Agenda renderers after access checks and Form initialization.
+	 * Adapt native task labels and early Dolibarr 24 assignee rendering on the Agenda card.
 	 *
 	 * @param array $parameters Native header hook context
 	 * @param CommonObject|null $object Current object when supplied by the framework
@@ -17,18 +17,34 @@ class ActionsCDav
 	 */
 	public function llxHeader($parameters, &$object, &$action, $hookmanager)
 	{
-		global $db, $form;
+		global $db, $form, $formproject;
+		if (($parameters['currentcontext'] ?? '') !== 'actioncard') return 0;
+		if (is_object($formproject) && get_class($formproject) === 'FormProjets') {
+			require_once __DIR__.'/CDavAgendaProjectForm.php';
+			$formproject = $this->withFormState($formproject, new \Dolibarr\CDav\AgendaProjectForm($db));
+		}
 		// Dolibarr 24.0.2 forwards the assignee list to its native renderer.
-		if (($parameters['currentcontext'] ?? '') !== 'actioncard' || !defined('DOL_VERSION') || (int) DOL_VERSION !== 24
+		if (!defined('DOL_VERSION') || (int) DOL_VERSION !== 24
 			|| version_compare(explode('-', DOL_VERSION, 2)[0], '24.0.2', '>=')
 			|| !is_object($form) || get_class($form) !== 'Form') return 0;
 		require_once __DIR__.'/CDavAgendaForm.php';
-		$nativeForm = new \Dolibarr\CDav\AgendaForm($db);
-		foreach (get_object_vars($form) as $property => $value) {
-			if (property_exists($nativeForm, $property)) $nativeForm->{$property} = $value;
-		}
-		$form = $nativeForm;
+		$form = $this->withFormState($form, new \Dolibarr\CDav\AgendaForm($db));
 		return 0;
+	}
+
+	/**
+	 * Preserve the native renderer's initialized state when installing an Agenda-specific override.
+	 *
+	 * @param Form $source Current native renderer
+	 * @param Form $replacement Agenda renderer
+	 * @return Form Initialized replacement
+	 */
+	private function withFormState($source, $replacement)
+	{
+		foreach (get_object_vars($source) as $property => $value) {
+			if (property_exists($replacement, $property)) $replacement->{$property} = $value;
+		}
+		return $replacement;
 	}
 
 	/**

@@ -377,6 +377,21 @@ invitationSchedulingAssert(count($fixture[0]->audit) === 2, 'Organizer move must
 foreach ($fixture[0]->audit as $notice) {
 	invitationSchedulingAssert($notice['method'] === 'REQUEST' && str_contains($notice['data'], 'DTSTART:20261120T130000Z') && $notice['sequence'] === 8, 'Invitation update must reflect the committed dates and server sequence');
 }
+$withAlarm = str_replace("END:VEVENT\r\n", "LOCATION:Private CRM fallback\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nDESCRIPTION:Personal reminder\r\nEND:VALARM\r\nEND:VEVENT\r\n", $base);
+$renamed = str_replace(array('Native appointment', 'SEQUENCE:3'), array('Updated meeting title', 'SEQUENCE:4'), $withAlarm);
+foreach (array(true, false) as $fallback) {
+	$fixture = invitationSchedulingFixture($withAlarm, 'owner');
+	$fixture[0]->receipt = array('previous_data' => $withAlarm, 'canonical_data' => $renamed, 'changed' => true, 'omit_location' => $fallback);
+	invitationSchedulingPut($fixture, $renamed, $renamed);
+	invitationSchedulingAssert(array_column($fixture[0]->audit, 'method') === array('REQUEST', 'REQUEST'), 'An organizer rename must notify each local attendee');
+	foreach ($fixture[0]->inbox as $notice) {
+		invitationSchedulingAssert(str_contains($notice, 'SUMMARY:Updated meeting title') && str_contains($notice, 'SEQUENCE:4')
+			&& !str_contains($notice, 'DESCRIPTION') && !str_contains($notice, 'VALARM') && str_contains($notice, 'LOCATION:') !== $fallback,
+			'An updated invitation must disclose only its explicit meeting place and keep notes and individual reminders private');
+	}
+	invitationSchedulingAssert(!str_contains($fixture[0]->audit[0]['data'], 'Personal reminder') && !str_contains($fixture[0]->audit[0]['data'], 'Confidential project'),
+		'The outbound scheduling record must contain the notification actually delivered');
+}
 $fixture = invitationSchedulingFixture(null, 'owner');
 invitationSchedulingPut($fixture, $base, $base, 201, true);
 invitationSchedulingAssert(array_column($fixture[0]->audit, 'method') === array('REQUEST', 'REQUEST'), 'Creation must invite attendees only after native insertion succeeds');

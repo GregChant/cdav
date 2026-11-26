@@ -11,14 +11,20 @@ Dans **Configuration du module CDav → Protection des données métier**, l’o
 Dolibarr, les rendez-vous issus de la réservation publique et les anciens
 événements dont l’origine n’est pas certaine.
 
-Depuis un logiciel CalDAV, un événement protégé peut être déplacé en conservant
-sa durée et son caractère journée entière. Son identifiant reste identique.
-Le sujet, le lieu, les notes, les participants, les affectations, les documents,
-les rappels et la récurrence se modifient dans Dolibarr. Une tentative de
-modification de ces données reçoit une erreur CalDAV explicite ; les différences
-de pliage ou d’ordre des propriétés ne constituent pas une modification métier.
-L’interface du logiciel agenda peut néanmoins présenter ces champs comme
-éditables : CDav contrôle l’enregistrement côté serveur.
+Depuis Outlook ou un autre client CalDAV, le propriétaire, ou un utilisateur
+autorisé à modifier tous les événements, peut changer le titre, le lieu, les
+notes libres et la priorité du rendez-vous. Pour un rendez-vous individuel,
+il peut aussi changer l’heure de début, l’heure de fin et le réglage **Journée
+entière**. Un changement de lieu porte sur l’adresse de cette visite. Lorsque
+le lieu est vide, l’agenda peut afficher l’adresse du tiers à titre indicatif.
+Les coordonnées du tiers se modifient sur sa fiche Dolibarr.
+
+Le réglage **Libre/Occupé** porte sur l’affectation au calendrier concerné.
+Dans le corps du rendez-vous, modifier les notes de la visite en laissant les
+sections tâche, client, projet et documents telles qu’affichées. Les participants,
+les liens métier et les règles de récurrence se gèrent dans Dolibarr. Si une
+modification touche aussi une de ces données protégées, le serveur refuse
+l’enregistrement entier. Le rendez-vous conserve son UID.
 
 Depuis 6.3.1, une invitation permet aussi au participant authentifié de répondre
 sans modifier les autres données métier. Son refus n'annule pas le rendez-vous
@@ -39,6 +45,11 @@ Un rappel créé dans Dolibarr et renvoyé à l’identique par CalDAV conserve 
 identifiant et sa provenance. Il n’est pas recréé, y compris lorsque la protection
 générale des rendez-vous est désactivée. Les rappels déjà traités ne sont pas
 réarmés par la synchronisation.
+
+Quand les rappels navigateur Dolibarr et leur synchronisation CDav sont activés,
+un collaborateur peut ajouter, modifier et retirer ses propres rappels CalDAV
+de type `DISPLAY` relatifs au début du rendez-vous. Les rappels créés dans
+Dolibarr se gèrent dans Dolibarr.
 
 La suppression reste soumise aux droits Agenda natifs. Pour un événement affecté
 à plusieurs collaborateurs, elle retire uniquement l’affectation au calendrier
@@ -101,8 +112,10 @@ Dolibarr.
 
 ## Présentation dans Outlook et les logiciels agenda
 
-La description utilise des sections en texte simple : **Rendez-vous**, **Client
-et contact**, puis **Projet**. Les paragraphes du projet et les coordonnées sont
+La description présente les **notes du rendez-vous**, puis la **Tâche** liée si
+l’utilisateur peut la consulter. Ce bloc contient sa référence, son libellé et
+un lien direct vers la fiche Dolibarr. Les sections **Client et contact** et
+**Projet** suivent. Les paragraphes du projet et les coordonnées sont
 conservés, sans pictogramme répété devant chaque ligne. L’adresse du rendez-vous
 reste distincte de l’adresse du tiers. La référence d’une réservation vérifiée
 figure en bas avec un libellé lisible.

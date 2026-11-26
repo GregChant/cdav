@@ -249,6 +249,22 @@ calendarPolicyAssert(CalendarWritePolicy::assertMoveOnly($allDay, $allDayMove)['
 	'All-day moves across the Zurich DST boundary must preserve calendar-day duration');
 calendarPolicyRejects($allDay, calendarPolicyEvent("DTSTART;VALUE=DATE:20261025\r\nDTEND;VALUE=DATE:20261027"), 'Extending all-day appointments must fail');
 calendarPolicyRejects($allDay, calendarPolicyEvent("DTSTART:20261025T000000Z\r\nDTEND:20261026T000000Z"), 'All-day conversion must fail');
+$threeDays = calendarPolicyEvent("DTSTART;VALUE=DATE:20261024\r\nDTEND;VALUE=DATE:20261027");
+$timed = calendarPolicyEvent("DTSTART:20261024T090000Z\r\nDTEND:20261024T100000Z");
+$resized = CalendarWritePolicy::planStatusChange($timed, $threeDays);
+calendarPolicyAssert($resized['resized'] && $resized['dates']['fullday'] === 1
+	&& $resized['dates']['start'] === strtotime('2026-10-24 00:00:00 Europe/Zurich')
+	&& $resized['dates']['end'] === strtotime('2026-10-27 00:00:00 Europe/Zurich'),
+	'Switching to three whole days over the Swiss autumn clock change must preserve both local midnights');
+calendarPolicyAssert(CalendarWritePolicy::planStatusChange($threeDays, $timed)['dates']['fullday'] === 0,
+	'An owner may switch an individual appointment back to a timed event');
+$series = str_replace('END:VEVENT', "RRULE:FREQ=WEEKLY\r\nEND:VEVENT", $before);
+try {
+	CalendarWritePolicy::planStatusChange($series, str_replace('20261120T110000', '20261120T120000', $series));
+	throw new RuntimeException('A change to the duration of the recurring series was accepted');
+} catch (Sabre\DAV\Exception\Forbidden $expected) {
+	// A series may contain exceptions whose endpoints are maintained in Dolibarr.
+}
 $zero = calendarPolicyEvent("DTSTART:20261120T090000Z\r\nDTEND:20261120T090000Z");
 $zeroMove = calendarPolicyEvent("DTSTART:20261121T090000Z\r\nDTEND:20261121T090000Z");
 $zeroDates = CalendarWritePolicy::assertMoveOnly($zero, $zeroMove);
@@ -300,8 +316,10 @@ foreach (array(
 	array($before, str_replace('STATUS:CONFIRMED', 'STATUS:', $before), Sabre\DAV\Exception\BadRequest::class),
 	array($before, str_replace('END:VEVENT', "STATUS:TENTATIVE\r\nEND:VEVENT", $before), Sabre\DAV\Exception\BadRequest::class),
 	array($outlookBusy, str_replace('END:VEVENT', "X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE\r\nEND:VEVENT", $outlookBusy), Sabre\DAV\Exception\BadRequest::class),
-	array($before, str_replace('Native appointment', 'Replaced subject', $tentative), Sabre\DAV\Exception\Forbidden::class),
-	array($before, str_replace('TRANSP:OPAQUE', 'TRANSP:TRANSPARENT', $tentative), Sabre\DAV\Exception\Forbidden::class),
+	array($before, str_replace('SUMMARY:Native appointment', 'SUMMARY:', $tentative), Sabre\DAV\Exception\BadRequest::class),
+	array($before, str_replace('LOCATION:Client address', 'LOCATION:0', $before), Sabre\DAV\Exception\BadRequest::class),
+	array($before, str_replace('TRANSP:OPAQUE', 'TRANSP:UNKNOWN', $tentative), Sabre\DAV\Exception\BadRequest::class),
+	array($before, str_replace('PRIORITY:5', 'PRIORITY:12', $tentative), Sabre\DAV\Exception\BadRequest::class),
 	array($before, str_replace('20261120T', '20261121T', $cancelStatus), Sabre\DAV\Exception\Forbidden::class),
 	array($cancellation['calendar_data'], $before, Sabre\DAV\Exception\Forbidden::class),
 	array($cancellation['calendar_data'], str_replace('20261120T', '20261121T', $cancellation['calendar_data']), Sabre\DAV\Exception\Forbidden::class),
@@ -312,6 +330,79 @@ foreach (array(
 	} catch (Sabre\DAV\Exception $error) {
 		calendarPolicyAssert($error instanceof $invalidStatusCase[2], 'A status refusal must use the expected protocol error');
 	}
+}
+
+$fieldsCalendar = Sabre\VObject\Reader::read($before);
+$fieldsCalendar->VEVENT->LOCATION = "Rue de la Gare 8\n1003 Lausanne";
+calendarPolicyAssert(CalendarWritePolicy::planStatusChange($before, $fieldsCalendar->serialize())['fields']['location'] === "Rue de la Gare 8\n1003 Lausanne",
+	'An address pasted on two lines must remain a valid native appointment location');
+$heading = "Appointment\nAppointment subject : Native appointment\n\n";
+$suffix = "\n\nProject\n[P-12] Client\n\nTask\n[T-23] Review";
+$descriptionContext = array('text' => $heading.'Meeting notes'.$suffix, 'note_prefix' => $heading, 'note_suffix' => $suffix,
+	'native_note' => '<p>Meeting <strong>notes</strong></p>', 'notes_editable' => true,
+	'note_prefix_fields' => array('original_subject' => 'Native appointment', 'original_location' => ''),
+	'prefix_for_fields' => static fn($context, $title, $location) => "Appointment\nAppointment subject : ".$title
+		.($location === '' ? '' : "\nAppointment address : ".$location)."\n\n");
+$fieldsCalendar->VEVENT->DESCRIPTION = $descriptionContext['text'];
+$sourceFields = $fieldsCalendar->serialize();
+$fieldsCalendar->VEVENT->SUMMARY = 'Client review';
+$newHeading = $descriptionContext['prefix_for_fields']($descriptionContext, 'Client review', '');
+$fieldsCalendar->VEVENT->DESCRIPTION = $newHeading.'Meeting notes'.$suffix;
+$titlePlan = CalendarWritePolicy::planStatusChange($sourceFields, $fieldsCalendar->serialize(), $descriptionContext);
+calendarPolicyAssert($titlePlan['fields'] === array('label' => 'Client review') && $titlePlan['sequence'] === 1
+	&& !$titlePlan['date_changed'], 'Renaming the appointment must retain the rich note and keep a derived address out of the native location');
+$fieldsCalendar->VEVENT->LOCATION = 'Rue du Lac 24';
+$fieldsCalendar->VEVENT->PRIORITY = 2;
+$fieldsCalendar->VEVENT->TRANSP = 'TRANSPARENT';
+$newHeading = $descriptionContext['prefix_for_fields']($descriptionContext, 'Client review', 'Rue du Lac 24');
+$fieldsCalendar->VEVENT->DESCRIPTION = $newHeading."New notes\nNext line".$suffix;
+$fieldPlan = CalendarWritePolicy::planStatusChange($sourceFields, $fieldsCalendar->serialize(), $descriptionContext);
+calendarPolicyAssert($fieldPlan['fields'] === array('label' => 'Client review', 'location' => 'Rue du Lac 24', 'priority' => 2,
+	'transparency' => 0, 'note' => "New notes\nNext line") && $fieldPlan['sequence'] === 1,
+	'A combined update must extract only native appointment fields and advance one revision');
+$fieldsCalendar->VEVENT->DESCRIPTION = $newHeading.'New notes'.str_replace('[T-23]', '[T-24]', $suffix);
+try {
+	CalendarWritePolicy::planStatusChange($sourceFields, $fieldsCalendar->serialize(), $descriptionContext);
+	throw new RuntimeException('A title and note change permitted altering generated task context');
+} catch (Sabre\DAV\Exception\Forbidden $error) {
+	// The entire update is rejected.
+}
+$fieldsCalendar->VEVENT->DESCRIPTION = $newHeading.'Meeting notes'.$suffix;
+$descriptionContext['notes_editable'] = false;
+calendarPolicyAssert(!isset(CalendarWritePolicy::planStatusChange($sourceFields, $fieldsCalendar->serialize(), $descriptionContext)['fields']['note']),
+	'An Outlook heading refresh on a structured booking must not rewrite the original receipt or contact details');
+$fieldsCalendar->VEVENT->DESCRIPTION = 'Changed structured booking';
+try {
+	CalendarWritePolicy::planStatusChange($sourceFields, $fieldsCalendar->serialize(), $descriptionContext);
+	throw new RuntimeException('Structured booking information was editable');
+} catch (Sabre\DAV\Exception\Forbidden $error) {
+	// Structured visitor details remain under native control.
+}
+$fieldsCalendar->destroy();
+$freePlan = CalendarWritePolicy::planStatusChange($outlookBusy, str_replace('BUSYSTATUS:BUSY', 'BUSYSTATUS:FREE', $outlookBusy));
+calendarPolicyAssert($freePlan['fields'] === array('transparency' => 0) && $freePlan['status'] === 'CONFIRMED',
+	'An Outlook Free display change must update personal availability without cancelling the meeting');
+
+$nativeAlarm = "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nDESCRIPTION:Native appointment\r\nEND:VALARM\r\n";
+$withPersonalAlarm = str_replace('END:VEVENT', $nativeAlarm.'END:VEVENT', $before);
+list($sharedComparison, $requestedReminders) = CalendarWritePolicy::personalReminderChange($before, $withPersonalAlarm);
+calendarPolicyAssert(count($requestedReminders) === 1 && $requestedReminders[0]['unit'] === 'i' && $requestedReminders[0]['value'] === 15
+	&& !CalendarWritePolicy::planStatusChange($before, $sharedComparison)['changed'],
+	'A new personal reminder must not advance the shared appointment revision');
+list($sharedComparison, $requestedReminders) = CalendarWritePolicy::personalReminderChange($withPersonalAlarm,
+	str_replace('TRIGGER:-PT15M', 'TRIGGER:-PT30M', $withPersonalAlarm));
+calendarPolicyAssert($requestedReminders[0]['value'] === 30 && !CalendarWritePolicy::planStatusChange($withPersonalAlarm, $sharedComparison)['changed'],
+	'A reminder offset edit must stay personal and retain all shared fields for comparison');
+list($sharedComparison, $requestedReminders) = CalendarWritePolicy::personalReminderChange($withPersonalAlarm, $before);
+calendarPolicyAssert($requestedReminders === array() && !CalendarWritePolicy::planStatusChange($withPersonalAlarm, $sharedComparison)['changed'],
+	'Removing a personal reminder must request only the native ownership-checked removal');
+list($sharedComparison, $requestedReminders) = CalendarWritePolicy::personalReminderChange($withPersonalAlarm, str_replace('-PT15M', '-PT900S', $withPersonalAlarm));
+calendarPolicyAssert($requestedReminders === null && !CalendarWritePolicy::planStatusChange($withPersonalAlarm, $sharedComparison)['changed'],
+	'Equivalent personal reminders must keep their native IDs without shared writes');
+foreach (array('TRIGGER;RELATED=END:-PT15M', 'TRIGGER:-PT35S', "ATTACH:https://example.test/file\r\nTRIGGER:-PT15M") as $unsupported) {
+	$alarmChange = str_replace('TRIGGER:-PT15M', $unsupported, $withPersonalAlarm);
+	list($sharedComparison) = CalendarWritePolicy::personalReminderChange($before, $alarmChange);
+	calendarPolicyRejects($before, $sharedComparison, 'An unrepresentable alarm must remain protected');
 }
 
 $outlookFirstCancel = str_replace('SUMMARY:Native appointment', 'SUMMARY:Cancelled: Native appointment', $cancelStatus);

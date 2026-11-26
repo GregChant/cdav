@@ -75,7 +75,7 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 		$project->public = 0;
 		$project->usage_task = 1;
 		liveAssert($project->create($testUser) > 0, 'Unable to create the private native project fixture');
-		$nativeProject = (array) liveRow($db, 'SELECT description, tms FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.((int) $project->id));
+		$projectId = (int) $project->id;
 		$event = new ActionComm($db);
 		$event->type_code = 'AC_RDV';
 		$event->label = $prefix.' Project ACL appointment';
@@ -85,15 +85,29 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 		$event->percentage = -1;
 		$event->transparency = 1;
 		$event->socid = (int) $context['company_id'];
-		$event->fk_project = (int) $project->id;
+		$event->fk_project = $projectId;
 		$event->userownerid = $limitedId;
 		$event->userassigned = array($limitedId => array('id' => $limitedId, 'transparency' => 1));
+		$taskSecret = 'PRIVATE-TASK-NOTE-'.$context['token'];
+		$task = new Task($db);
+		$task->ref = 'DAVTASK-'.$context['token'];
+		$task->label = $prefix.' Private assigned task';
+		$task->description = '<p>'.$taskSecret.'</p>';
+		$task->fk_project = $projectId;
+		$task->date_start = $event->datep;
+		$task->date_end = $event->datef;
+		$task->progress = 0;
+		$task->planned_workload = 3600;
+		liveAssert($task->create($testUser) > 0 && $task->add_contact($limitedId, (int) $taskRole->rowid, 'internal') > 0,
+			'Unable to create and assign the native task ACL fixture');
+		$event->elementtype = 'project_task';
+		$event->elementid = (int) $task->id;
 		liveAssert($event->create($testUser) > 0, 'Unable to create the assigned native Agenda ACL fixture');
+		$nativeProject = (array) liveRow($db, 'SELECT description, tms FROM '.MAIN_DB_PREFIX.'projet WHERE rowid = '.$projectId);
 		$nativeNote = (string) liveRow($db, 'SELECT note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.((int) $event->id))->note;
 		$key = getDolGlobalString('CDAV_URI_KEY');
 		$eventPath = $context['limited_calendar_path'].rawurlencode($event->id.'-ev-'.$key);
-		$projectId = (int) $project->id;
-		$view = static function (bool $visible, string $phase) use ($db, $event, $nativeNote, $nativeProject, $project, $projectId, $secret, $eventPath, $http, $multiget, $context) {
+		$view = static function (bool $visible, string $phase) use ($db, $event, $nativeNote, $nativeProject, $project, $projectId, $secret, $eventPath, $http, $multiget, $context, $task) {
 			$get = $http('GET', $eventPath);
 			liveHttpStatus($get, array(200), 'BL26 assigned Agenda export '.$phase);
 			$data = liveUnfold($get['body']);
@@ -101,12 +115,16 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 			liveAssert(str_contains($data, $project->ref) && str_contains($data, $project->title),
 				'Agenda export lost its native project reference/title: '.$phase);
 			$description = (string) \Sabre\VObject\Reader::read($get['body'])->VEVENT->DESCRIPTION;
+			foreach (array($task->ref, $task->label, '/projet/tasks/task.php?id='.$task->id) as $taskDetail) {
+				liveAssert(str_contains($description, $taskDetail) === $visible, 'Linked Agenda task visibility is incorrect: '.$phase);
+			}
 			liveAssert(str_contains($description, 'Readable Agenda notes') && !str_contains($description, '<p>') && !str_contains($description, '<strong>'),
 				'Project redaction changed readable Agenda notes or exposed native HTML: '.$phase);
 			$report = $multiget(array($eventPath));
 			liveHttpStatus($report, array(207), 'BL26 project ACL calendar-multiget '.$phase);
 			$reportData = liveUnfold(html_entity_decode($report['body'], ENT_QUOTES | ENT_XML1, 'UTF-8'));
-			liveAssert(str_contains($reportData, 'HTTP/1.1 200') && str_contains($reportData, $secret) === $visible,
+			liveAssert(str_contains($reportData, 'HTTP/1.1 200') && str_contains($reportData, $secret) === $visible
+				&& str_contains($reportData, $task->ref) === $visible,
 				'Calendar-multiget bypassed the native project description ACL: '.$phase);
 			$propfind = '<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop><cs:getctag/></d:prop></d:propfind>';
 			$collection = $http('PROPFIND', $context['limited_calendar_path'], $propfind, array('Depth: 0', 'Content-Type: application/xml'));
@@ -150,18 +168,6 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 		$toggleRight($readId, false);
 		liveOk('BL26 Agenda project descriptions respect native project rights and membership, including GET/multiget/ETag/ctag after grant and revoke');
 
-		$taskSecret = 'PRIVATE-TASK-NOTE-'.$context['token'];
-		$task = new Task($db);
-		$task->ref = 'DAVTASK-'.$context['token'];
-		$task->label = $prefix.' Private assigned task';
-		$task->description = '<p>'.$taskSecret.'</p>';
-		$task->fk_project = $projectId;
-		$task->date_start = $event->datep;
-		$task->date_end = $event->datef;
-		$task->progress = 0;
-		$task->planned_workload = 3600;
-		liveAssert($task->create($testUser) > 0 && $task->add_contact($limitedId, (int) $taskRole->rowid, 'internal') > 0,
-			'Unable to create and assign the native task ACL fixture');
 		$nativeTaskNote = (string) liveRow($db, 'SELECT description FROM '.MAIN_DB_PREFIX.'projet_task WHERE rowid = '.((int) $task->id))->description;
 		liveAssert(dolibarr_set_const($db, 'CDAV_TASK_SYNC', '3', 'chaine', 0, '', $entity) > 0, 'Unable to expose both native task calendar representations');
 		$taskPaths = array();
@@ -227,8 +233,8 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 			liveAssert($limited->delrights((int) $rightId, '', '', $entity) > 0, 'Unable to restore native project reader permissions');
 		}
 		if ($projectContact > 0 && $project) liveAssert($project->delete_contact($projectContact) > 0, 'Unable to remove native project membership fixture');
-		if ($task && (int) $task->id > 0) liveAssert($task->delete($admin) > 0, 'Unable to remove native task ACL fixture');
 		if ($event && (int) $event->id > 0 && $event->fetch((int) $event->id) > 0) liveAssert($event->delete($admin) > 0, 'Unable to remove native Agenda ACL fixture');
+		if ($task && (int) $task->id > 0) liveAssert($task->delete($admin) > 0, 'Unable to remove native task ACL fixture');
 		if ($project && (int) $project->id > 0) liveAssert($project->delete($admin, 1) > 0, 'Unable to remove private native project ACL fixture');
 		foreach ($settingSnapshots as $name => $snapshot) {
 			liveAssert(liveRestoreConstant($db, $name, $entity, $snapshot) > 0, 'Unable to restore native task synchronization settings');

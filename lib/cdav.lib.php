@@ -13,7 +13,7 @@ require_once __DIR__.'/cdav_transport.lib.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-agenda-documents-v10';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-agenda-task-v11';
 
 	/** Series ID written by the native Agenda form when saving separate occurrences. */
 	private const AGENDA_SERIES_ID_PATTERN = '^[0-9]{14}$';
@@ -196,10 +196,15 @@ class CdavLib
 	 */
 	public function canReadProjectDescription($row)
 	{
-		if (!isModEnabled('project') || !$this->hasRight('projet', 'lire')) return false;
 		$id = property_exists($row, 'cdav_project_id') ? (int) $row->cdav_project_id
 			: (int) ($row->fk_project ?? $row->fk_projet ?? 0);
-		if ($id <= 0) return false;
+		return $this->canReadProject($id);
+	}
+
+	/** Check the project that owns the content being exported. */
+	private function canReadProject(int $id): bool
+	{
+		if ($id <= 0 || !isModEnabled('project') || !$this->hasRight('projet', 'lire')) return false;
 		if (!array_key_exists($id, $this->projectDescriptionAccess)) {
 			$this->projectDescriptionAccess[$id] = false;
 			try {
@@ -213,6 +218,20 @@ class CdavLib
 			}
 		}
 		return $this->projectDescriptionAccess[$id];
+	}
+
+	/** Present an Agenda task link only to readers of the task's actual parent project. */
+	private function linkedTaskDescription($row): string
+	{
+		$taskId = (int) ($row->linked_task_id ?? 0);
+		if (($row->elem_source ?? '') !== 'ev' || $taskId <= 0 || getDolGlobalInt('PROJECT_HIDE_TASKS')
+			|| !$this->canReadProject((int) ($row->linked_task_project_id ?? 0))) return '';
+
+		$ref = $this->cleanDolibarrText($row->linked_task_ref ?? '');
+		$label = $this->cleanDolibarrText($row->linked_task_label ?? '');
+		$title = trim(($ref !== '' ? '['.$ref.'] ' : '').$label);
+		return $this->langs->transnoentitiesnoconv('CDavCalendarTask')."\n".($title !== '' ? $title."\n" : '')
+			.dol_buildpath('/projet/tasks/task.php?id='.$taskId.'&withproject=1', 2);
 	}
 
 	/**
@@ -294,6 +313,8 @@ class CdavLib
 			}
 		}
 		$sections = array();
+		$task = $this->linkedTaskDescription($row);
+		if ($task !== '') $sections[] = $task;
 		$publicNote = $this->cleanDolibarrText($publicNote);
 
 		$client = $visitor;
@@ -914,6 +935,10 @@ class CdavLib
 					p.title proj_title,
 					p.description proj_desc,
 					p.rowid AS cdav_project_id,
+					task.rowid AS linked_task_id,
+					task.fk_projet AS linked_task_project_id,
+					task.ref AS linked_task_ref,
+					task.label AS linked_task_label,
 					ac.sourceuid,
 					ac.uuidext,
 					(SELECT COUNT(*)
@@ -957,6 +982,12 @@ class CdavLib
 		}
 		if ($this->appointmentStatusAvailable()) {
 			$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'actioncomm_extrafields AS cdavstate ON cdavstate.fk_object = a.id';
+		}
+		if ($bookingRange === null) {
+			// Agenda uses a typed object link. API-created events can also use the dedicated task field.
+			$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'projet_task AS task ON task.rowid = CASE
+				WHEN a.elementtype = \'project_task\' AND a.fk_element > 0 THEN a.fk_element ELSE a.fk_task END
+				AND task.entity IN ('.getEntity('project').')';
 		}
 
 		$sql.=' INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_resources AS arcal
@@ -1075,7 +1106,8 @@ class CdavLib
 			}
 			while ($obj = $this->db->fetch_object($result)) {
 				$attachmentTag = $source === 'ev' ? ':'.$this->getActionCommAttachmentTag((int) $obj->id) : '';
-				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd).$attachmentTag.':project-read:'.(int) $this->canReadProjectDescription($obj);
+				$tokens[] = $source.':'.((int) $obj->id).':'.((string) $obj->lastupd).$attachmentTag.':project-read:'.(int) $this->canReadProjectDescription($obj)
+					.':task:'.$this->linkedTaskDescription($obj);
 			}
 		}
 

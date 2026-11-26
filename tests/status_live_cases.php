@@ -195,7 +195,7 @@ function appointmentStatusLiveChecks($db, $organizer, $invitee, array $context, 
 	$before = invitationLiveNoopState($db, $id);
 	foreach (array('business' => static function ($event) {
 		$event->STATUS = 'CONFIRMED';
-		$event->SUMMARY = 'A state change must not authorize business edits';
+		$event->add('ATTENDEE', 'mailto:outside@example.test');
 	}, 'invalid status' => static function ($event) {
 		$event->STATUS = 'PUBLISHED';
 	}, 'ambiguous status' => static function ($event) {

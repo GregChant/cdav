@@ -118,9 +118,10 @@ function invitationLiveInboxPrivacy($db, array $context, string $uid, string $se
  * @param int $projectId Native project
  * @param int $contactId Native contact
  * @param array $events Cleanup registry
+ * @param int $taskId Native task from which the invitation was created
  * @return array Native identifier and two calendar paths
  */
-function invitationLiveCreate($db, $organizer, $invitee, array $context, int $projectId, int $contactId, array &$events): array
+function invitationLiveCreate($db, $organizer, $invitee, array $context, int $projectId, int $contactId, array &$events, int $taskId = 0): array
 {
 	$event = new ActionComm($db);
 	$event->type_code = $event->code = 'AC_RDV';
@@ -134,6 +135,10 @@ function invitationLiveCreate($db, $organizer, $invitee, array $context, int $pr
 	$event->transparency = 1;
 	$event->socid = (int) $context['company_id'];
 	$event->fk_project = $projectId;
+	if ($taskId > 0) {
+		$event->elementtype = 'project_task';
+		$event->elementid = $taskId;
+	}
 	$event->contact_id = $contactId;
 	$event->socpeopleassigned = array($contactId => array('id' => $contactId));
 	$event->userownerid = (int) $organizer->id;
@@ -491,6 +496,7 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 {
 	global $langs;
 	require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
+	require_once DOL_DOCUMENT_ROOT.'/projet/class/task.class.php';
 	require_once DOL_DOCUMENT_ROOT.'/comm/action/class/actioncommreminder.class.php';
 	require_once dirname(__DIR__).'/class/CDavBookingCalendarReader.php';
 	$invitee = new User($db);
@@ -499,6 +505,7 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 	$events = array();
 	$contact = null;
 	$project = null;
+	$task = null;
 	$proof = array();
 	$headers = array('Content-Type: text/calendar; charset=utf-8');
 	$http = static function ($actor, $method, $path, $body = null, $extra = array()) use ($context, $headers) {
@@ -521,7 +528,12 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 		liveAssert($project->create($organizer) > 0 && $project->setValid($organizer) > 0, 'Unable to open the native invitation project');
 		require_once __DIR__.'/status_live_cases.php';
 		appointmentStatusLiveChecks($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events, $proof);
-		$fixture = invitationLiveCreate($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events);
+		$task = new Task($db);
+		$task->ref = 'INV-TASK-'.$context['token'];
+		$task->label = $context['prefix'].' Invitation task';
+		$task->fk_project = (int) $project->id;
+		liveAssert($task->create($organizer) > 0, 'Unable to create the invitation task');
+		$fixture = invitationLiveCreate($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events, (int) $task->id);
 		$id = $fixture['id'];
 		$state = invitationLiveProtectedState($db, $id, (int) $invitee->id);
 		$initial = $http('invitee', 'GET', $fixture['invitee_path']);
@@ -552,6 +564,9 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 			else $historicalReminder = (int) $reminder->id;
 		}
 		$historyBefore = (array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE rowid = '.$historicalReminder);
+		businessLivePersonalReminders($db, $id, (int) $invitee->id,
+			static fn($method, $body = null, $extra = array()) => $http('invitee', $method, $fixture['invitee_path'], $body, $extra),
+			static fn() => $http('organizer', 'GET', $fixture['organizer_path']));
 		foreach (array('Outlook CalDavSynchronizer' => '-//CalDavSynchronizer//Outlook//EN', 'DAVx5' => '-//bitfire web engineering//DAVx5//EN') as $client => $product) {
 			foreach (array('ACCEPTED', 'TENTATIVE', 'DECLINED', 'ACCEPTED') as $answer) {
 				$current = $http('invitee', 'GET', $fixture['invitee_path']);
@@ -578,6 +593,41 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 				$proof[] = array('case' => 'PUT response', 'client' => $client, 'partstat' => $answer, 'http' => $response['status']);
 			}
 		}
+		$before = invitationLiveNoopState($db, $id);
+		$organizerTag = $http('organizer', 'GET', $fixture['organizer_path'])['headers']['etag'];
+		foreach (array(false, true) as $busyAgain) {
+			$current = $http('invitee', 'GET', $fixture['invitee_path']);
+			$body = businessLiveCalendar($current['body'], static function ($event) use ($busyAgain) {
+				if ($busyAgain) {
+					$event->TRANSP = 'OPAQUE';
+					foreach ($event->select('VALARM') as $alarm) if ((string) $alarm->TRIGGER === '-PT19M') $event->remove($alarm);
+				} else {
+					$event->{'X-MICROSOFT-CDO-BUSYSTATUS'} = 'FREE';
+					$event->add('VALARM', array('ACTION' => 'DISPLAY', 'TRIGGER' => '-PT19M', 'DESCRIPTION' => 'Personal reminder'));
+				}
+			});
+			liveHttpStatus($http('invitee', 'PUT', $fixture['invitee_path'], $body, array('If-Match: '.$current['headers']['etag'])),
+				array(200, 204), 'Accepted participant personal availability and reminder');
+			$current = $http('invitee', 'GET', $fixture['invitee_path']);
+			$personal = \Sabre\VObject\Reader::read($current['body']);
+			liveAssert((string) $personal->VEVENT->TRANSP === ($busyAgain ? 'OPAQUE' : 'TRANSPARENT')
+				&& (string) $personal->VEVENT->{'X-MICROSOFT-CDO-BUSYSTATUS'} === ($busyAgain ? 'BUSY' : 'FREE')
+				&& str_contains($personal->serialize(), '-PT19M') === !$busyAgain
+				&& (string) invitationLiveAttendee($personal->VEVENT, (string) $invitee->email)['PARTSTAT'] === 'ACCEPTED',
+				'The participant did not retain the requested local availability, alarm and accepted RSVP');
+			$personal->destroy();
+			$after = invitationLiveNoopState($db, $id);
+			foreach ($before['resources'] as $index => $original) {
+				if ($original['element_type'] !== 'user' || (int) $original['fk_element'] !== (int) $invitee->id) continue;
+				liveAssert((int) $after['resources'][$index]['transparency'] === (int) $busyAgain, 'Native participant availability differs from the DAV representation');
+				$after['resources'][$index]['transparency'] = $original['transparency'];
+			}
+			liveAssert($after === $before && $http('organizer', 'GET', $fixture['organizer_path'])['headers']['etag'] === $organizerTag,
+				'Private participant availability rewrote the event, assignments, shared revision or scheduling journal');
+			liveAssert((bool) (new \Dolibarr\CDav\BookingCalendarReader($db, $invitee, $langs))->busy($start, $end, 'Europe/Zurich') === $busyAgain,
+				'The accepted participant free/busy projection did not follow their personal setting');
+		}
+		liveOk('Accepted participant personal Free/Busy edits retain RSVP and never send a scheduling message');
 		$current = $http('invitee', 'GET', $fixture['invitee_path']);
 		$before = invitationLiveNoopState($db, $id);
 		liveHttpStatus($http('invitee', 'PUT', $fixture['invitee_path'], $current['body'], array('If-Match: '.$current['headers']['etag'])),
@@ -637,12 +687,33 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 		}
 		$stale = $http('invitee', 'GET', $fixture['invitee_path']);
 		$organizerGet = $http('organizer', 'GET', $fixture['organizer_path']);
-		$moved = businessLiveCalendar($organizerGet['body'], static function ($component) use ($start, $end) {
+		$expected = businessLiveEventState($db, $id);
+		liveAssert((int) $expected['event']['fk_element'] === (int) $task->id && $expected['event']['elementtype'] === 'project_task'
+			&& (int) $expected['event']['fk_project'] === (int) $project->id, 'INV10 requires a native task-linked invitation');
+		$expected['event']['label'] = $context['prefix'].' Updated appointment';
+		$expected['event']['location'] = 'Updated meeting place';
+		$expected['event']['note'] = 'Visit notes edited in the calendar';
+		$moved = businessLiveCalendar($organizerGet['body'], static function ($component) use ($start, $end, $expected) {
+			$component->SUMMARY = $expected['event']['label'];
+			$component->LOCATION = $expected['event']['location'];
+			$component->DESCRIPTION = $expected['event']['note'];
 			$component->DTSTART->setDateTime(new DateTimeImmutable('@'.($start + 86400)));
-			$component->DTEND->setDateTime(new DateTimeImmutable('@'.($end + 86400)));
+			$component->DTEND->setDateTime(new DateTimeImmutable('@'.($end + 86400 + 1800)));
 		});
 		liveHttpStatus($http('organizer', 'PUT', $fixture['organizer_path'], $moved, array('If-Match: '.$organizerGet['headers']['etag'])),
 			array(200, 204), 'INV10 organizer invitation update');
+		$end += 1800;
+		liveAssert(businessLiveEventState($db, $id) === $expected, 'INV10 changed a native project, task, contact, attendee response or assignment');
+		foreach (array('organizer', 'invitee') as $actor) {
+			$actual = $http($actor, 'GET', $fixture[$actor.'_path']);
+			liveHttpStatus($actual, array(200), 'INV10 edited appointment read by '.$actor);
+			$item = \Sabre\VObject\Reader::read($actual['body'])->VEVENT;
+			liveAssert((string) $item->UID === $uid && (int) (string) $item->SEQUENCE === $sequence + 1
+				&& (string) $item->SUMMARY === $expected['event']['label'] && (string) $item->LOCATION === $expected['event']['location']
+				&& str_contains((string) $item->DESCRIPTION, $expected['event']['note']) && $item->DTEND->getDateTime()->getTimestamp() === $end + 86400
+				&& str_contains((string) $item->DESCRIPTION, $task->ref) === ($actor === 'organizer'),
+				'INV10 lost the edited appointment fields, single revision or project-scoped task visibility');
+		}
 		$protection = liveSnapshotConstant($db, 'CDAV_PROTECT_NATIVE_EVENTS', (int) $context['entity']);
 		try {
 			liveAssert(dolibarr_set_const($db, 'CDAV_PROTECT_NATIVE_EVENTS', '0', 'chaine', 0, '', (int) $context['entity']) > 0,
@@ -758,6 +829,7 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 			}
 		}
 		if ($contact && $contact->id > 0) liveAssert($contact->delete($admin) > 0, 'Unable to clean up the native invitation contact');
+		if ($task && $task->id > 0) liveAssert($task->delete($admin) > 0, 'Unable to clean up the native invitation task');
 		if ($project && $project->id > 0) liveAssert($project->delete($admin) > 0, 'Unable to clean up the native invitation project');
 		$proofFile = getenv('CDAV_INVITATION_PROOF');
 		if (is_string($proofFile) && $proofFile !== '') file_put_contents($proofFile, json_encode($proof, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)."\n");

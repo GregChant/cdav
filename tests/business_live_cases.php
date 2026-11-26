@@ -15,7 +15,7 @@ if (PHP_SAPI !== 'cli') {
 function businessLiveEventState($db, int $id): array
 {
 	$row = liveRow($db, 'SELECT label, note, location, fk_soc, fk_project, fk_contact, fk_action, code, fulldayevent,
-		percent, priority, transparency, fk_user_action, fk_element, elementtype FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id);
+		percent, priority, transparency, fk_user_action, fk_element, elementtype, fk_task FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id);
 	liveAssert($row !== null, 'Business appointment disappeared during a protected update');
 	$resources = $db->query('SELECT element_type, fk_element, mandatory, transparency, answer_status FROM '
 		.MAIN_DB_PREFIX.'actioncomm_resources WHERE fk_actioncomm = '.$id.' ORDER BY element_type, fk_element');
@@ -36,6 +36,59 @@ function businessLiveCalendar(string $body, callable $mutation): string
 	$calendar = \Sabre\VObject\Reader::read($body);
 	$mutation($calendar->VEVENT);
 	return $calendar->serialize();
+}
+
+/**
+ * Exercise the personal alarm lifecycle without a shared event write or notification.
+ *
+ * @param DoliDB $db Fixture database
+ * @param int $eventId Native appointment
+ * @param int $userId Authenticated reminder recipient
+ * @param callable $request HTTP request to the recipient's own resource
+ * @param callable|null $readOther HTTP GET on the same meeting for another participant
+ * @return void
+ */
+function businessLivePersonalReminders($db, int $eventId, int $userId, callable $request, ?callable $readOther = null): void
+{
+	$nativeState = static function () use ($db, $eventId) {
+		$rows = $db->query('SELECT r.* FROM '.MAIN_DB_PREFIX.'actioncomm_reminder r LEFT JOIN '.MAIN_DB_PREFIX.'cdav_reminder m ON m.fk_reminder = r.rowid
+			WHERE r.fk_actioncomm = '.$eventId.' AND m.fk_reminder IS NULL ORDER BY r.rowid');
+		liveAssert((bool) $rows, 'Unable to inspect native browser reminders');
+		$reminders = array();
+		while ($row = $db->fetch_object($rows)) $reminders[] = (array) $row;
+		return array($reminders, businessLiveEventState($db, $eventId),
+			(array) liveRow($db, 'SELECT * FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.$eventId),
+			(int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_schedule_object')->nb);
+	};
+	$state = $nativeState();
+	$baseline = $current = $request('GET');
+	liveHttpStatus($baseline, array(200), 'Personal reminder setup GET');
+	$otherTag = $readOther ? $readOther()['headers']['etag'] : '';
+	foreach (array(21, 33, 0) as $offset) {
+		$updated = $offset ? businessLiveCalendar($baseline['body'], static function ($event) use ($offset) {
+			$event->add('VALARM', array('ACTION' => 'DISPLAY', 'TRIGGER' => '-PT'.$offset.'M', 'DESCRIPTION' => 'Reminder'));
+		}) : $baseline['body'];
+		liveHttpStatus($request('PUT', $updated, array('If-Match: '.$current['headers']['etag'])), array(200, 204), 'Personal reminder edit');
+		$current = $request('GET');
+		liveHttpStatus($current, array(200), 'Personal reminder readback');
+		$item = \Sabre\VObject\Reader::read($current['body']);
+		$triggers = array();
+		foreach ($item->VEVENT->select('VALARM') as $alarm) $triggers[] = (string) $alarm->TRIGGER;
+		$item->destroy();
+		liveAssert(in_array('-PT15M', $triggers, true) && in_array('-PT21M', $triggers, true) === ($offset === 21)
+			&& in_array('-PT33M', $triggers, true) === ($offset === 33), 'GET lost the original native alarm or the personal edit');
+		$owned = liveRow($db, 'SELECT COUNT(*) AS nb, MAX(r.fk_user) AS recipient, MAX(r.offsetvalue) AS minutes FROM '
+			.MAIN_DB_PREFIX.'cdav_reminder m INNER JOIN '.MAIN_DB_PREFIX.'actioncomm_reminder r ON r.rowid = m.fk_reminder WHERE m.fk_actioncomm = '.$eventId);
+		liveAssert((int) $owned->nb === ($offset ? 1 : 0) && (!$offset || ((int) $owned->recipient === $userId && (int) $owned->minutes === $offset))
+			&& $nativeState() === $state, 'A personal alarm edit changed native reminders, shared fields, revision or scheduling delivery');
+		if ($readOther) liveAssert($readOther()['headers']['etag'] === $otherTag, 'Another participant received a personal alarm change');
+	}
+	$withoutNative = businessLiveCalendar($current['body'], static function ($event) {
+		$event->remove('VALARM');
+	});
+	liveHttpStatus($request('PUT', $withoutNative, array('If-Match: '.$current['headers']['etag'])), array(403), 'Native reminder removal');
+	liveAssert($nativeState() === $state, 'Refused native reminder removal had side effects');
+	liveOk('Personal browser reminders on a protected '.($readOther ? 'invitation' : 'appointment').' retain native alarms and do not notify other participants');
 }
 
 /**
@@ -223,6 +276,8 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		liveHttpStatus($http('PUT', $eventPath, $fresh['body'], $calendarHeaders), array(200, 204), 'BL02 protected GET/PUT echo');
 		liveAssert(businessLiveEventState($db, $eventId) === $state, 'A protected GET/PUT echo changed native business values');
 		liveOk('BL01-BL02 native appointment provenance, rich notes and native business GET/PUT preservation');
+		businessLivePersonalReminders($db, $eventId, (int) $testUser->id,
+			static fn($method, $body = null, $headers = array()) => $http($method, $eventPath, $body, array_merge($calendarHeaders, $headers)));
 
 		$start = (int) $event->datep + 86400;
 		$end = (int) $event->datef + 86400;
@@ -292,38 +347,27 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 				'Protected scheduling metadata retained untrusted client business properties');
 		}
 		$changes = array(
-			'subject' => static function ($component) {
-				$component->SUMMARY = 'Forbidden subject'; },
-			'location' => static function ($component) {
-				$component->LOCATION = 'Forbidden address'; },
-			'notes' => static function ($component) {
-				$component->DESCRIPTION = 'Forbidden notes'; },
+			'project' => static function ($component) use ($project) {
+				$component->SUMMARY = 'Editable subject with invalid project';
+				$component->DESCRIPTION = str_replace($project->ref, 'Another project', (string) $component->DESCRIPTION); },
 			'participants' => static function ($component) {
 				$component->add('ATTENDEE', 'mailto:outside@example.test'); },
 			'identity' => static function ($component) {
 				$component->UID = 'forbidden-identity'; },
-			'busy state' => static function ($component) {
-				$component->TRANSP = 'TRANSPARENT'; },
 			'recurrence' => static function ($component) {
 				$component->RRULE = 'FREQ=DAILY;COUNT=3'; },
 			'attachment' => static function ($component) {
 				$component->add('ATTACH', 'https://files.example.test/forbidden.pdf'); },
 			'alarm' => static function ($component) {
 				$alarm = $component->add('VALARM');
-				$alarm->ACTION = 'DISPLAY';
+				$alarm->ACTION = 'EMAIL';
 				$alarm->TRIGGER = '-PT5M';
 				$alarm->DESCRIPTION = 'Forbidden reminder';
 			},
-			'duration' => static function ($component) use ($end) {
-				$component->DTEND->setDateTime(new DateTimeImmutable('@'.($end + 1800))); },
 		);
 		foreach ($changes as $name => $mutation) {
 			$response = $http('PUT', $eventPath, businessLiveCalendar($fresh['body'], $mutation), $calendarHeaders);
 			liveHttpStatus($response, array(403), 'BL05 forbidden protected '.$name);
-			if ($name === 'subject') {
-				liveAssert(liveDavErrorMessage($response) === 'This Dolibarr appointment is protected: only moving its dates or deleting it is allowed. Edit its other information in Dolibarr.',
-					'An Outlook-style subject edit did not return the native protection diagnostic');
-			}
 			liveAssert(businessLiveEventState($db, $eventId) === $state, 'Rejected '.$name.' had a native business side effect');
 		}
 		$managedBefore = (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_managed_attachment WHERE fk_actioncomm = '.$eventId)->nb;
@@ -348,6 +392,24 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 			&& (array) liveRow($db, $reminderStateSql) === $reminderState,
 			'Protected date changes, normalizations or rejected requests altered the native reminder policy');
 		liveOk('BL22 native reminders follow the moved date while retaining their identity, recipient, offset and pending status');
+
+		$editableTitle = $prefix.' Updated appointment';
+		$edited = businessLiveCalendar($fresh['body'], static function ($component) use ($editableTitle) {
+			$component->SUMMARY = $editableTitle;
+			$component->LOCATION = 'Site entrance';
+			$component->DESCRIPTION = str_replace('Native business notes', 'Call on arrival', (string) $component->DESCRIPTION);
+			$component->DTEND->setDateTime($component->DTEND->getDateTime()->modify('+30 minutes'));
+		});
+		liveHttpStatus($http('PUT', $eventPath, $edited, $calendarHeaders), array(200, 204), 'Protected appointment edit from CalDAV');
+		$expected = $state;
+		$expected['event']['label'] = $editableTitle;
+		$expected['event']['location'] = 'Site entrance';
+		$expected['event']['note'] = 'Call on arrival';
+		liveAssert(businessLiveEventState($db, $eventId) === $expected, 'A calendar edit lost native Agenda fields or assignments');
+		$readback = $http('GET', $eventPath);
+		$item = \Sabre\VObject\Reader::read($readback['body'])->VEVENT;
+		liveAssert(str_contains((string) $item->DESCRIPTION, $project->ref) && str_contains((string) $item->DESCRIPTION, 'Call on arrival')
+			&& $item->DTEND->getDateTime()->getTimestamp() === $currentStart + 5400, 'Updated notes, duration or project missing from CalDAV');
 
 		$card = $http('GET', $contactPath);
 		liveHttpStatus($card, array(200), 'BL09 native contact export');
@@ -457,7 +519,7 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 			liveHttpStatus($http('PUT', $eventPath, $edited, $calendarHeaders), array(200, 204), 'BL24 explicit administrator policy disable');
 			liveAssert((string) liveRow($db, 'SELECT label FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->label
 				=== $prefix.' Explicitly editable native appointment', 'Disabling the policy did not permit ordinary calendar editing');
-			liveAssert((array) liveRow($db, $linksSql) === $linksBefore, 'Disabling date-only protection also unlocked native business relationships');
+			liveAssert((array) liveRow($db, $linksSql) === $linksBefore, 'Disabling protection unlocked native business relationships');
 			liveAssert((string) liveRow($db, 'SELECT note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$eventId)->note === $noteBefore,
 				'An ordinary subject edit copied generated calendar sections into native notes or stripped their original rich text');
 			liveAssert((int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm_reminder WHERE fk_actioncomm = '.$eventId)->nb === 1
@@ -473,10 +535,10 @@ function businessLiveCases($db, $testUser, $admin, array $context): void
 		}
 		$protectedAgain = $http('GET', $eventPath);
 		$forbiddenAgain = businessLiveCalendar($protectedAgain['body'], static function ($component) {
-			$component->SUMMARY = 'A native event must be protected again';
+			$component->add('ATTENDEE', 'mailto:outside@example.test');
 		});
 		liveHttpStatus($http('PUT', $eventPath, $forbiddenAgain, $calendarHeaders), array(403), 'BL24 policy re-enable immediately protects the same native appointment');
-		liveOk('BL24 the administrator switch controls date-only editing without promoting native ownership or changing business links');
+		liveOk('BL24 the administrator switch controls participant editing while preserving native ownership and business links');
 
 		liveAssert($event->fetch($eventId) > 0, 'Unable to reload the shared native appointment');
 		$otherId = (int) $context['limited_user_id'];

@@ -14,6 +14,10 @@ participation. Les réponses des autres invités sont conservées, même si le
 client en renvoie une ancienne copie. Un refus rend uniquement ce collaborateur
 libre ; accepter à nouveau réoccupe son créneau.
 
+Sur une invitation interne active qu’il a acceptée, le collaborateur peut
+ensuite choisir **Libre** ou **Occupé** dans son propre calendrier. Ce choix
+conserve sa réponse et la disponibilité des autres participants.
+
 Les notes, documents, rappels et liaisons métier restent conservés lorsqu'un
 client renvoie une réponse. En particulier, un changement de présentation du
 corps ou la perte d'un rappel par Outlook ne remplace pas les données natives.
@@ -27,10 +31,11 @@ correspondre à l'email de l'utilisateur Dolibarr.
 
 ## Modifier ou annuler
 
-L'organisateur peut déplacer une invitation native protégée en conservant sa
-durée, ou l'annuler explicitement. Les droits Agenda natifs continuent de
-s'appliquer ; une délégation de gestion de tous les événements reste possible.
-Cette délégation n'autorise pas à fabriquer la réponse d'un autre participant.
+L'organisateur ou son délégué disposant du droit de modifier tous les événements
+peut corriger le titre, le lieu, les notes libres et la priorité. Pour une
+invitation individuelle, il peut aussi changer les horaires, la durée et le
+réglage journée entière. Il peut annuler l'invitation explicitement. Chaque
+participant reste responsable de sa propre réponse.
 
 Une annulation reçue comme `STATUS:CANCELLED` conserve le rendez-vous et ses
 liaisons : CDav l'exporte annulé et les ressources natives deviennent libres.

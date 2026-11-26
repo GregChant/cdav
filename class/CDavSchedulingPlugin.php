@@ -159,6 +159,7 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 				$old = $move['old'] === null ? null : \Sabre\VObject\Reader::read($move['old']);
 				$new = \Sabre\VObject\Reader::read((string) $current['calendardata']);
 				try {
+					if (!empty($receipt['omit_location'])) unset($new->VEVENT->LOCATION);
 					$this->notifyManagedAttachmentChange($old, $new, $move['owner']);
 				} finally {
 					if ($old !== null) $old->destroy();
@@ -228,6 +229,7 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 				$old = \Sabre\VObject\Reader::read((string) $result['previous_data']);
 				$new = \Sabre\VObject\Reader::read((string) $result['canonical_data']);
 				try {
+					if (!empty($result['omit_location'])) unset($new->VEVENT->LOCATION);
 					$this->deliverCommittedChange($old, $new, $principal, $result['recipients']);
 				} catch (\Throwable $error) {
 					dol_syslog(__METHOD__.': reply committed but scheduling notification failed: '.$error->getMessage(), LOG_ERR);
@@ -277,12 +279,34 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 	 */
 	public function deliver(\Sabre\VObject\ITip\Message $message)
 	{
+		$source = $message->message;
+		$message->message = clone $source;
 		try {
-			$this->backend->recordSchedulingMessage($message);
-		} catch (\Throwable $e) {
-			dol_syslog(__METHOD__.': unable to journal scheduling message: '.$e->getMessage(), LOG_ERR);
+			$this->removePrivateNotificationData($message->message);
+			try {
+				$this->backend->recordSchedulingMessage($message);
+			} catch (\Throwable $e) {
+				dol_syslog(__METHOD__.': unable to journal scheduling message: '.$e->getMessage(), LOG_ERR);
+			}
+			parent::deliver($message);
+		} finally {
+			$message->message->destroy();
+			$message->message = $source;
 		}
-		parent::deliver($message);
+	}
+
+	/**
+	 * Participants retrieve their own calendar-scoped notes and reminders with a GET.
+	 * @param \Sabre\VObject\Component\VCalendar $notification Outgoing message copy
+	 * @return void
+	 */
+	private function removePrivateNotificationData($notification)
+	{
+		foreach ($notification->getComponents() as $component) {
+			if ($component->name === 'VEVENT' || $component->name === 'VTODO') {
+				unset($component->DESCRIPTION, $component->{'X-ALT-DESC'}, $component->VALARM);
+			}
+		}
 	}
 
 	/**
@@ -309,12 +333,7 @@ class SchedulingPlugin extends \Sabre\CalDAV\Schedule\Plugin
 		try {
 			$notification = clone $message->message;
 			try {
-				// Business descriptions are rendered for the requesting calendar
-				// owner. Inbox recipients must retrieve their own ACL-filtered GET.
-				foreach ($notification->getComponents() as $component) {
-					if ($component->name !== 'VEVENT' && $component->name !== 'VTODO') continue;
-					unset($component->DESCRIPTION, $component->{'X-ALT-DESC'});
-				}
+				$this->removePrivateNotificationData($notification);
 				$data = $notification->serialize();
 			} finally {
 				$notification->destroy();

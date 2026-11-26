@@ -301,8 +301,10 @@ $event = (object) array('elem_source' => 'ev', 'id' => 42, 'label' => 'Entretien
 	'proj_desc' => '<p>Première consigne</p><p>Deuxième paragraphe<br>Suite de la consigne</p>',
 	'recurid' => '', 'recurrule' => '', 'recurdateend' => null);
 
-foreach (array('fr_FR' => array('Rendez-vous', 'Client et contact', 'Projet', 'Référence de réservation'),
-	'en_US' => array('Appointment', 'Client and contact', 'Project', 'Booking reference')) as $language => $labels) {
+foreach (array('fr_FR', 'fr_CH', 'en_US') as $language) {
+	$french = str_starts_with($language, 'fr_');
+	$labels = $french ? array('Rendez-vous', 'Client et contact', 'Projet', 'Référence de réservation')
+		: array('Appointment', 'Client and contact', 'Project', 'Booking reference');
 	$langs = new Translate('', $conf);
 	$langs->setDefaultLang($language);
 	$lib = new CdavLib($user, $db, $langs);
@@ -315,7 +317,7 @@ foreach (array('fr_FR' => array('Rendez-vous', 'Client et contact', 'Projet', 'R
 	$client = strpos($text, $labels[1]."\n");
 	$project = strpos($text, $labels[2]."\n");
 	descriptionAssert($appointment === 0 && $client > $appointment && $project > $client, 'Appointment, client/contact and project blocks must be localized and ordered');
-	descriptionAssert(strpos($text, ($language === 'fr_FR' ? 'Objet du rendez-vous' : 'Appointment subject').' : '.$event->label) !== false,
+	descriptionAssert(strpos($text, ($french ? 'Objet du rendez-vous' : 'Appointment subject').' : '.$event->label) !== false,
 		'The appointment subject label must be translated without depending on unrelated native mail language files');
 	descriptionAssert(str_ends_with($text, $labels[3].' : '.$reference) && strpos($text, 'CDav booking') === false,
 		'A verified booking reference must appear as a readable footer');
@@ -332,6 +334,38 @@ foreach (array('fr_FR' => array('Rendez-vous', 'Client et contact', 'Projet', 'R
 	descriptionAssert($event->_cdav_description['native_note'] === $rawNote && !$event->_cdav_description['notes_editable'],
 		'An internally verified booking must retain its exact SQL notes and disallow editing its rewritten description');
 	descriptionAssert(count($db->queries) === 1, 'Only an exact booking marker should require one receipt lookup');
+
+	$linked = clone $event;
+	$linked->note = '<p>Native appointment note</p>';
+	$linked->linked_task_id = 37;
+	$linked->linked_task_project_id = 4;
+	$linked->linked_task_ref = 'TASK-0037';
+	$linked->linked_task_label = 'Visite annuelle';
+	$linkedCalendar = descriptionCalendar($lib, $linked);
+	$linkedText = (string) $linkedCalendar->VEVENT->DESCRIPTION;
+	$taskHeading = $french ? 'Tâche' : 'Task';
+	$taskPath = '/projet/tasks/task.php?id=37';
+	descriptionAssert(str_contains($linkedText, $taskHeading."\n") && str_contains($linkedText, '[TASK-0037] Visite annuelle')
+		&& str_contains($linkedText, DOL_MAIN_URL_ROOT.$taskPath), 'The appointment must identify and link its actual task in the reader language');
+	descriptionAssert((string) $linkedCalendar->VEVENT->SUMMARY === $event->label && (string) $linkedCalendar->VEVENT->UID === (string) $calendar->VEVENT->UID
+		&& !str_contains($text, $taskPath), 'Task context must preserve the native appointment identity and require an actual link');
+	descriptionAssert(Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($linked->_cdav_description, $linkedText) === $linked->note,
+		'A DAV echo of the task link must preserve the original native appointment note');
+	$emptyLinked = clone $linked;
+	$emptyLinked->note = '';
+	$clearedBody = $lib->getCalendarDescriptionParts($emptyLinked)['text'];
+	descriptionAssert(Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($linked->_cdav_description, $clearedBody) === '',
+		'Clearing the free note must retain the generated task and project even when the editor removes its blank paragraph');
+	try {
+		Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($linked->_cdav_description, str_replace('TASK-0037', 'TASK-9999', $clearedBody));
+		throw new RuntimeException('A modified task reference was accepted when clearing a note');
+	} catch (Sabre\DAV\Exception\Forbidden $expected) {
+		// Both the note and the generated context must be checked in the same PUT.
+	}
+	$anonymousLinked = $lib->toVCalendar(7, $linked, true, true);
+	descriptionAssert(!str_contains($anonymousLinked, $linked->linked_task_ref) && !str_contains($anonymousLinked, $taskPath),
+		'Time-only exports must omit linked task details');
+	$linkedCalendar->destroy();
 
 	$before = $calendar->serialize();
 	$calendar->VEVENT->DTSTART->setDateTime(new DateTimeImmutable('2026-11-21 09:00:00', new DateTimeZone('Europe/Zurich')));
@@ -381,7 +415,7 @@ foreach (array('fr_FR' => array('Rendez-vous', 'Client et contact', 'Projet', 'R
 		$newPrefix.'My native note'."\nSecond paragraph".$trustedParts['note_suffix'], $newPrefix) === $rich->note,
 		'A client that echoes its permitted subject/location edits in the generated prefix must retain the exact native HTML notes');
 	$blankPrefix = $lib->getCalendarDescriptionPrefixForFields($trustedParts, '', '');
-	descriptionAssert(strpos($blankPrefix, $language === 'fr_FR' ? 'Objet du rendez-vous' : 'Appointment subject') === false,
+	descriptionAssert(strpos($blankPrefix, $french ? 'Objet du rendez-vous' : 'Appointment subject') === false,
 		'Explicitly clearing an editable field must remove only its generated label/value');
 }
 descriptionAssert($collectionTags['fr_FR'] !== $collectionTags['en_US'], 'Changing the native user language must invalidate the calendar collection tag');
@@ -492,6 +526,13 @@ descriptionAssert(str_contains($bookingSql, "NOT (COALESCE(a.recurid,'') REGEXP 
 $aclRow = clone $event;
 $aclRow->note = 'Native event note';
 $aclRow->proj_desc = 'PROJECT-DESCRIPTION-SECRET';
+$otherParent = clone $linked;
+$otherParent->linked_task_project_id = 8;
+Project::$records[8] = array('entity' => 1, 'allowed' => false);
+$redacted = (new CdavLib($user, $db, $langs))->getCalendarDescriptionParts($otherParent)['text'];
+descriptionAssert(str_contains($redacted, $otherParent->proj_ref) && !str_contains($redacted, $otherParent->linked_task_ref)
+	&& !str_contains($redacted, $taskPath), 'Access to the appointment project must not reveal a task from a private parent project');
+unset(Project::$records[8]);
 $user->projectRead = false;
 $beforeFetches = Project::$fetches;
 $noProjectRead = new CdavLib($user, $db, $langs);

@@ -38,11 +38,10 @@ réactivé par synchronisation ; créer un nouveau rendez-vous pour le remplacer
 Le propriétaire du rendez-vous, ou un utilisateur disposant du droit natif de
 modifier tous les agendas, peut changer l'état global. Un participant peut
 répondre à sa propre invitation sans confirmer ou annuler celle des autres.
-Les rendez-vous natifs protégés conservent leurs tiers, projets, contacts,
-notes et autres informations métier lors d'un changement d'état.
-Pour un rendez-vous sans invitation, effectuer le changement d'état séparément
-des modifications de titre, de notes ou d'autres informations métier ; un
-déplacement conservant la durée peut accompagner le changement d'état.
+Pour un rendez-vous actif sans invitation, le propriétaire ou son délégué
+peut confirmer ou rendre provisoire le rendez-vous tout en corrigeant le titre,
+le lieu, les notes libres ou les horaires. Les liens vers le tiers, le projet
+et la tâche sont conservés. Envoyer une annulation séparément.
 
 ## Outlook et applications CalDAV
 

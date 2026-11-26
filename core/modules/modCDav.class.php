@@ -58,7 +58,7 @@ class modCDav extends DolibarrModules
 		// Module description, used if translation string 'ModuleXXXDesc' not found (where XXX is value of numeric property 'numero' of module)
 		$this->description = "Allows caldav and carddav clients to sync with Dolibarr.";
 		// Possible values for version are: 'development', 'experimental', 'dolibarr' or version
-		$this->version = '6.4.4';
+		$this->version = '6.5.0';
 		// Key used in llx_const table to save module status enabled/disabled (where CDAV is value of property name of module in uppercase)
 		$this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
 		// Name of image file used for this module.
@@ -202,18 +202,13 @@ class modCDav extends DolibarrModules
 		// Example:
 		//$this->boxes=array(array(0=>array('file'=>'myboxa.php','note'=>'','enabledbydefaulton'=>'Home'),1=>array('file'=>'myboxb.php','note'=>''),2=>array('file'=>'myboxc.php','note'=>'')););
 
-		// Permissions
-		$this->rights = array();		// Permission array used by this module
-		$r=0;
-
-		// Add here list of permission defined by an id, a label, a boolean and two constant strings.
-		// Example:
-		// $this->rights[$r][0] = $this->numero + $r;	// Permission id (must not be already used)
-		// $this->rights[$r][1] = 'Permision label';	// Permission label
-		// $this->rights[$r][3] = 1; 					// Permission by default for new user (0/1)
-		// $this->rights[$r][4] = 'level1';				// In php code, permission will be checked by test if ($user->rights->permkey->level1->level2)
-		// $this->rights[$r][5] = 'level2';				// In php code, permission will be checked by test if ($user->rights->permkey->level1->level2)
-		// $r++;
+		$this->rights = array(array(
+			self::KEY_ID => $this->numero,
+			self::KEY_LABEL => 'Manage own online booking profiles, hours and links',
+			self::KEY_DEFAULT => 0,
+			self::KEY_FIRST_LEVEL => 'booking',
+			self::KEY_SECOND_LEVEL => 'manageown',
+		));
 
 
 		// Main menu entries
@@ -256,19 +251,24 @@ class modCDav extends DolibarrModules
 									'perms'=>'$user->hasRight("agenda", "myactions", "read")',
 									'target'=>'',
 									'user'=>0);
-		$this->menu[$r++] = array(
-			'fk_menu' => 'fk_mainmenu=agenda',
-			'type' => 'left',
-			'titre' => 'CDavBooking',
-			'mainmenu' => 'agenda',
-			'url' => '/cdav/admin/booking.php?mainmenu=agenda',
-			'langs' => 'cdav@cdav',
-			'position' => 195,
-			'enabled' => 'isModEnabled("cdav") && isModEnabled("agenda")',
-			'perms' => '$user->admin && empty($user->socid)',
-			'target' => '',
-			'user' => 0,
-		);
+		// The native usertype below filters external accounts before Dolibarr evaluates these rights.
+		$bookingMenuAccess = '$user->admin || ($user->hasRight("cdav", "booking", "manageown") && $user->hasRight("agenda", "myactions", "read") && $user->hasRight("agenda", "myactions", "write"))';
+		foreach (array('agenda', 'tools') as $mainmenu) {
+			$this->menu[$r++] = array(
+				'fk_menu' => 'fk_mainmenu='.$mainmenu,
+				'type' => 'left',
+				'titre' => 'CDavBooking',
+				'mainmenu' => $mainmenu,
+				'leftmenu' => 'cdavbooking',
+				'url' => '/cdav/admin/booking.php?mainmenu='.$mainmenu.'&amp;leftmenu=cdavbooking',
+				'langs' => 'cdav@cdav',
+				'position' => 195,
+				'enabled' => 'isModEnabled("cdav") && isModEnabled("agenda") && ('.$bookingMenuAccess.')',
+				'perms' => $bookingMenuAccess,
+				'target' => '',
+				'user' => 0,
+			);
+		}
 		// Add here entries to declare new menus
 		//
 		// Example to declare a new Top Menu entry and its Left menu entry:

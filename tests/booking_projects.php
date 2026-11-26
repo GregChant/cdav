@@ -13,6 +13,8 @@ cdavTestStrictErrors($root);
 define('DOL_DOCUMENT_ROOT', $root);
 define('MAIN_DB_PREFIX', 'llx_');
 require $root.'/projet/class/project.class.php';
+require $root.'/core/lib/functions.lib.php';
+require dirname(__DIR__).'/core/modules/modCDav.class.php';
 require dirname(__DIR__).'/class/CDavBookingService.php';
 
 /** Native project status boundary; no profile or business object is mutated. */
@@ -96,6 +98,66 @@ function projectBookingRejects($operation, $key, $status = 422)
 
 $db = new BookingProjectDatabase();
 $service = new Dolibarr\CDav\BookingService($db, 1);
+$user = new class {
+	public $id = 7;
+	public $admin = 0;
+	public $socid = 0;
+	public $design = 0;
+	public $permissions = array('cdav.booking.manageown', 'agenda.myactions.read', 'agenda.myactions.write');
+	/**
+	 * Check the requested Dolibarr permission path.
+	 * @param string ...$path Native permission segments
+	 * @return bool Granted
+	 */
+	public function hasRight(...$path)
+	{
+		return in_array(implode('.', $path), $this->permissions, true);
+	}
+};
+projectBookingAssert($service::canManageProfiles($user, 7), 'The delegated collaborator can manage their profiles');
+foreach (array('profilesForOwner', 'profileForOwner', 'publicationKeyForOwner', 'rotateToken', 'disableProfile') as $operation) {
+	projectBookingRejects(static fn() => $service->{$operation}(8), 'CDavBookingForbidden', 403);
+}
+projectBookingRejects(static fn() => $service->saveProfile(8, array(), true), 'CDavBookingForbidden', 403);
+projectBookingRejects(static fn() => $service->reattachToken(8, 1, ''), 'CDavBookingForbidden', 403);
+$grants = $user->permissions;
+$conf = (object) array('modules' => array('agenda' => 1, 'cdav' => 1), 'global' => new stdClass());
+$descriptor = new modCDav($db);
+$bookingMenus = array_values(array_filter($descriptor->menu, static fn($menu) => $menu['titre'] === 'CDavBooking'));
+projectBookingAssert(array_column($bookingMenus, 'mainmenu') === array('agenda', 'tools'), 'Both native menus must lead to online booking');
+$permission = $descriptor->rights[0];
+projectBookingAssert($permission[DolibarrModules::KEY_DEFAULT] === 0 && $permission[DolibarrModules::KEY_FIRST_LEVEL] === 'booking'
+	&& $permission[DolibarrModules::KEY_SECOND_LEVEL] === 'manageown', 'The native booking permission must be granted explicitly');
+foreach ($bookingMenus as $menu) {
+	projectBookingAssert($menu['user'] === 0 && $menu['fk_menu'] === 'fk_mainmenu='.$menu['mainmenu']
+		&& $menu['leftmenu'] === 'cdavbooking', 'The shortcut must belong to its internal Agenda or Tools menu');
+	projectBookingAssert(verifCond($menu['enabled']) && verifCond($menu['perms']), 'Dolibarr must accept the delegated menu expressions');
+	foreach ($grants as $required) {
+		$user->permissions = array_diff($grants, array($required));
+		projectBookingAssert(!verifCond($menu['enabled']) && !verifCond($menu['perms']), 'The menu must be hidden without each required permission');
+	}
+	$user->permissions = array();
+	$user->admin = 1;
+	projectBookingAssert(verifCond($menu['enabled']) && verifCond($menu['perms']), 'An internal administrator must see the shortcut');
+	foreach (array('agenda', 'cdav') as $moduleName) {
+		unset($conf->modules[$moduleName]);
+		projectBookingAssert(!verifCond($menu['enabled']), 'The menu requires both Agenda and CDav');
+		$conf->modules[$moduleName] = 1;
+	}
+	$user->admin = 0;
+	$user->permissions = $grants;
+}
+foreach ($grants as $required) {
+	$user->permissions = array_diff($grants, array($required));
+	projectBookingRejects(static fn() => $service->profilesForOwner(7), 'CDavBookingForbidden', 403);
+}
+$user->permissions = $grants;
+$user->socid = 12;
+projectBookingRejects(static fn() => $service->publicationKeyForOwner(7), 'CDavBookingForbidden', 403);
+$user->socid = 0;
+$user->design = 1;
+projectBookingRejects(static fn() => $service->saveProfile(7, array(), true), 'CDavBookingForbidden', 403);
+projectBookingAssert(!$db->queries, 'Unauthorized profile requests must stop before reading or changing a profile or its secret link');
 $user = (object) array('admin' => 1, 'socid' => 0);
 $db->status = Project::STATUS_VALIDATED;
 projectBookingGuard($service, 7, 0, false);
@@ -128,7 +190,6 @@ foreach (array(0, 1, '0', '1', null, array(), new stdClass()) as $invalid) {
 	projectBookingAssert($db->queries === array(), 'Explicit unlink confirmation must be a real boolean before owner or profile queries');
 }
 
-require $root.'/core/lib/functions.lib.php';
 require $root.'/core/db/mysqli.class.php';
 require $root.'/core/class/html.formprojet.class.php';
 
@@ -241,4 +302,4 @@ projectBookingAssert(array_keys($options) === array(1), 'Native closed exclusion
 $html = Form::selectarray('project_id', $options, 1, 1);
 projectBookingAssert(str_contains($html, 'name="project_id"') && str_contains($html, '<option value="1" selected>')
 	&& !str_contains($html, 'PROJECT-2') && !str_contains($html, 'PROJECT-3'), 'Native form rendering must expose only the selected open project');
-fwrite(STDOUT, "Native project status, picker sanitization/rendering and explicit detachment regressions passed.\n");
+fwrite(STDOUT, "Booking menu permissions, profile access, native project picker and explicit detachment regressions passed.\n");

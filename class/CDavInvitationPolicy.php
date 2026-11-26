@@ -19,11 +19,13 @@ class InvitationPolicy
 	 * @param string $current Authoritative current resource under the backend lock
 	 * @param string $incoming Incoming full calendar resource, without an iTIP METHOD
 	 * @param string $actorEmail Verified authenticated scheduling identity
-	 * @param bool $protectBusiness Whether only organizer date moves are allowed
+	 * @param bool $protectBusiness Whether to restrict organizer edits to native appointment fields
 	 * @param bool $allowExternalImport Backend-verified private DAV copy of an external invitation
+	 * @param array $descriptionContext Server-generated note boundaries for native organizer edits
+	 * @param bool $calendarPut Whether this is a resource PUT that can change the attendee's own availability
 	 * @return array<string,mixed>|null Canonical plan, or null for a non-invitation
 	 */
-	public static function plan($current, $incoming, $actorEmail, $protectBusiness = true, $allowExternalImport = false)
+	public static function plan($current, $incoming, $actorEmail, $protectBusiness = true, $allowExternalImport = false, array $descriptionContext = array(), bool $calendarPut = false)
 	{
 		$before = self::read($current);
 		$after = null;
@@ -65,7 +67,7 @@ class InvitationPolicy
 				throw new Forbidden('Changes and responses scoped to recurrence exceptions are not supported; use the full original invitation.');
 			}
 			if ($isOrganizer) {
-				return self::organizerPlan($before, $after, $old, $new, $oldAttendees, $newAttendees, $organizer, $sequence, (bool) $protectBusiness);
+				return self::organizerPlan($before, $after, $old, $new, $oldAttendees, $organizer, $sequence, (bool) $protectBusiness, $descriptionContext);
 			}
 			if ($allowExternalImport && !$protectBusiness) {
 				$personalDecline = isset($newAttendees[$actor]) && self::partstat($newAttendees[$actor]) === 'DECLINED'
@@ -83,7 +85,7 @@ class InvitationPolicy
 					return self::externalImportPlan($before, $after, $old, $new, $newAttendees, $actor, $organizer, $incomingSequence);
 				}
 			}
-			return self::replyPlan($before, $after, $old, $new, $oldAttendees, $newAttendees, $actor, $organizer, $sequence);
+			return self::replyPlan($before, $after, $old, $new, $oldAttendees, $newAttendees, $actor, $organizer, $sequence, $calendarPut);
 		} finally {
 			$before->destroy();
 			if ($after !== null) $after->destroy();
@@ -147,9 +149,10 @@ class InvitationPolicy
 	 * @param string $actor Verified actor
 	 * @param string $organizer Organizer email
 	 * @param int $sequence Authoritative organizer revision
+	 * @param bool $calendarPut Whether independent personal availability changes are allowed
 	 * @return array<string,mixed> Canonical personal response
 	 */
-	private static function replyPlan($before, $after, $old, $new, array $oldAttendees, array $newAttendees, $actor, $organizer, $sequence)
+	private static function replyPlan($before, $after, $old, $new, array $oldAttendees, array $newAttendees, $actor, $organizer, $sequence, bool $calendarPut = false)
 	{
 		if (array_keys($oldAttendees) !== array_keys($newAttendees)) {
 			throw new Forbidden('An attendee cannot add, remove or replace invitation participants.');
@@ -164,7 +167,14 @@ class InvitationPolicy
 		$changed = $responseChanged;
 		$personal = $partstat === 'DECLINED' ? 0 : 1;
 		$incomingTransparency = self::transparency($new);
-		if ($incomingTransparency === $personal && self::transparency($old) !== $personal) $changed = true;
+		$oldTransparency = self::transparency($old);
+		$availability = null;
+		if ($calendarPut && !$responseChanged && $partstat !== 'DECLINED' && self::status($old) !== 'CANCELLED') {
+			$requested = (int) (CalendarWritePolicy::requestedTransparency($old, $new) === 'OPAQUE');
+			if ($requested !== $oldTransparency) $availability = $requested;
+		} elseif ($incomingTransparency === $personal && $oldTransparency !== $personal) {
+			$changed = true;
+		}
 		$status = isset($new->STATUS) ? strtoupper(trim((string) $new->STATUS)) : '';
 		if (!in_array($status, array('', 'CONFIRMED', 'TENTATIVE', 'CANCELLED'), true)
 			|| ($status === 'CANCELLED' && $partstat !== 'DECLINED' && self::status($old) !== 'CANCELLED')) {
@@ -197,6 +207,9 @@ class InvitationPolicy
 			$comparison->destroy();
 			$baseline->destroy();
 		}
+		if ($availability !== null) {
+			return self::result('availability', $before->serialize(), true, $old, $organizer, $sequence, false, $partstat, $availability, false);
+		}
 		if ($changed) {
 			$oldAttendees[$actor]['PARTSTAT'] = $partstat;
 			if (isset($newAttendees[$actor]['RSVP'])) $oldAttendees[$actor]['RSVP'] = $rsvp ? 'TRUE' : 'FALSE';
@@ -213,13 +226,13 @@ class InvitationPolicy
 	 * @param VObject\Component $old Current master
 	 * @param VObject\Component $new Incoming master
 	 * @param array $oldAttendees Current attendees
-	 * @param array $newAttendees Incoming attendees
 	 * @param string $organizer Organizer email
 	 * @param int $sequence Authoritative revision
 	 * @param bool $protectBusiness Whether native business fields are protected
+	 * @param array $descriptionContext Server-generated boundaries of the editable note
 	 * @return array<string,mixed> Canonical organizer operation
 	 */
-	private static function organizerPlan($before, $after, $old, $new, array $oldAttendees, array $newAttendees, $organizer, $sequence, $protectBusiness)
+	private static function organizerPlan($before, $after, $old, $new, array $oldAttendees, $organizer, $sequence, $protectBusiness, array $descriptionContext)
 	{
 		self::preserveResponses($new, $oldAttendees, true);
 		$status = CalendarWritePolicy::normalizeAppointmentStatus($old, $new);
@@ -235,6 +248,8 @@ class InvitationPolicy
 			$test = self::master(self::events($comparison));
 			// Global state changes are allowed without opening native business fields.
 			CalendarWritePolicy::normalizeCancelledSummary($old, $test);
+			$fields = $protectBusiness && !$cancel && !$alreadyCancelled
+				? CalendarWritePolicy::appointmentFieldChanges($old, $test, $descriptionContext) : array();
 			$base->STATUS = $oldStatus;
 			$test->STATUS = $oldStatus;
 			if ($cancel) {
@@ -248,15 +263,15 @@ class InvitationPolicy
 			$dateChanged = $oldDates !== $newDates;
 			$protectedMatch = true;
 			try {
-				CalendarWritePolicy::assertMoveOnly($baseline->serialize(), $comparison->serialize());
+				CalendarWritePolicy::assertMoveOnly($baseline->serialize(), $comparison->serialize(), !$cancel && !$alreadyCancelled);
 			} catch (Forbidden $exception) {
 				$protectedMatch = false;
 			}
 			$extensionChanged = self::extensions($base) !== self::extensions($test);
 			if (($protectBusiness || $cancel || $alreadyCancelled) && (!$protectedMatch || ($cancel && $dateChanged))) {
-				throw new Forbidden('Only the organizer dates or appointment status may change this protected invitation.');
+				throw new Forbidden('This invitation change would alter protected Dolibarr data.');
 			}
-			$changed = $dateChanged || $statusChanged || !$protectedMatch || (!$protectBusiness && $extensionChanged);
+			$changed = $dateChanged || $statusChanged || $fields || !$protectedMatch || (!$protectBusiness && $extensionChanged);
 			if ($alreadyCancelled && $changed) throw new Forbidden('A cancelled invitation cannot be modified through CalDAV.');
 		} finally {
 			$baseline->destroy();
@@ -272,13 +287,20 @@ class InvitationPolicy
 			return self::result('cancel', $before->serialize(), true, $old, $organizer, $sequence, true, null, null, false);
 		}
 		if ($protectBusiness) {
+			if (isset($fields['label'])) $old->SUMMARY = $fields['label'];
+			if (isset($fields['location'])) $old->LOCATION = $fields['location'];
+			if (isset($fields['priority'])) $old->PRIORITY = $fields['priority'];
+			if (isset($fields['transparency'])) $old->TRANSP = $fields['transparency'] ? 'OPAQUE' : 'TRANSPARENT';
 			self::copyProperty($old, $new, 'DTSTART');
 			self::copyProperty($old, $new, 'DTEND');
 			self::copyProperty($old, $new, 'DUE');
 			self::copyProperty($old, $new, 'DURATION');
 			$old->STATUS = $status;
 			$old->SEQUENCE = $sequence;
-			return self::result('organizer', $before->serialize(), true, $old, $organizer, $sequence, true, null, null, $dateChanged);
+			$plan = self::result('organizer', $before->serialize(), true, $old, $organizer, $sequence, true, null, null, $dateChanged);
+			$plan['fields'] = $fields;
+			$plan['dates'] = $newDates;
+			return $plan;
 		}
 		$new->STATUS = $status;
 		$new->SEQUENCE = $sequence;
@@ -354,6 +376,33 @@ class InvitationPolicy
 	{
 		$target->remove('VALARM');
 		foreach ($source->select('VALARM') as $alarm) $target->add(clone $alarm);
+	}
+
+	/**
+	 * Store shared invitation metadata without the actor's personal reminders or rendered business fields.
+	 * @param array $plan Validated native invitation change
+	 * @param string $stored Previous shared protocol data
+	 * @return string Scheduling metadata
+	 */
+	public static function nativeMetadata(array $plan, string $stored): string
+	{
+		$calendar = self::read($plan['calendar_data']);
+		$previous = null;
+		try {
+			$master = self::master(self::events($calendar));
+			unset($master->DESCRIPTION, $master->{'X-ALT-DESC'}, $master->LOCATION, $master->VALARM);
+			if ($stored !== '' && $plan['kind'] !== 'cancel') {
+				$previous = self::read($stored);
+				$events = self::events($previous);
+				if ($events && CalendarUid::read(self::master($events)) === CalendarUid::read($master)) {
+					self::copyAlarms($master, self::master($events));
+				}
+			}
+			return $calendar->serialize();
+		} finally {
+			$calendar->destroy();
+			if ($previous !== null) $previous->destroy();
+		}
 	}
 
 	/**

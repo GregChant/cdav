@@ -41,10 +41,17 @@ Respecter également les prérequis de la version Dolibarr installée.
 
 ## Configurer un collaborateur
 
-Un administrateur interne gère les profils depuis **Agenda > Rendez-vous en
-ligne**, entrée fournie par CDav, ou avec le bouton **Rendez-vous en ligne** de
-la page de configuration du module, accessible par son unique roue dentée.
-Le chemin direct habituel est `/custom/cdav/admin/booking.php`.
+**Agenda → Rendez-vous en ligne** et **Outils → Rendez-vous en ligne** ouvrent
+la même page. Après une mise à jour, réactiver CDav pour que Dolibarr enregistre
+ces entrées et le droit associé.
+
+L’administrateur interne peut y activer la réservation publique et choisir
+le collaborateur à configurer. Pour déléguer la gestion individuelle, ouvrir
+les permissions de l’utilisateur ou de son groupe et accorder le droit CDav
+**Gérer ses propres profils, horaires et liens de rendez-vous en ligne**. Le collaborateur doit également
+pouvoir lire et modifier ses événements Agenda. Il peut alors régler ses
+horaires, créer ses profils, copier, renouveler et révoquer leurs liens. Le
+bouton de la configuration du module reste disponible pour l’administrateur.
 
 1. Sélectionner un utilisateur interne actif. Il doit posséder les droits natifs
    de lecture et de création de ses événements Agenda. Le collaborateur peut
@@ -245,8 +252,8 @@ https://exemple.ch/custom/cdav/public/booking.php?key=JETON_DE_PUBLICATION
 Le jeton de publication est aléatoire et distinct des accès DAV/ICS. Le module
 conserve son empreinte pour vérifier l'accès public. Il conserve aussi une
 copie chiffrée des clés créées ou rattachées depuis la version 6.4.2. Les
-administrateurs peuvent retrouver et copier le lien actif du profil sélectionné
-dans **Agenda > Rendez-vous en ligne**. Toute personne qui reçoit ce lien peut
+administrateurs et les collaborateurs autorisés peuvent retrouver et copier le lien
+du profil qu’ils gèrent dans **Agenda → Rendez-vous en ligne**. Toute personne qui reçoit ce lien peut
 réserver un créneau sans compte Dolibarr.
 
 Pour afficher un lien publié par une ancienne version, coller son URL complète

@@ -112,6 +112,18 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.5.0 shows the linked project task on the Dolibarr appointment form
+and includes its reference, name and direct link in the calendar description
+for users who can read the task. The owner or an authorized delegate can edit
+the appointment title, location, free-text notes, priority and times from CalDAV.
+Dolibarr keeps the project, task and customer associations. Attendees can manage
+their availability and personal reminders. [Calendar editing guide (French)](doc/protection-metier-dav-fr.md).
+
+Online booking profiles are available under **Agenda → Online appointments**
+and **Tools → Online appointments**. After installing 6.5.0, reactivate CDav
+and grant the individual booking management permission to users who should
+manage their own profiles, hours and public links. [Booking guide (French)](doc/reservation-rdv-fr.md).
+
 Version 6.4.4 accepts CalDAV UIDs up to 1,024 bytes, including long Outlook
 GlobalAppointmentIDs. Disable and re-enable CDav after upgrading to widen the
 UID column. The migration preserves existing UIDs and resource URLs.

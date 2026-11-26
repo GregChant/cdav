@@ -6,7 +6,7 @@ if (PHP_SAPI !== 'cli') {
 	exit;
 }
 
-/** Exercise the real native Form renderer with fictitious users and two independent tabs. */
+/** Exercise native Agenda form renderers with fictitious assignees and project tasks. */
 $root = getenv('DOLIBARR_ROOT') ?: dirname(__DIR__, 3).'/core/dolibarr-23.0.4/htdocs';
 require __DIR__.'/bootstrap.php';
 cdavTestStrictErrors($root);
@@ -129,4 +129,102 @@ unset($GLOBALS['sessionkeyassignedtouser']);
 $html = $form->select_dolusers_forevent('view');
 agendaFormAssert(str_contains($html, 'Collaborator 99'), 'Without a native per-event list the original renderer must remain authoritative');
 
-echo "[OK] Native Agenda renderer and per-version assignee compatibility.\n";
+require_once $root.'/core/lib/functions.lib.php';
+require_once $root.'/core/class/html.formprojet.class.php';
+
+/** Fictitious task rows for the native project selector. */
+class AgendaProjectDatabase
+{
+	/**
+	 * Return the test table prefix.
+	 * @return string Prefix
+	 */
+	public function prefix()
+	{
+		return 'llx_';
+	}
+
+	/**
+	 * Accept the native project ID list filter.
+	 * @param string $value Project IDs
+	 * @return string Numeric list
+	 */
+	public function sanitize($value)
+	{
+		return preg_replace('/[^0-9,]/', '', $value);
+	}
+
+	/**
+	 * Return two distinct tasks on a project with a long title.
+	 * @param string $sql Native task list query
+	 * @return ArrayIterator Task rows
+	 */
+	public function query($sql)
+	{
+		$first = (object) array('rowid' => 7, 'tref' => 'TA-7', 'tlabel' => 'Site visit', 'fk_statut' => 1, 'fk_soc' => 2,
+			'ref' => 'PR-3', 'title' => str_repeat('Long project title ', 5), 'name' => 'Customer', 'usage_task' => 1);
+		$second = clone $first;
+		$second->rowid = 8;
+		$second->tref = 'TA-8';
+		$second->tlabel = 'Follow up';
+		return new ArrayIterator(array($first, $second));
+	}
+
+	// phpcs:disable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps -- Native database API.
+	/**
+	 * Count the available fixture rows.
+	 * @param ArrayIterator $result Cursor
+	 * @return int Row count
+	 */
+	public function num_rows($result)
+	{
+		return $result->count();
+	}
+
+	/**
+	 * Read the next fixture row.
+	 * @param ArrayIterator $result Cursor
+	 * @return object Task
+	 */
+	public function fetch_object($result)
+	{
+		$row = $result->current();
+		$result->next();
+		return $row;
+	}
+	// phpcs:enable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
+
+	/**
+	 * Release an in-memory fixture cursor.
+	 * @param ArrayIterator $result Cursor
+	 * @return void
+	 */
+	public function free($result)
+	{
+	}
+}
+
+$conf = (object) array('entity' => 1, 'modules' => array(), 'global' => new stdClass());
+$db = new AgendaProjectDatabase();
+$user = new User($db);
+$formproject = new FormProjets($db);
+$formproject->error = 'preserved project property';
+$hooks->llxHeader(array('currentcontext' => 'actioncard'), $object, $action, null);
+agendaFormAssert($formproject->error === 'preserved project property', 'The header discarded native project renderer state');
+
+foreach (array('taskid' => 7, 'fk_element' => 8) as $field => $selected) {
+	$html = $formproject->selectTasks(-1, $selected, $field, 64, 0, $field === 'taskid' ? '1' : '', 1, 0, 0, 'maxwidth500', '3', 'all', null, 1);
+	$document = new DOMDocument();
+	$document->loadHTML($html);
+	$xpath = new DOMXPath($document);
+	$option = $xpath->query('//select[@name="'.$field.'"]/option[@selected]')->item(0);
+	$label = $field === 'taskid' ? 'Site visit' : 'Follow up';
+	agendaFormAssert($option && $option->getAttribute('value') === (string) $selected, 'The native task ID was lost from '.$field);
+	agendaFormAssert($option->textContent === 'TA-'.$selected.' '.$label && $option->getAttribute('data-html') === 'TA-'.$selected.' - '.$label,
+		'The Agenda task reference and label must be visible in both the standard field and Select2');
+	agendaFormAssert($xpath->query('//option[@value="0"]')->length === ($field === 'taskid' ? 1 : 0), 'The task selector changed its empty option');
+}
+$html = $formproject->selectTasks(selected: 7, projectsListId: '3,4', nooutput: 1);
+agendaFormAssert(str_contains($html, 'PR-3') && str_contains($html, 'TA-7'), 'A multi-project picker still needs its project labels');
+
+echo "[OK] Native Agenda task selection, labels and assignee compatibility.\n";

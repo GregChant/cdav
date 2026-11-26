@@ -793,6 +793,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 			$invitationChange = $calendarData['elem_source'] === 'ev'
 				? $this->validateProtectedCalendarWrite((int) $calendarId, (string) $objectUri, $origCalendarData) : false;
+			if (isset($invitationChange['_personal_reminders'])) {
+				// Private alarm changes share the transaction but do not revise or notify the meeting.
+				$this->_syncNativeReminders((int) $calendarData['id'], (int) $calendarId, $invitationChange['_personal_reminders']);
+			}
 			if (is_array($invitationChange) && isset($invitationChange['_invitation_plan'])) {
 				$previous = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 				$this->_applyInvitationPlan((int) $calendarData['id'], (int) $calendarId, $invitationChange['_invitation_plan'], $createdAttachments, $removedAttachments);
@@ -802,7 +806,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				}
 				$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
 					'id' => (int) $calendarData['id'], 'previous_data' => (string) $previous['calendardata'],
-					'canonical_data' => (string) $committed['calendardata'], 'changed' => (bool) $invitationChange['_invitation_plan']['changed'],
+					'canonical_data' => (string) $committed['calendardata'], 'changed' => $invitationChange['_invitation_plan']['changed']
+						&& $invitationChange['_invitation_plan']['kind'] !== 'availability',
+					'omit_location' => ($committed['_cdav_description']['note_prefix_fields']['original_location'] ?? '') === '',
 					'owner_principal' => $invitationChange['_invitation_plan']['delegated_principal'] ?? 'principals/'.(string) $this->user->login);
 				$this->managedAttachmentStore->discardCreatedFiles($removedAttachments);
 				return;
@@ -1180,34 +1186,50 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$this->_disableCalendarReadCache();
 		$existing = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 		$internal = $this->_parseInternalObjectUri((string) $objectUri);
+		$descriptionContext = $existing['_cdav_description'] ?? array();
+		if ($descriptionContext) $descriptionContext['prefix_for_fields'] = array($this->cdavLib, 'getCalendarDescriptionPrefixForFields');
 		$documentsUrl = (string) ($existing['_cdav_description']['documents_url'] ?? '');
 		if ($documentsUrl !== '') {
 			$existing['calendardata'] = \Dolibarr\CDav\CalendarWritePolicy::calendarWithoutDocumentsLink((string) $existing['calendardata'], $documentsUrl);
 			$calendarData = \Dolibarr\CDav\CalendarWritePolicy::calendarWithoutDocumentsLink((string) $calendarData, $documentsUrl);
 		}
 		if (!$creating && $existing !== null && ($internal === null || $internal['source'] === 'ev')) {
+			$protected = $this->_isProtectedEvent((int) $existing['id']);
+			$externalImport = $this->_canImportExternalInvitation((int) $existing['id'], (int) $calendarId, (string) $existing['calendardata']);
+			$reminders = null;
+			$personalRemindersEnabled = !$externalImport && (int) $calendarId === (int) $this->user->id && getDolGlobalInt('CDAV_NATIVE_REMINDERS')
+				&& getDolGlobalString('AGENDA_REMINDER_BROWSER') && $this->_reminderMappingTableAvailable();
+			if ($protected && $personalRemindersEnabled) {
+				list($calendarData, $reminders) = \Dolibarr\CDav\CalendarWritePolicy::personalReminderChange($existing['calendardata'], $calendarData);
+			}
 			try {
 				$invitation = \Dolibarr\CDav\InvitationPolicy::plan((string) $existing['calendardata'], (string) $calendarData,
-					(string) $this->user->email, $this->_isProtectedEvent((int) $existing['id']),
-					$this->_canImportExternalInvitation((int) $existing['id'], (int) $calendarId, (string) $existing['calendardata']));
+					(string) $this->user->email, $protected, $externalImport, $descriptionContext, true);
 			} catch (Forbidden $exception) {
 				$organizer = $this->_hasAgendaRight('allactions', 'write')
 					? $this->_nativeOrganizerIdentity((int) $existing['id'], (string) $existing['calendardata']) : null;
 				if ($organizer === null) throw $exception;
 				$invitation = \Dolibarr\CDav\InvitationPolicy::plan((string) $existing['calendardata'], (string) $calendarData,
-					$organizer['email'], $this->_isProtectedEvent((int) $existing['id']));
+					$organizer['email'], $protected, false, $descriptionContext);
 				if ($invitation !== null) $invitation['delegated_principal'] = $organizer['principal'];
 			}
 			if ($invitation !== null) {
-				if ($invitation['kind'] === 'reply' && (int) $calendarId !== (int) $this->user->id) {
-					throw new Forbidden('A meeting response must be written in the authenticated participant calendar.');
+				if (!$protected && $personalRemindersEnabled && !$invitation['actor_is_organizer']) {
+					// Attendee comparisons ignore personal alarms even when shared business fields are editable.
+					list(, $reminders) = \Dolibarr\CDav\CalendarWritePolicy::personalReminderChange($existing['calendardata'], $calendarData);
+				}
+				// RSVP clients often omit all personal alarms from their reply.
+				if ($invitation['kind'] === 'reply' && $reminders === array()) $reminders = null;
+				if ($reminders !== null) $this->_planNativeReminders((int) $existing['id'], (int) $calendarId, $reminders);
+				if (in_array($invitation['kind'], array('reply', 'availability'), true) && (int) $calendarId !== (int) $this->user->id) {
+					throw new Forbidden('A personal meeting change must be written in the authenticated participant calendar.');
 				}
 				if (!empty($invitation['changed']) && in_array($invitation['kind'], array('organizer', 'cancel'), true)) {
 					$this->_assertAppointmentStatusAuthority((int) $existing['id']);
 				}
 				$data = $this->_parseData($invitation['calendar_data'], (int) $calendarId);
 				return array('start' => (int) $data['start'], 'end' => (int) $data['end'], 'fullday' => (int) $data['fullday'],
-					'_invitation_plan' => $invitation);
+					'_invitation_plan' => $invitation, '_personal_reminders' => $reminders);
 			}
 		}
 		if (!$creating && $existing !== null && ($internal === null || $internal['source'] === 'ev')) {
@@ -1219,10 +1241,13 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					if (!isset($after->VEVENT)) throw new Forbidden('An appointment must remain a VEVENT.');
 					$oldStatus = \Dolibarr\CDav\CalendarWritePolicy::eventStatus($before->VEVENT);
 					$newStatus = \Dolibarr\CDav\CalendarWritePolicy::normalizeAppointmentStatus($before->VEVENT, $after->VEVENT);
-					if ($oldStatus !== $newStatus || $oldStatus === 'CANCELLED' || $this->_isProtectedEvent((int) $existing['id'])) {
-						$plan = \Dolibarr\CDav\CalendarWritePolicy::planStatusChange((string) $existing['calendardata'], (string) $calendarData);
-						if ($oldStatus !== $newStatus) $this->_assertAppointmentStatusAuthority((int) $existing['id']);
-						return $plan['dates'] + array('_appointment_status_plan' => $plan);
+					if ($oldStatus !== $newStatus || $oldStatus === 'CANCELLED' || $protected) {
+						$plan = \Dolibarr\CDav\CalendarWritePolicy::planStatusChange((string) $existing['calendardata'], (string) $calendarData, $descriptionContext);
+						if ($oldStatus !== $newStatus || $plan['resized'] || array_diff_key($plan['fields'], array('transparency' => true))) {
+							$this->_assertAppointmentStatusAuthority((int) $existing['id']);
+						}
+						if ($reminders !== null) $this->_planNativeReminders((int) $existing['id'], (int) $calendarId, $reminders);
+						return $plan['dates'] + array('_appointment_status_plan' => $plan, '_personal_reminders' => $reminders);
 					}
 				}
 			} finally {
@@ -1275,7 +1300,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			.' AND entity IN ('.getEntity('agenda').')');
 		if (!$result || !($row = $this->db->fetch_object($result))) throw new \Sabre\DAV\Exception\NotFound('Appointment not found.');
 		if ((int) $row->fk_user_action !== (int) $this->user->id && !$this->_hasAgendaRight('allactions', 'write')) {
-			throw new Forbidden('Only the native appointment owner may change its global state.');
+			throw new Forbidden('Only the native appointment owner or an authorized delegate may change its shared fields.');
 		}
 	}
 
@@ -1289,28 +1314,23 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	private function _applyAppointmentStatusPlan($eventId, $calendarId, array $plan)
 	{
 		if (empty($plan['changed'])) return;
-		if ($plan['status'] !== $plan['previous_status']) $this->_assertAppointmentStatusAuthority((int) $eventId);
 		$data = array_replace($this->_parseData((string) $plan['calendar_data'], (int) $calendarId), $plan['dates']);
 		$data['_preserve_native_dates'] = empty($plan['date_changed']);
-		if ($plan['status'] === $plan['previous_status']) {
-			$this->_advanceProtectedCalendarSequence((int) $eventId, (int) $calendarId,
-				((int) $eventId).'-ev-'.CDAV_URI_KEY, $plan['dates']);
-		}
+		$data['_protected_fields'] = $plan['fields'];
+		if (!$this->_schedulingTableAvailable()) throw new Forbidden('Reactivate CDav before updating protected appointments.');
+		$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.((int) $eventId));
+		if (!$result) throw new \Sabre\DAV\Exception('Unable to read the appointment scheduling state.');
+		$row = $this->db->fetch_object($result);
+		$metadata = \Dolibarr\CDav\CalendarWritePolicy::metadataAfterStatusChange($row ? (string) $row->calendardata : '', $plan);
 		$this->_updateActionCommFromCalendarData((int) $eventId, $data, (int) $calendarId, true);
-		if ($plan['status'] !== $plan['previous_status']) {
-			$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.((int) $eventId));
-			if (!$result) throw new \Sabre\DAV\Exception('Unable to read the appointment scheduling state.');
-			$row = $this->db->fetch_object($result);
-			$metadata = \Dolibarr\CDav\CalendarWritePolicy::metadataAfterStatusChange($row ? (string) $row->calendardata : '', $plan);
-			$this->_storeCalendarMetadata((int) $eventId, $metadata);
-		}
+		$this->_storeCalendarMetadata((int) $eventId, $metadata);
 	}
 
 	/**
 	 * Native and ambiguous historical objects are protected independently of URI mappings.
 	 *
 	 * @param int $eventId Native Agenda identifier
-	 * @return bool Whether only date moves are allowed
+	 * @return bool Whether native appointment protection applies
 	 */
 	private function _isProtectedEvent($eventId)
 	{
@@ -1718,7 +1738,18 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			throw new \Sabre\DAV\Exception\NotFound('Meeting not found.');
 		}
 		$kind = (string) $plan['kind'];
+		if ($kind === 'availability') {
+			if ((int) $calendarId !== (int) $this->user->id || empty($event->userassigned[$calendarId])) {
+				throw new Forbidden('Only the assigned participant can change their personal availability.');
+			}
+			// The native full event update deletes and recreates all assignments. Keep their identities and RSVP state.
+			$result = $this->db->query('UPDATE '.MAIN_DB_PREFIX.'actioncomm_resources SET transparency = '.((int) $plan['personal_transparency'])
+				.' WHERE fk_actioncomm = '.((int) $eventId)." AND element_type = 'user' AND fk_element = ".((int) $calendarId));
+			if (!$result) throw new \Sabre\DAV\Exception('Unable to update the participant availability.');
+			return;
+		}
 		$canonical = (string) $plan['calendar_data'];
+		$protected = $this->_isProtectedEvent((int) $eventId);
 		$event->context['cdav_status_managed'] = 1;
 		$event->array_options['options_cdav_status'] = \Dolibarr\CDav\AppointmentStatus::statusFromCalendar($canonical);
 		if (in_array($kind, array('organizer', 'cancel'), true) && (int) $event->userownerid !== (int) $this->user->id
@@ -1745,13 +1776,17 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		} elseif ($kind === 'organizer') {
 			$data = $this->_parseData($canonical, (int) $calendarId);
 			$data['_preserve_native_dates'] = empty($plan['date_changed']);
-			$current = $this->getCalendarObject((int) $calendarId, ((int) $eventId).'-ev-'.CDAV_URI_KEY);
-			if (isset($current['_cdav_description'])) {
-				$prefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($current['_cdav_description'], $data['label'], $data['location']);
-				$data['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($current['_cdav_description'], $data['description'], $prefix);
-				$data['_native_note_resolved'] = true;
+			if ($protected) {
+				$data['_protected_fields'] = $plan['fields'] ?? array();
+				$data = array_replace($data, $plan['dates'] ?? array());
+			} else {
+				$current = $this->getCalendarObject((int) $calendarId, ((int) $eventId).'-ev-'.CDAV_URI_KEY);
+				if (isset($current['_cdav_description'])) {
+					$prefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($current['_cdav_description'], $data['label'], $data['location']);
+					$data['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($current['_cdav_description'], $data['description'], $prefix);
+					$data['_native_note_resolved'] = true;
+				}
 			}
-			$protected = $this->_isProtectedEvent((int) $eventId);
 			if (!$protected && getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS')) {
 				$this->managedAttachmentStore->synchronizeCalendarData((int) $eventId, $canonical, false);
 			}
@@ -1765,6 +1800,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			}
 		} else {
 			throw new Forbidden('Unsupported invitation change.');
+		}
+		if ($protected) {
+			$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.((int) $eventId));
+			if (!$result) throw new \Sabre\DAV\Exception('Unable to read shared meeting metadata.');
+			$row = $this->db->fetch_object($result);
+			$canonical = \Dolibarr\CDav\InvitationPolicy::nativeMetadata($plan, $row ? (string) $row->calendardata : '');
 		}
 		$this->_storeCalendarMetadata((int) $eventId, $canonical);
 	}
@@ -1787,7 +1828,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @param int $eventId Native Agenda identifier
 	 * @param array $data Parsed calendar values
 	 * @param int $calendarId Calendar owner
-	 * @param bool $protectedMove Whether only validated endpoints may change
+	 * @param bool $protectedMove Whether the validated protected-field plan governs the native update
 	 * @param bool $preserveInvitationResponses Whether existing personal resources remain authoritative
 	 * @return \ActionComm Updated native appointment
 	 */
@@ -1807,18 +1848,33 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$data['fullday'] = (int) $event->fulldayevent;
 		}
 		if ($protectedMove) {
-			// The fetched ActionComm remains authoritative for every business field,
-			// including contacts, assignments, native notes and third-party/project links.
+			// Only apply validated calendar fields to the freshly loaded native relationships.
+			$fields = $data['_protected_fields'] ?? array();
+			foreach (array('label', 'location', 'priority') as $field) {
+				if (isset($fields[$field])) $event->{$field} = $fields[$field];
+			}
+			if (isset($fields['note'])) $event->note = $event->note_private = $fields['note'];
+			if (isset($fields['transparency'])) {
+				if (empty($event->userassigned[$calendarId])) throw new Forbidden('This calendar is no longer assigned to the appointment.');
+				if ($fields['transparency'] && strtoupper((string) ($event->userassigned[$calendarId]['answer_status'] ?? '')) === 'DECLINED') {
+					throw new Forbidden('A declined invitation must remain free on the participant calendar.');
+				}
+				$event->userassigned[$calendarId]['transparency'] = $fields['transparency'];
+				if ((int) $event->userownerid === (int) $calendarId) $event->transparency = $fields['transparency'];
+			}
 			$previousStart = (int) $event->datep;
 			$event->context['cdav_status_managed'] = 1;
 			if ($data['componentType'] === 'VEVENT') {
 				$event->array_options['options_cdav_status'] = \Dolibarr\CDav\AppointmentStatus::normalize($data['status']);
 				if ($data['status'] === 'CANCELLED') \Dolibarr\CDav\AppointmentStatus::clearOccupancy($event);
 			}
-			$event->datep = (int) $data['start'];
-			$event->datef = !empty($data['fullday']) ? (int) $data['end'] - 1 : (int) $data['end'];
+			if (empty($data['_preserve_native_dates'])) {
+				$event->datep = (int) $data['start'];
+				$event->datef = !empty($data['fullday']) ? (int) $data['end'] - 1 : (int) $data['end'];
+				$event->fulldayevent = (int) $data['fullday'];
+			}
 			if ($event->update($this->user) <= 0) {
-				throw new \Sabre\DAV\Exception('Unable to move the protected Dolibarr appointment: '.$event->error);
+				throw new \Sabre\DAV\Exception('Unable to update the protected Dolibarr appointment: '.$event->error);
 			}
 			if ($previousStart !== (int) $event->datep) {
 				$this->_moveNativeReminders($event, (int) $event->datep);
@@ -2691,47 +2747,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	private function _extractNativeReminders($component, $start)
 	{
 		$reminders = array();
-		foreach ($component->getComponents() as $alarm) {
-			if ($alarm->name !== 'VALARM' || !isset($alarm->TRIGGER)
-				|| strtoupper((string) ($alarm->ACTION ?? '')) !== 'DISPLAY'
-				|| isset($alarm->REPEAT) || isset($alarm->DURATION)) {
-				continue;
-			}
-			$valueType = strtoupper((string) ($alarm->TRIGGER['VALUE'] ?? 'DURATION'));
-			$related = strtoupper((string) ($alarm->TRIGGER['RELATED'] ?? 'START'));
-			if ($valueType === 'DATE-TIME' || $related !== 'START' || substr((string) $alarm->TRIGGER, 0, 1) !== '-') {
-				continue;
-			}
-			try {
-				$interval = VObject\DateTimeParser::parseDuration((string) $alarm->TRIGGER);
-				if ($interval->d > 0 && $interval->d <= 3650 && !$interval->h && !$interval->i && !$interval->s) {
-					// A calendar day is not a fixed 24-hour offset across DST.
-					$unit = $interval->d % 7 === 0 ? 'w' : 'd';
-					$value = $unit === 'w' ? (int) ($interval->d / 7) : $interval->d;
-					$reminders[$value.$unit] = array('start' => (int) $start, 'value' => $value, 'unit' => $unit);
-					if (count($reminders) >= 10) break;
-					continue;
-				}
-				$trigger = $alarm->getEffectiveTriggerTime()->getTimestamp();
-			} catch (\Throwable $e) {
-				continue;
-			}
-			$seconds = (int) $start - (int) $trigger;
-			if ($seconds < 60 || $seconds > 10 * 365 * 86400) {
-				continue;
-			}
-			$unit = '';
-			$value = 0;
-			foreach (array('h' => 3600, 'i' => 60) as $candidate => $divisor) {
-				if ($seconds % $divisor === 0) {
-					$unit = $candidate;
-					$value = (int) ($seconds / $divisor);
-					break;
-				}
-			}
-			if ($unit !== '' && $value > 0) {
-				$reminders[$value.$unit] = array('start' => (int) $start, 'value' => $value, 'unit' => $unit);
-			}
+		foreach ($component->select('VALARM') as $alarm) {
+			$reminder = \Dolibarr\CDav\CalendarWritePolicy::nativeReminder($alarm, (int) $start);
+			if ($reminder === null) continue;
+			$reminders[$reminder['value'].$reminder['unit']] = $reminder;
 			if (count($reminders) >= 10) break;
 		}
 		return array_values($reminders);
@@ -3543,6 +3562,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					$committed = $this->getCalendarObject((int) $this->user->id, $uri);
 					$receipt = array('uid' => (string) $existing->UID, 'changed' => (bool) $plan['changed'],
 						'previous_data' => (string) $current['calendardata'], 'canonical_data' => (string) $committed['calendardata'],
+						'omit_location' => ($committed['_cdav_description']['note_prefix_fields']['original_location'] ?? '') === '',
 						'recipients' => $recipients, 'sender_address' => 'mailto:'.$email, 'organizer_address' => 'mailto:'.$organizer);
 				} finally {
 					$calendar->destroy();
