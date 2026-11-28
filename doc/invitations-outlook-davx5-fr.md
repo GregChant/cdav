@@ -70,10 +70,14 @@ identiques. Elle ne permet pas de modifier un rendez-vous natif partagé au nom
 d'un organisateur extérieur.
 
 Si le connecteur répète un invité avec la même adresse, la même réponse et les
-mêmes paramètres, CDav le compte une seule fois. Si deux entrées pour la même
-adresse ont des réponses ou des rôles différents, le rapport de synchronisation
-signale un conflit. Il précise si le conflit figure dans l’invitation enregistrée
-sur le serveur (`stored`) ou dans celle envoyée par le client (`submitted`).
+mêmes paramètres, CDav le compte une seule fois. Outlook peut aussi inscrire
+l’organisateur deux fois, comme participant requis et comme président de séance.
+Lorsque seul ce rôle diffère, CDav conserve une seule entrée, y compris à la
+lecture d’une ancienne invitation. La réponse de chaque invité est conservée.
+Si les deux entrées se contredisent sur la réponse, la délégation ou un autre
+paramètre, le rapport de synchronisation signale un conflit. Il précise si le
+conflit figure dans l’invitation enregistrée sur le serveur (`stored`) ou dans
+celle envoyée par le client (`submitted`).
 Une adresse d’invité vide est signalée séparément.
 
 Dans CalDav Synchronizer, vérifier :

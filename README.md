@@ -112,6 +112,13 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.5.4 handles Outlook invitations that repeat the organizer as both a
+required attendee and chair, including previously imported copies and repeated
+updates. Existing organizer roles and attendee responses are preserved. DAV sync
+journal cleanup removes expired entries in small batches by primary key to
+avoid locking recent entries during concurrent calendar and contact syncs.
+Incremental sync tokens continue to track the retained history boundary.
+
 Version 6.5.3 preserves an appointment’s location, notes and priority when a
 calendar client omits those fields during a rename. Partial updates to native
 project tasks also preserve progress, priority and deadlines, including tasks

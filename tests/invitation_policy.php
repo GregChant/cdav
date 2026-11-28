@@ -464,6 +464,86 @@ invitationPolicyAssert($deduplicated['kind'] === 'reply' && invitationPolicyStat
 	&& substr_count($deduplicated['calendar_data'], 'ATTENDEE;') === 2,
 	'Equivalent repeated attendees must yield one canonical response per address');
 
+// Outlook can serialize the same organizer as both a recipient and the meeting chair.
+$withOrganizerRoles = static function (array $roles, array $chairChanges = array()) use ($before) {
+	return invitationPolicyChange($before, static function ($event) use ($roles, $chairChanges) {
+		foreach ($roles as $role) {
+			$address = (string) $event->ORGANIZER;
+			$params = array('CN' => 'Organizer', 'PARTSTAT' => 'NEEDS-ACTION', 'RSVP' => 'TRUE', 'SCHEDULE-AGENT' => 'CLIENT');
+			if ($role !== null) $params['ROLE'] = $role;
+			if ($role === 'CHAIR') {
+				$address = strtoupper($address);
+				$params = array_replace($params, array('CUTYPE' => 'individual'), $chairChanges);
+			}
+			$event->add('ATTENDEE', $address, $params);
+		}
+	});
+};
+$singleRequired = $withOrganizerRoles(array('REQ-PARTICIPANT'));
+$singleChair = $withOrganizerRoles(array('CHAIR'));
+$requiredEcho = $withOrganizerRoles(array('REQ-PARTICIPANT', 'CHAIR'));
+$chairEcho = $withOrganizerRoles(array('CHAIR', 'REQ-PARTICIPANT'));
+invitationPolicyAssert(InvitationPolicy::sameImportedRevision($singleRequired, $requiredEcho)
+	&& InvitationPolicy::sameImportedRevision($singleChair, $chairEcho)
+	&& InvitationPolicy::sameImportedRevision($requiredEcho, $singleRequired)
+	&& !InvitationPolicy::sameImportedRevision($singleRequired, invitationPolicyChange($requiredEcho, static function ($event) {
+		$event->LOCATION = 'Another room';
+	})), 'Mailbox retries with the organizer role echo must preserve the revision and still detect an actual event change');
+foreach (array(array('REQ-PARTICIPANT', 'CHAIR'), array('CHAIR', null)) as $roles) {
+	$echo = $withOrganizerRoles($roles);
+	$calendar = VObject\Reader::read($echo);
+	$indexed = InvitationPolicy::indexAttendees($calendar->VEVENT, true);
+	invitationPolicyAssert(count($calendar->VEVENT->select('ATTENDEE')) === 3
+		&& (string) ($indexed['organizer@example.test']['ROLE'] ?? 'REQ-PARTICIPANT') === 'REQ-PARTICIPANT',
+		'An imported organizer pair must retain the required role regardless of order or an implicit default');
+	$calendar->destroy();
+	foreach (array($singleRequired, $singleChair) as $stored) {
+		$plan = InvitationPolicy::plan($stored, $echo, 'alice@example.test', true, false, array(), true, true);
+		invitationPolicyAssert($plan['kind'] === 'noop' && $plan['sequence'] === 4 && $plan['calendar_data'] === $stored,
+			'A participant echo of both organizer roles must retain the original single role, revision and attendee responses');
+	}
+}
+invitationPolicyRejects($singleRequired, $singleChair, 'alice@example.test',
+	'A single organizer role must remain protected against replacement by a participant');
+$ambiguousOrganizer = VObject\Reader::read($echo);
+$ambiguousOrganizer->VEVENT->add('ORGANIZER', 'mailto:second-organizer@example.test');
+try {
+	InvitationPolicy::indexAttendees($ambiguousOrganizer->VEVENT);
+	throw new RuntimeException('Role duplicates must still conflict when the organizer address is ambiguous');
+} catch (BadRequest $expected) {
+	// A create has no authoritative invitation yet and must validate the organizer in this component.
+} finally {
+	$ambiguousOrganizer->destroy();
+}
+foreach (array('PARTSTAT' => 'DECLINED', 'RSVP' => 'FALSE', 'DELEGATED-TO' => 'mailto:delegate@example.test') as $name => $value) {
+	$conflict = $withOrganizerRoles(array('REQ-PARTICIPANT', 'CHAIR'), array($name => $value));
+	invitationPolicyRejects($singleRequired, $conflict, 'alice@example.test', 'Conflicting organizer '.$name.' must remain ambiguous', BadRequest::class);
+}
+invitationPolicyRejects($singleRequired, $withOrganizerRoles(array('OPT-PARTICIPANT', 'CHAIR')), 'alice@example.test',
+	'An optional organizer and a chair must not be treated as the same role', BadRequest::class);
+$peerChair = invitationPolicyChange($before, static function ($event) {
+	$copy = clone $event->ATTENDEE;
+	$copy['ROLE'] = 'CHAIR';
+	$event->add($copy);
+});
+invitationPolicyRejects($before, $peerChair, 'alice@example.test', 'The organizer-role exception must be limited to the actual organizer', BadRequest::class);
+
+$seriesWithRoles = invitationPolicyChange($exceptions, static function ($master, $calendar) {
+	foreach ($calendar->select('VEVENT') as $event) {
+		$role = isset($event->{'RECURRENCE-ID'}) ? 'CHAIR' : 'REQ-PARTICIPANT';
+		$event->add('ATTENDEE', (string) $event->ORGANIZER, array('ROLE' => $role));
+	}
+});
+$seriesWithEcho = invitationPolicyChange($seriesWithRoles, static function ($master, $calendar) {
+	foreach ($calendar->select('VEVENT') as $event) {
+		$role = isset($event->{'RECURRENCE-ID'}) ? 'REQ-PARTICIPANT' : 'CHAIR';
+		$event->add('ATTENDEE', (string) $event->ORGANIZER, array('ROLE' => $role));
+	}
+});
+$seriesPlan = InvitationPolicy::plan($seriesWithRoles, $seriesWithEcho, 'alice@example.test');
+invitationPolicyAssert($seriesPlan['kind'] === 'noop' && $seriesPlan['calendar_data'] === $seriesWithRoles,
+	'A recurrence exception must retain its own organizer role when Outlook echoes the master and the exception');
+
 // Two clients may put the equivalent, expanded row first on different syncs.
 $clientAttendees = static function ($calendarData, $product, $expandedFirst, $bareAddress) {
 	return invitationPolicyChange($calendarData, static function ($master, $calendar) use ($product, $expandedFirst, $bareAddress) {

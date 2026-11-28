@@ -258,6 +258,69 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	liveAssert((bool) $db->query('UPDATE '.MAIN_DB_PREFIX.'actioncomm_resources SET answer_status = \'ACCEPTED\', mandatory = 1
 		WHERE fk_actioncomm = '.$id.' AND element_type = \'user\' AND fk_element = '.((int) $invitee->id)),
 		'Unable to prepare native imported invitation resource metadata');
+	// A second Outlook copy can share the original's title, date and organizer but have a different UID.
+	$copyUid = $context['prefix'].'-external-copy';
+	$copyPath = $context['limited_calendar_path'].rawurlencode($copyUid.'.ics');
+	$organizerEmail = 'office365-organizer@example.test';
+	$copy = businessLiveCalendar($raw, static function ($event) use ($copyUid, $organizerEmail, $invitee) {
+		$event->UID = $copyUid;
+		$event->ORGANIZER['SCHEDULE-AGENT'] = 'CLIENT';
+		$guest = invitationLiveAttendee($event, $invitee->email);
+		$guest['PARTSTAT'] = 'NEEDS-ACTION';
+		$guest['SCHEDULE-AGENT'] = 'CLIENT';
+		$event->add('ATTENDEE', 'mailto:'.$organizerEmail, array('PARTSTAT' => 'NEEDS-ACTION', 'ROLE' => 'REQ-PARTICIPANT',
+			'RSVP' => 'TRUE', 'SCHEDULE-AGENT' => 'CLIENT'));
+	});
+	$repeatOrganizer = static function ($event) use ($organizerEmail) {
+		$echo = clone invitationLiveAttendee($event, $organizerEmail);
+		$echo['ROLE'] = (string) $echo['ROLE'] === 'CHAIR' ? 'REQ-PARTICIPANT' : 'CHAIR';
+		$event->add($echo);
+	};
+	$repeated = businessLiveCalendar($copy, $repeatOrganizer);
+	$original = invitationLiveProtectedState($db, $id);
+	liveHttpStatus($http('PUT', $copyPath, $repeated, $creationHeaders), array(201), 'Import an Outlook organizer repeated as chair');
+	$copyId = (int) liveRow($db, 'SELECT fk_object FROM '.MAIN_DB_PREFIX."actioncomm_cdav WHERE sourceuid = '".$db->escape($copyUid)."'")->fk_object;
+	liveAssert($copyId > 0 && $copyId !== $id, 'Independent invitation UIDs must retain distinct native identities');
+	$events[] = $copyId;
+	$metadataSql = 'SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.$copyId;
+	$saved = \Sabre\VObject\Reader::read(liveRow($db, $metadataSql)->calendardata);
+	liveAssert(count($saved->VEVENT->select('ATTENDEE')) === 2
+		&& (string) invitationLiveAttendee($saved->VEVENT, $organizerEmail)['ROLE'] === 'REQ-PARTICIPANT', 'New imports must store one organizer attendee');
+	$saved->destroy();
+	// Old scheduling rows can still contain both roles. Start from that historical state, including for DELETE.
+	$seedRoles = static function ($body) use ($db, $copyId) {
+		liveAssert((bool) $db->query('UPDATE '.MAIN_DB_PREFIX."cdav_scheduling SET calendardata = '".$db->escape($body)."' WHERE fk_actioncomm = ".$copyId),
+			'Unable to prepare the stored organizer roles');
+	};
+	$seedRoles($repeated);
+	$read = $http('GET', $copyPath);
+	liveHttpStatus($read, array(200), 'Read historical Outlook organizer role pair');
+	$view = \Sabre\VObject\Reader::read($read['body']);
+	liveAssert(count($view->VEVENT->select('ATTENDEE')) === 2 && (string) invitationLiveAttendee($view->VEVENT, $organizerEmail)['ROLE'] === 'REQ-PARTICIPANT'
+		&& (string) invitationLiveAttendee($view->VEVENT, $invitee->email)['PARTSTAT'] === 'NEEDS-ACTION', 'Legacy GET changed the organizer role or the guest response');
+	$view->destroy();
+	$etag = array('If-Match: '.$read['headers']['etag']);
+	liveHttpStatus($http('PUT', $copyPath, businessLiveCalendar($read['body'], $repeatOrganizer), $etag), array(200, 204), 'Replay the two organizer roles from Outlook');
+	liveAssert(liveRow($db, $metadataSql)->calendardata === $repeated, 'Reading or replaying the legacy copy rewrote native scheduling metadata');
+	$seedRoles(businessLiveCalendar($copy, static function ($event) use ($organizerEmail) {
+		invitationLiveAttendee($event, $organizerEmail)['ROLE'] = 'CHAIR';
+	}));
+	$read = $http('GET', $copyPath);
+	$accepted = invitationLiveAnswer($read['body'], $invitee->email, 'ACCEPTED', '-//CalDavSynchronizer//Outlook//EN');
+	liveHttpStatus($http('PUT', $copyPath, businessLiveCalendar($accepted, $repeatOrganizer), array('If-Match: '.$read['headers']['etag'])),
+		array(200, 204), 'Accept a meeting where Outlook echoes the stored chair as a required attendee');
+	$stored = liveRow($db, $metadataSql)->calendardata;
+	$view = \Sabre\VObject\Reader::read($stored);
+	liveAssert(count($view->VEVENT->select('ATTENDEE')) === 2 && (string) invitationLiveAttendee($view->VEVENT, $organizerEmail)['ROLE'] === 'CHAIR'
+		&& (string) invitationLiveAttendee($view->VEVENT, $invitee->email)['PARTSTAT'] === 'ACCEPTED', 'Committed RSVP lost the original chair role or guest response');
+	$view->destroy();
+	$seedRoles(businessLiveCalendar($stored, $repeatOrganizer));
+	$read = $http('GET', $copyPath);
+	liveHttpStatus($http('DELETE', $copyPath, null, array('If-Match: '.$read['headers']['etag'])), array(200, 204), 'Delete the historical copy with both organizer roles');
+	liveHttpStatus($http('GET', $copyPath), array(404), 'Removed invitation copy');
+	liveAssert(liveRow($db, 'SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$copyId) === null && invitationLiveProtectedState($db, $id) === $original,
+		'Removing one UID must leave the original accepted appointment and its native links intact');
+	liveOk('Outlook organizer role duplicates on import, historical GET, repeated PUT and DELETE keep the other UID and its RSVP intact');
 	$before = invitationLiveNoopState($db, $id);
 	$fresh = $http('GET', $path);
 	liveHttpStatus($fresh, array(200), 'INV20 private imported invitation GET');

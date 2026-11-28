@@ -47,13 +47,14 @@ class InvitationPolicy
 				throw new Forbidden('The invitation UID and organizer cannot be changed.');
 			}
 			$actor = self::email($actorEmail);
-			$oldAttendees = self::indexAttendees($old, true);
-			$newAttendees = self::indexAttendees($new);
+			$storedByOccurrence = array();
 			foreach ($events as $event) {
-				if ($event !== $old) self::indexAttendees($event, true);
+				$storedByOccurrence[self::occurrenceKey($event)] = self::indexAttendees($event, true);
 			}
+			$oldAttendees = $storedByOccurrence[self::occurrenceKey($old)];
 			foreach ($newEvents as $event) {
-				if ($event !== $new) self::indexAttendees($event);
+				$indexed = self::indexAttendees($event, false, $storedByOccurrence[self::occurrenceKey($event)] ?? array());
+				if ($event === $new) $newAttendees = $indexed;
 			}
 			$isOrganizer = $actor !== '' && $actor === $organizer;
 			if (!$isOrganizer && ($actor === '' || !isset($oldAttendees[$actor]))) {
@@ -166,12 +167,25 @@ class InvitationPolicy
 	{
 		if ($stored === $incoming) return true;
 		$calendar = self::read($incoming);
+		$previous = null;
 		try {
 			if ($stored === $calendar->serialize()) return true;
 			$event = self::master(self::events($calendar));
+			// Replaying the same mailbox PUT can repeat rows that were collapsed on import.
+			$previous = self::read($stored);
+			$priorEvents = self::events($previous);
+			if (!$priorEvents) return false;
+			$prior = self::indexAttendees(self::master($priorEvents), true);
+			self::indexAttendees($event, false, $prior);
+			$stored = $previous->serialize();
+			if ($stored === $calendar->serialize()) return true;
 			$event->SEQUENCE = self::sequence($event);
 			return $calendar->serialize() === $stored;
+		} catch (BadRequest $e) {
+			// A malformed historical scheduling copy cannot establish an exact replay.
+			return false;
 		} finally {
+			if ($previous !== null) $previous->destroy();
 			$calendar->destroy();
 		}
 	}
@@ -484,12 +498,12 @@ class InvitationPolicy
 		if (count($oldEvents) !== count($newEvents)) return false;
 		$incoming = array();
 		foreach ($newEvents as $event) {
-			$key = CalendarUid::read($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
+			$key = self::occurrenceKey($event);
 			if (isset($incoming[$key])) return false;
 			$incoming[$key] = $event;
 		}
 		foreach ($oldEvents as $event) {
-			$key = CalendarUid::read($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
+			$key = self::occurrenceKey($event);
 			if (!isset($incoming[$key])) return false;
 			$left = new VObject\Component\VCalendar();
 			$right = new VObject\Component\VCalendar();
@@ -572,6 +586,15 @@ class InvitationPolicy
 	}
 
 	/**
+	 * @param VObject\Component $event Master or recurrence exception
+	 * @return string Identity used to match the same occurrence across a PUT
+	 */
+	private static function occurrenceKey($event): string
+	{
+		return CalendarUid::read($event).'|'.(isset($event->{'RECURRENCE-ID'}) ? $event->{'RECURRENCE-ID'}->serialize() : '');
+	}
+
+	/**
 	 * Select the original master for identity and sequence checks.
 	 *
 	 * @param array $events Calendar events
@@ -602,20 +625,29 @@ class InvitationPolicy
 	 *
 	 * @param VObject\Component $event Invitation event
 	 * @param bool $stored Whether the component is the existing server copy
+	 * @param array $previous Attendees of the same stored occurrence, when updating
 	 * @return array<string,object> Attendee properties
 	 */
-	public static function indexAttendees($event, bool $stored = false): array
+	public static function indexAttendees($event, bool $stored = false, array $previous = array()): array
 	{
 		$values = array();
 		$source = $stored ? 'stored' : 'submitted';
+		$organizer = count($event->select('ORGANIZER')) === 1 ? self::email((string) $event->ORGANIZER) : '';
 		foreach ($event->select('ATTENDEE') as $property) {
 			$key = self::address((string) $property);
 			if ($key === '' || strcasecmp($key, 'mailto:') === 0) {
 				throw new BadRequest('The '.$source.' invitation contains an ATTENDEE without a calendar address.');
 			}
 			if (isset($values[$key])) {
-				if (self::attendeeParameters($values[$key]) !== self::attendeeParameters($property)) {
-					throw new BadRequest('The '.$source.' invitation has conflicting ATTENDEE entries for the same calendar address.');
+				$first = self::attendeeParameters($values[$key]);
+				$next = self::attendeeParameters($property);
+				if ($first !== $next) {
+					if ($key !== $organizer || !self::isOrganizerRoleEcho($first, $next)) {
+						throw new BadRequest('The '.$source.' invitation has conflicting ATTENDEE entries for the same calendar address.');
+					}
+					// Outlook adds a chair recipient for the organizer. Keep the recorded role on updates.
+					$oldRole = strtoupper((string) ($previous[$key]['ROLE'] ?? ''));
+					$values[$key]['ROLE'] = $oldRole === 'CHAIR' ? 'CHAIR' : 'REQ-PARTICIPANT';
 				}
 				$event->remove($property);
 				continue;
@@ -624,6 +656,19 @@ class InvitationPolicy
 		}
 		ksort($values, SORT_STRING);
 		return $values;
+	}
+
+	/**
+	 * @param array $first Normalized parameters on the first organizer attendee
+	 * @param array $next Normalized parameters on the repeated organizer attendee
+	 * @return bool Whether only the required participant and chair roles differ
+	 */
+	private static function isOrganizerRoleEcho(array $first, array $next): bool
+	{
+		// attendeeParameters omits the default REQ-PARTICIPANT role.
+		$roles = array($first['ROLE'] ?? null, $next['ROLE'] ?? null);
+		unset($first['ROLE'], $next['ROLE']);
+		return $first === $next && in_array(null, $roles, true) && in_array(array('CHAIR'), $roles, true);
 	}
 
 	/**

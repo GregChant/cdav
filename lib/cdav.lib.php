@@ -14,7 +14,7 @@ require_once __DIR__.'/cdav_transport.lib.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-project-task-v13';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-organizer-attendee-v14';
 
 	/** Series ID written by the native Agenda form when saving separate occurrences. */
 	private const AGENDA_SERIES_ID_PATTERN = '^[0-9]{14}$';

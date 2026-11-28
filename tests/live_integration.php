@@ -249,6 +249,63 @@ function liveSyncToken($xml)
 		: '';
 }
 
+/** Exercise DAVx⁵ discovery while a second transaction owns a fresh journal row. */
+function liveCardJournalRetention($db, $entity, $testUser, $baseUrl, $password, array &$createdContacts)
+{
+	$login = $testUser->login;
+	$path = liveDavPath(array('addressbooks', $login, 'default'), true);
+	$headers = array('Depth: 0', 'Content-Type: application/xml; charset=utf-8');
+	$discover = static function () use ($baseUrl, $login, $password, $path, $headers) {
+		$body = '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop>'
+			.'<d:supported-report-set/><d:sync-token/><cs:getctag/></d:prop></d:propfind>';
+		$response = liveHttp($baseUrl, $login, $password, 'PROPFIND', $path, $body, $headers);
+		liveHttpStatus($response, array(207), 'CardDAV address-book discovery during journal retention');
+		$token = liveSyncToken($response['body']);
+		liveAssert($token !== '' && liveCollectionTag($response['body']) !== '', 'Address-book discovery lost its token or collection tag');
+		return $token;
+	};
+	$initialToken = $discover();
+	$contact = new Contact($db);
+	$contact->lastname = $login.' retention';
+	$contact->priv = 1;
+	$contactId = $contact->create($testUser);
+	liveAssert($contactId > 0, 'Unable to create the retention fixture contact: '.$contact->error);
+	$createdContacts[] = $contactId;
+	$boundaryToken = $discover();
+	$table = MAIN_DB_PREFIX.'cdav_sync_change';
+	$collection = 'entity = '.((int) $entity)." AND scope = 'card' AND collection_id = ".((int) $testUser->id);
+	$added = liveRow($db, 'SELECT rowid, uri FROM '.$table.' WHERE '.$collection." AND operation = 'A' ORDER BY rowid DESC LIMIT 1");
+	liveAssert($added && str_starts_with($added->uri, $contactId.'-ct-') && $initialToken !== $boundaryToken,
+		'Contact creation did not produce its journal entry and token');
+	liveAssert($contact->delete($testUser) > 0, 'Unable to delete the retention fixture contact: '.$contact->error);
+	$currentToken = $discover();
+	$deleted = liveRow($db, 'SELECT rowid FROM '.$table.' WHERE '.$collection." AND operation = 'D' AND uri = '".$db->escape($added->uri)."'");
+	liveAssert($deleted && $currentToken !== $boundaryToken, 'Contact deletion did not produce a tombstone and token');
+
+	liveAssert((bool) $db->query('UPDATE '.$table.' SET datec = DATE_SUB(NOW(), INTERVAL 181 DAY) WHERE '.$collection.' AND rowid <= '.((int) $added->rowid)),
+		'Unable to age the history preceding the retained tombstone');
+	liveAssert((bool) $db->begin(), 'Unable to start the journal lock fixture');
+	try {
+		liveAssert(liveRow($db, 'SELECT rowid FROM '.$table.' WHERE rowid = '.((int) $deleted->rowid).' FOR UPDATE') !== null,
+			'Unable to lock the recent tombstone');
+		liveAssert($discover() === $currentToken, 'Journal retention changed the advertised sync token');
+	} finally {
+		$db->rollback();
+	}
+	liveAssert(liveRow($db, 'SELECT rowid FROM '.$table.' WHERE rowid = '.((int) $added->rowid)) === null, 'Expired contact change was not pruned');
+	$report = static function ($token) use ($baseUrl, $login, $password, $path, $headers) {
+		$body = '<d:sync-collection xmlns:d="DAV:"><d:sync-token>'.htmlspecialchars($token, ENT_XML1).'</d:sync-token>'
+			.'<d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>';
+		return liveHttp($baseUrl, $login, $password, 'REPORT', $path, $body, $headers);
+	};
+	liveHttpStatus($report($initialToken), array(403), 'CardDAV token older than the pruned entry');
+	$delta = $report($boundaryToken);
+	liveHttpStatus($delta, array(207), 'CardDAV token at the retention boundary');
+	liveAssert(liveSyncToken($delta['body']) === $currentToken && str_contains($delta['body'], rawurlencode($added->uri))
+		&& str_contains($delta['body'], 'HTTP/1.1 404'), 'The retained tombstone was not returned from the boundary token');
+	liveOk('CardDAV discovery prunes expired history while a retained tombstone is locked and preserves valid incremental tokens');
+}
+
 /** Unfold RFC 5545/6350 content lines before testing their semantic value. */
 function liveUnfold($data)
 {
@@ -430,6 +487,8 @@ try {
 	liveAssert($limitedUser->hasRight('societe', 'contact', 'read') && !$limitedUser->hasRight('societe', 'contact', 'write'), 'Restricted contact rights are not read-only');
 	$GLOBALS['user'] = $testUser;
 	liveOk('restricted user created with own-agenda and read-only contact rights');
+
+	liveCardJournalRetention($db, $entity, $testUser, $davBaseUrl, $password, $created['contacts']);
 
 	if (($argv[1] ?? '') === '--calendar-clients') {
 		require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';

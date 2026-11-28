@@ -767,8 +767,6 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$origCalendarData = $calendarData;
 		$this->managedAttachmentStore->validateInlineCalendarData($origCalendarData);
 		$calendarData = $this->_parseData($calendarData, $calendarId, true);
-		$origCalendarData = $calendarData['normalized_invitation'] ?? $origCalendarData;
-
 		if (! $calendarData || empty($calendarData))
 		{
 			return;
@@ -794,8 +792,10 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if (!$this->_canModifySource($calendarData['elem_source'])) {
 			throw new Forbidden('Not allowed to modify this type of Dolibarr object');
 		}
+			// Compare both submitted organizer roles with the current role under the native lock.
 			$invitationChange = $calendarData['elem_source'] === 'ev'
 				? $this->validateProtectedCalendarWrite((int) $calendarId, (string) $objectUri, $origCalendarData) : false;
+			$origCalendarData = $calendarData['normalized_invitation'] ?? $origCalendarData;
 			if (isset($invitationChange['_personal_reminders'])) {
 				// Private alarm changes share the transaction but do not revise or notify the meeting.
 				$this->_syncNativeReminders((int) $calendarData['id'], (int) $calendarId, $invitationChange['_personal_reminders']);

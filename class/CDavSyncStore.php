@@ -15,6 +15,7 @@ class SyncStore
 {
 	private const SCOPES = array('cal', 'card');
 	private const MAX_PAGE_SIZE = 1000;
+	private const PRUNE_BATCH_SIZE = 100;
 
 	/** @var object */
 	private $db;
@@ -110,13 +111,14 @@ class SyncStore
 				}
 			}
 
+			$prunedToken = $this->prune($scope, $collectionId);
 			$sql = 'UPDATE '.MAIN_DB_PREFIX.'cdav_sync_collection SET initialized = 1, synctoken = '.((int) $latestToken)
+				.', min_token = GREATEST(min_token, '.$prunedToken.')'
 				.' WHERE entity = '.$this->entity.' AND scope = \''.$this->db->escape($scope).'\''
 				.' AND collection_id = '.$collectionId;
 			if (!$this->db->query($sql)) {
 				throw new \RuntimeException('Unable to update the DAV sync token');
 			}
-			$this->prune($scope, $collectionId, (int) $latestToken);
 			if (!$this->db->commit()) {
 				throw new \RuntimeException('Unable to commit the DAV sync transaction');
 			}
@@ -345,26 +347,30 @@ class SyncStore
 		}
 	}
 
-	private function prune($scope, $collectionId, $currentToken)
+	/** Delete a bounded batch and return the highest expired token, or zero. */
+	private function prune($scope, $collectionId)
 	{
 		$retentionDays = function_exists('getDolGlobalInt') ? getDolGlobalInt('CDAV_SYNC_RETENTION_DAYS', 180) : 180;
 		$retentionDays = max(7, min(3650, (int) $retentionDays));
-		$sql = 'DELETE FROM '.MAIN_DB_PREFIX.'cdav_sync_change WHERE entity = '.$this->entity
+		$table = MAIN_DB_PREFIX.'cdav_sync_change';
+		// A range DELETE can lock fresh entries in other collections during its scan.
+		// The parent lock serializes this collection, so discover candidates with a plain read.
+		$sql = 'SELECT rowid FROM '.$table.' WHERE entity = '.$this->entity
 			.' AND scope = \''.$this->db->escape($scope).'\' AND collection_id = '.((int) $collectionId)
-			.' AND datec < DATE_SUB(NOW(), INTERVAL '.$retentionDays.' DAY)';
-		if (!$this->db->query($sql)) {
-			throw new \RuntimeException('Unable to prune the DAV sync journal');
-		}
-		$sql = 'SELECT MIN(rowid) AS first_token FROM '.MAIN_DB_PREFIX.'cdav_sync_change WHERE entity = '.$this->entity
-			.' AND scope = \''.$this->db->escape($scope).'\' AND collection_id = '.((int) $collectionId);
+			.' AND datec < DATE_SUB(NOW(), INTERVAL '.$retentionDays.' DAY)'
+			.' ORDER BY rowid DESC LIMIT '.self::PRUNE_BATCH_SIZE;
 		$result = $this->db->query($sql);
-		$row = $result ? $this->db->fetch_object($result) : null;
-		$minimum = $row && $row->first_token !== null ? max(0, (int) $row->first_token - 1) : (int) $currentToken;
-		$sql = 'UPDATE '.MAIN_DB_PREFIX.'cdav_sync_collection SET min_token = '.$minimum
-			.' WHERE entity = '.$this->entity.' AND scope = \''.$this->db->escape($scope).'\''
-			.' AND collection_id = '.((int) $collectionId);
-		if (!$this->db->query($sql)) {
-			throw new \RuntimeException('Unable to update the DAV sync retention boundary');
+		if (!$result) {
+			throw new \RuntimeException('Unable to read expired DAV sync changes');
 		}
+		$highestExpired = 0;
+		while ($row = $this->db->fetch_object($result)) {
+			$id = (int) $row->rowid;
+			if (!$this->db->query('DELETE FROM '.$table.' WHERE rowid = '.$id)) {
+				throw new \RuntimeException('Unable to prune the DAV sync journal');
+			}
+			$highestExpired = max($highestExpired, $id);
+		}
+		return $highestExpired;
 	}
 }
