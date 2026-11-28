@@ -13,7 +13,25 @@ bash tests/qa.sh
 
 ## Protection contre les régressions
 
-Le [workflow GitHub](../.github/workflows/qa.yml) exécute cette commande pour
+Le job **Calendar clients over HTTP / MariaDB** exécute les scénarios de
+tâches de projet, de modification des rendez-vous et de disponibilité des
+invitations externes à chaque push sur `master` ou `23.0` et à chaque pull
+request. Il utilise PHP 8.5 et le commit épinglé de Dolibarr 24.0.0.
+Pour le reproduire sous Linux, installer PHP avec `mysqli`, `curl`, `dom`,
+`mbstring`, `intl` et `gd`, les outils MariaDB serveur/client, Git et rsync.
+
+```sh
+DOLIBARR_ROOT=/chemin/vers/le/checkout/dolibarr/htdocs \
+CDAV_PHP_BIN=php8.5 bash tests/ci-calendar-http.sh
+```
+
+Le script extrait le cœur au commit courant de ce checkout, crée une base
+MariaDB sur socket privé et un serveur HTTP sur la boucle locale. Il y copie
+la version de travail des fichiers CDav suivis par Git. Les créations de
+fichiers doivent être ajoutées à l'index pour figurer dans cette copie.
+Les processus et le répertoire temporaire sont supprimés à la fin du test.
+
+Le [workflow GitHub](../.github/workflows/qa.yml) exécute `tests/qa.sh` pour
 chaque pull request et chaque push sur `23.0` ou `master`, avec PHP 8.4 et 8.5
 sur Dolibarr 23.0.4, 24.0.0 et la révision `f747b0d6` de la branche officielle
 `24.0`, qui déclare la version 24.0.4. Un échec de test, de syntaxe ou de PHPCS

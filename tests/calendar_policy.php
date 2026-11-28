@@ -444,6 +444,20 @@ $descriptionContext = array('text' => $heading.'Meeting notes'.$suffix, 'note_pr
 		.($location === '' ? '' : "\nAppointment address : ".$location)."\n\n");
 $fieldsCalendar->VEVENT->DESCRIPTION = $descriptionContext['text'];
 $sourceFields = $fieldsCalendar->serialize();
+$sparseRename = clone $fieldsCalendar;
+$sparseRename->VEVENT->SUMMARY = 'Renamed visit';
+foreach (array('LOCATION', 'DESCRIPTION', 'PRIORITY') as $name) $sparseRename->VEVENT->remove($name);
+$storedContext = $descriptionContext;
+$storedContext['note_prefix_fields']['original_location'] = (string) $fieldsCalendar->VEVENT->LOCATION;
+$renameFields = CalendarWritePolicy::planStatusChange($sourceFields, $sparseRename->serialize(), $storedContext)['fields'];
+calendarPolicyAssert($renameFields === array('label' => 'Renamed visit'), 'A sparse rename must preserve native location, priority and rich notes.');
+$sparseRename->VEVENT->LOCATION = '';
+$sparseRename->VEVENT->DESCRIPTION = '';
+$sparseRename->VEVENT->PRIORITY = 0;
+$clearFields = CalendarWritePolicy::planStatusChange($sourceFields, $sparseRename->serialize(), $storedContext)['fields'];
+calendarPolicyAssert($clearFields === array('label' => 'Renamed visit', 'location' => '', 'priority' => 0, 'note' => ''),
+	'Explicit empty location and notes, and priority zero, must remain editable.');
+$sparseRename->destroy();
 $nativeAppointment = clone $fieldsCalendar;
 $nativeAppointment->VEVENT->URL = 'https://example.test/comm/action/card.php?id=42';
 $nativeAppointment->VEVENT->STATUS = 'TENTATIVE';

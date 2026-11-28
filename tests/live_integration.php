@@ -431,6 +431,26 @@ try {
 	$GLOBALS['user'] = $testUser;
 	liveOk('restricted user created with own-agenda and read-only contact rights');
 
+	if (($argv[1] ?? '') === '--calendar-clients') {
+		require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
+		require_once __DIR__.'/business_live_cases.php';
+		require_once __DIR__.'/business_project_acl_cases.php';
+		require_once __DIR__.'/invitation_live_cases.php';
+		$company = new Societe($db);
+		$company->name = $prefix.' Calendar client';
+		$companyId = $company->create($testUser);
+		liveAssert($companyId > 0, 'Unable to create calendar test company');
+		$created['thirdparties'][] = $companyId;
+		$context = array('base_url' => $davBaseUrl, 'login' => $login, 'password' => $password,
+			'prefix' => $prefix, 'token' => $token, 'entity' => $entity, 'company_id' => $companyId,
+			'calendar_path' => liveDavPath(array('calendars', $login, $userId.'-cal-'.$login), true),
+			'limited_user_id' => $limitedUserId, 'limited_login' => $limitedLogin, 'limited_password' => $limitedPassword,
+			'limited_calendar_path' => liveDavPath(array('calendars', $limitedLogin, $limitedUserId.'-cal-'.$limitedLogin), true));
+		businessLiveProjectAccess($db, $testUser, $admin, $context);
+		invitationLiveCases($db, $testUser, $admin, $context, true);
+		return; // The common finally block checks cleanup and reports the outcome.
+	}
+
 	$unauthorized = liveHttp($davBaseUrl, $login, $password.'-wrong', 'OPTIONS', '');
 	liveAssert($unauthorized['status'] === 401, 'Invalid DAV credentials were not rejected');
 	$options = liveHttp($davBaseUrl, $login, $password, 'OPTIONS', '');
@@ -1651,24 +1671,24 @@ try {
 			fwrite(STDERR, '[CLEANUP WARNING] '.$cleanupFailure->getMessage()."\n");
 		}
 	}
+
+	if ($failure !== null) {
+		fwrite(STDERR, '[FAIL] '.$failure->getMessage().' in '.$failure->getFile().':'.$failure->getLine()."\n");
+		exit(1);
+	}
+
+	$orphanSync = liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_sync_collection collection'
+		.' LEFT JOIN '.MAIN_DB_PREFIX.'user owner ON owner.rowid = CASE WHEN collection.scope = \'card\''
+		.' THEN MOD(collection.collection_id, 100000) ELSE collection.collection_id END'
+		.' WHERE collection.entity = '.((int) $entity).' AND collection.scope IN (\'cal\', \'card\') AND owner.rowid IS NULL');
+	liveAssert($orphanSync !== null && (int) $orphanSync->nb === 0, 'Orphan RFC 6578 collections remain after native user cleanup');
+	$remainingOrphanResources = array();
+	$orphanResources = $db->query($orphanResourceSql);
+	liveAssert((bool) $orphanResources, 'Unable to inspect remaining orphan Agenda resources');
+	while ($row = $db->fetch_object($orphanResources)) $remainingOrphanResources[] = (int) $row->rowid;
+	liveAssert($remainingOrphanResources === $initialOrphanResources,
+		'Native fixture cleanup changed pre-existing or left new orphan Agenda resources');
+
+	liveOk('isolated business records removed and local constants restored');
+	fwrite(STDOUT, "All live CDav integration tests passed.\n");
 }
-
-if ($failure !== null) {
-	fwrite(STDERR, '[FAIL] '.$failure->getMessage().' in '.$failure->getFile().':'.$failure->getLine()."\n");
-	exit(1);
-}
-
-$orphanSync = liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'cdav_sync_collection collection'
-	.' LEFT JOIN '.MAIN_DB_PREFIX.'user owner ON owner.rowid = CASE WHEN collection.scope = \'card\''
-	.' THEN MOD(collection.collection_id, 100000) ELSE collection.collection_id END'
-	.' WHERE collection.entity = '.((int) $entity).' AND collection.scope IN (\'cal\', \'card\') AND owner.rowid IS NULL');
-liveAssert($orphanSync !== null && (int) $orphanSync->nb === 0, 'Orphan RFC 6578 collections remain after native user cleanup');
-$remainingOrphanResources = array();
-$orphanResources = $db->query($orphanResourceSql);
-liveAssert((bool) $orphanResources, 'Unable to inspect remaining orphan Agenda resources');
-while ($row = $db->fetch_object($orphanResources)) $remainingOrphanResources[] = (int) $row->rowid;
-liveAssert($remainingOrphanResources === $initialOrphanResources,
-	'Native fixture cleanup changed pre-existing or left new orphan Agenda resources');
-
-liveOk('isolated business records removed and local constants restored');
-fwrite(STDOUT, "All live CDav integration tests passed.\n");

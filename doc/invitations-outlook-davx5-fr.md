@@ -14,9 +14,11 @@ participation. Les réponses des autres invités sont conservées, même si le
 client en renvoie une ancienne copie. Un refus rend uniquement ce collaborateur
 libre ; accepter à nouveau réoccupe son créneau.
 
-Sur une invitation interne active qu’il a acceptée, le collaborateur peut
-ensuite choisir **Libre** ou **Occupé** dans son propre calendrier. Ce choix
-conserve sa réponse et la disponibilité des autres participants.
+Sur une invitation active qu’il a acceptée, le collaborateur peut choisir
+**Libre** ou **Occupé** dans son propre calendrier. Cela vaut aussi pour sa
+copie personnelle d’une invitation externe importée depuis Outlook. Le créneau
+devient alors disponible ou occupé pour les réservations Dolibarr. La réponse
+reste **Accepté** et l’organisateur ne reçoit aucune nouvelle notification.
 
 Les notes, documents, rappels et liaisons métier restent conservés lorsqu'un
 client renvoie une réponse. En particulier, un changement de présentation du

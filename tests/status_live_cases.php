@@ -139,8 +139,17 @@ function appointmentStatusLiveChecks($db, $organizer, $invitee, array $context, 
 	// to exercise a genuinely native standalone appointment rather than an invitation.
 	liveAssert((bool) $db->query('DELETE FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.$id), 'Unable to prepare standalone native appointment');
 	$current = $http('owner', 'GET', $fixture['organizer_path']);
-	$initial = appointmentStatusLiveState($current);
 	$protected = invitationLiveProtectedState($db, $id);
+	$rename = static function ($event) {
+		$event->SUMMARY = ((string) $event->SUMMARY).' revised';
+		foreach (array('LOCATION', 'PRIORITY', 'DESCRIPTION') as $name) $event->remove($name);
+	};
+	liveHttpStatus($http('owner', 'PUT', $fixture['organizer_path'], businessLiveCalendar($current['body'], $rename),
+		array('If-Match: '.$current['headers']['etag'], 'User-Agent: CalDavSynchronizer/4.7')), array(200, 204), 'Partial rename on a protected appointment');
+	$protected['event']['label'] .= ' revised';
+	liveAssert(invitationLiveProtectedState($db, $id) === $protected, 'Renaming a protected appointment lost rich notes, priority, location or business links');
+	$current = $http('owner', 'GET', $fixture['organizer_path']);
+	$initial = appointmentStatusLiveState($current);
 	liveAssert($initial['status'] === 'CONFIRMED', 'A native appointment without a selected state must remain confirmed');
 	$form = appointmentStatusLiveForm($context, $id);
 	liveAssert(str_contains($form, 'name="options_cdav_status"') && str_contains($form, 'value="TENTATIVE"')
@@ -170,22 +179,36 @@ function appointmentStatusLiveChecks($db, $organizer, $invitee, array $context, 
 	$personalPath = $context['calendar_path'].$uid.'.ics';
 	$personal = new \Sabre\VObject\Component\VCalendar();
 	$personal->add('VEVENT', array('UID' => $uid, 'SUMMARY' => 'Provisional personal appointment', 'STATUS' => 'TENTATIVE',
+		'LOCATION' => 'Office', 'PRIORITY' => 2, 'DESCRIPTION' => 'Personal notes',
 		'DTSTART' => gmdate('Ymd\THis\Z', time() + 86400), 'DTEND' => gmdate('Ymd\THis\Z', time() + 90000)));
 	liveHttpStatus($http('owner', 'PUT', $personalPath, $personal->serialize(), array('If-None-Match: *')), array(201), 'Create a personal provisional appointment');
 	$personal->destroy();
 	$personalId = (int) liveRow($db, 'SELECT fk_object FROM '.MAIN_DB_PREFIX."actioncomm_cdav WHERE sourceuid = '".$db->escape($uid)."'")->fk_object;
 	$events[] = $personalId;
 	$personalGet = $http('owner', 'GET', $personalPath);
-	$personalChange = businessLiveCalendar($personalGet['body'], static function ($event) {
+	$personalChange = businessLiveCalendar($personalGet['body'], static function ($event) use ($rename) {
 		$event->remove('STATUS');
 		$event->remove('X-MICROSOFT-CDO-BUSYSTATUS');
-		$event->SUMMARY = 'Revised personal appointment';
+		$rename($event);
 	});
 	liveHttpStatus($http('owner', 'PUT', $personalPath, $personalChange, array('If-Match: '.$personalGet['headers']['etag'])),
 		array(204, 200), 'Rename a DAV-created provisional appointment from a client without STATUS');
-	liveAssert(appointmentStatusLiveState($http('owner', 'GET', $personalPath))['status'] === 'TENTATIVE'
-		&& liveRow($db, 'SELECT label FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$personalId)->label === 'Revised personal appointment',
-		'The native update of a DAV-created event must preserve its existing state and apply the new title');
+	$updated = $http('owner', 'GET', $personalPath);
+	$personalSql = 'SELECT label,location,priority,note FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$personalId;
+	$values = liveRow($db, $personalSql);
+	liveAssert(appointmentStatusLiveState($updated)['status'] === 'TENTATIVE' && $values->label === 'Provisional personal appointment revised'
+		&& $values->location === 'Office' && (int) $values->priority === 2 && $values->note === 'Personal notes',
+		'The DAV-created appointment lost its state, notes, priority or location during a partial rename');
+	$clear = businessLiveCalendar($updated['body'], static function ($event) {
+		$event->LOCATION = '';
+		$event->DESCRIPTION = '';
+		$event->PRIORITY = 0;
+	});
+	liveHttpStatus($http('owner', 'PUT', $personalPath, $clear, array('If-Match: '.$updated['headers']['etag'],
+		'User-Agent: CalDavSynchronizer/4.7')), array(200, 204), 'Explicit clear on a personal appointment');
+	$values = liveRow($db, $personalSql);
+	liveAssert((string) $values->location === '' && (string) $values->note === '' && (int) $values->priority === 0,
+		'Explicitly clearing the appointment fields must be reflected in the native database');
 	liveAssert($native['status'] === 'TENTATIVE' && $native['uid'] === $initial['uid'] && $native['sequence'] > $initial['sequence']
 		&& invitationLiveProtectedState($db, $id) === $protected, 'Native state edit lost business values or failed to advance the DAV revision');
 	$dates = liveRow($db, 'SELECT datep,datep2 FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id);

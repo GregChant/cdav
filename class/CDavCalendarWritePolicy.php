@@ -350,6 +350,10 @@ class CalendarWritePolicy
 			if (count($current->select($name)) > 1 || count($comparison->select($name)) > 1) {
 				throw new BadRequest('An appointment field is ambiguous: '.$name);
 			}
+			if (!isset($comparison->{$name}) && in_array($name, array('LOCATION', 'DESCRIPTION', 'PRIORITY'), true)) {
+				if (isset($current->{$name})) $comparison->add(clone $current->{$name});
+				continue;
+			}
 			$old = (string) ($current->{$name} ?? '');
 			$value = (string) ($comparison->{$name} ?? '');
 			if ($name === 'TRANSP') $value = self::requestedTransparency($current, $comparison);
@@ -367,7 +371,6 @@ class CalendarWritePolicy
 				$native = $descriptionContext['note_prefix_fields']['original_location'] ?? $old;
 				if ($value !== ($key === 'location' ? $native : $old)) $changes[$key] = $value;
 			} elseif ($name === 'PRIORITY') {
-				if ($value === '' && !isset($comparison->PRIORITY)) $value = '0';
 				if (!preg_match('/^[0-9]$/D', $value)) throw new BadRequest('Priority must be between 0 and 9.');
 				if ((int) $old !== (int) $value) $changes['priority'] = (int) $value;
 			} elseif ($name === 'TRANSP') {
@@ -594,16 +597,17 @@ class CalendarWritePolicy
 	 *
 	 * @param VObject\Component $current Server export for the affected calendar
 	 * @param VObject\Component $incoming Client replacement event
+	 * @param bool $preferOutlookHint Use Outlook's Show As value on private mailbox imports, including retries
 	 * @return string Effective personal RFC transparency
 	 */
-	public static function requestedTransparency($current, $incoming): string
+	public static function requestedTransparency($current, $incoming, bool $preferOutlookHint = false): string
 	{
 		if (count($current->select('TRANSP')) > 1 || count($incoming->select('TRANSP')) > 1) throw new BadRequest('Ambiguous appointment transparency.');
 		$old = strtoupper(trim((string) ($current->TRANSP ?? 'OPAQUE')));
 		$value = strtoupper(trim((string) ($incoming->TRANSP ?? $old)));
 		if (!in_array($value, array('OPAQUE', 'TRANSPARENT'), true)) throw new BadRequest('Unsupported appointment transparency.');
 		$busy = self::outlookBusyStatus($incoming);
-		if ($value === $old && $busy !== self::outlookBusyStatus($current)) {
+		if ($preferOutlookHint || ($value === $old && $busy !== self::outlookBusyStatus($current))) {
 			if ($busy === 'FREE') return 'TRANSPARENT';
 			if ($busy === 'BUSY' || $busy === 'TENTATIVE') return 'OPAQUE';
 		}
@@ -611,12 +615,12 @@ class CalendarWritePolicy
 	}
 
 	/**
-	 * Reconcile the native Agenda percentage with the client's VTODO status.
+	 * Reconcile the native task percentage with the client's VTODO status.
 	 * @param VObject\Component $old Current task
 	 * @param VObject\Component $new Incoming task
 	 * @return int Native percentage
 	 */
-	private static function taskProgress($old, $new): int
+	public static function taskProgress($old, $new): int
 	{
 		$prior = (int) (string) $old->{'PERCENT-COMPLETE'};
 		$percent = isset($new->{'PERCENT-COMPLETE'}) ? (int) (string) $new->{'PERCENT-COMPLETE'} : $prior;
@@ -667,15 +671,15 @@ class CalendarWritePolicy
 	 * Keep Dolibarr's clock times when applying the days from that representation.
 	 * @param VObject\Component $old Authoritative task
 	 * @param VObject\Component $new Comparison task
-	 * @return bool Whether the add-in sent its day-level representation
+	 * @return void
 	 */
-	private static function normalizeTaskDays($old, $new): bool
+	public static function normalizeOutlookTask($old, $new): void
 	{
-		if (isset($new->DURATION) || (!$new->DTSTART->hasTime() && !isset($new->DUE))) return false;
+		if (!isset($new->DTSTART, $old->DTSTART) || isset($new->DURATION) || (!$new->DTSTART->hasTime() && !isset($new->DUE))) return;
 		$zone = new \DateTimeZone(date_default_timezone_get());
 		$start = $new->DTSTART->getDateTime($zone);
-		if ($start->format('His') !== '000000') return false;
-		if (isset($new->DUE) && $new->DUE->getDateTime($zone)->format('His') !== '235959') return false;
+		if ($start->format('His') !== '000000') return;
+		if (isset($new->DUE) && $new->DUE->getDateTime($zone)->format('His') !== '235959') return;
 		foreach (array('DTSTART', 'DUE') as $name) {
 			if (!isset($new->{$name})) continue;
 			$day = $new->{$name}->getDateTime($zone);
@@ -692,7 +696,11 @@ class CalendarWritePolicy
 			$new->remove($name);
 			$new->add($original);
 		}
-		return true;
+		if (isset($old->PRIORITY, $new->PRIORITY) && count($new->select('PRIORITY')) === 1) {
+			$prior = (int) (string) $old->PRIORITY;
+			$outlookPriority = $prior === 0 || $prior === 5 ? 5 : ($prior < 5 ? 1 : 9);
+			if ((string) $new->PRIORITY === (string) $outlookPriority) $new->PRIORITY->setValue($prior);
+		}
 	}
 
 	/**
@@ -726,13 +734,8 @@ class CalendarWritePolicy
 				$new->DESCRIPTION->setValue((string) $old->DESCRIPTION);
 			}
 			$oldDates = self::dates($old);
-			$outlookDays = $outlookSynchronizer && self::normalizeTaskDays($old, $new);
+			if ($outlookSynchronizer) self::normalizeOutlookTask($old, $new);
 			$fields = self::appointmentFieldChanges($old, $new, $descriptionContext);
-			if ($outlookDays && isset($fields['priority'])) {
-				$prior = (int) (string) $old->PRIORITY;
-				$outlookPriority = $prior === 0 || $prior === 5 ? 5 : ($prior < 5 ? 1 : 9);
-				if ($fields['priority'] === $outlookPriority) unset($fields['priority']);
-			}
 			$prior = (int) (string) $old->{'PERCENT-COMPLETE'};
 			$percent = self::taskProgress($old, $new);
 			if ($percent !== $prior) $fields['percentage'] = $percent;

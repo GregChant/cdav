@@ -112,6 +112,13 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.5.3 preserves an appointment’s location, notes and priority when a
+calendar client omits those fields during a rename. Partial updates to native
+project tasks also preserve progress, priority and deadlines, including tasks
+with no deadline. A participant who accepted an external invitation can mark
+their own time free or busy without changing anyone’s response. CI exercises
+these client updates over HTTP against a disposable Dolibarr and MariaDB installation.
+
 Version 6.5.2 preserves the exact task times and priorities sent by other
 CalDAV clients when they share a calendar with Outlook. Reopening a task in
 Dolibarr clears the completion date from its previous cycle. A client that

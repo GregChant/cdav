@@ -7,6 +7,77 @@ if (PHP_SAPI !== 'cli') {
 }
 
 /**
+ * Round-trip the two native project-task projections on the same assigned record.
+ * @param DoliDB $db Fixture database
+ * @param User $actor Fixture user with task write rights
+ * @param array $context Native credentials and DAV base
+ * @param Task $task Existing assigned task on a visible project
+ * @param array $paths Native calendar resource paths, PE followed by PT
+ * @return void
+ */
+function businessLiveProjectTaskWrites($db, $actor, array $context, $task, array $paths): void
+{
+	liveAssert($task->fetch((int) $task->id) > 0, 'Unable to fetch the native project task');
+	$task->date_end = null;
+	$task->priority = 2;
+	$task->progress = 60;
+	$task->description = '<p>Keep these <strong>project task notes</strong></p>';
+	liveAssert($task->update($actor) > 0, 'Unable to prepare the project task without a deadline');
+	$http = static function ($method, $path, $body = null, $etag = null) use ($context) {
+		$headers = array('Content-Type: text/calendar; charset=utf-8');
+		if ($etag !== null) $headers[] = 'If-Match: '.$etag;
+		return liveHttp($context['base_url'], $context['login'], $context['password'], $method, $path, $body, $headers);
+	};
+	$read = static function () use ($db, $task) {
+		return (array) liveRow($db, 'SELECT label, dateo, datee, description, priority, progress, fk_projet, fk_task_parent FROM '
+			.MAIN_DB_PREFIX.'projet_task WHERE rowid = '.((int) $task->id));
+	};
+	$native = $read();
+	$etags = array();
+	foreach (array('VEVENT', 'VTODO') as $index => $type) {
+		$get = $http('GET', $paths[$index]);
+		liveHttpStatus($get, array(200), 'Project task projection before sparse replay');
+		$calendar = \Sabre\VObject\Reader::read($get['body']);
+		$item = $calendar->{$type};
+		liveAssert(!isset($item->DUE) && !isset($item->DTEND), 'Project task export invented a deadline');
+		foreach (array('SUMMARY', 'DESCRIPTION', 'PRIORITY', 'PERCENT-COMPLETE') as $name) $item->remove($name);
+		if ($type === 'VEVENT') $item->add('DTEND', $item->DTSTART->getDateTime());
+		else $item->remove('DTSTART'); // A VTODO client can update the state without sending either date.
+		$etag = $get['headers']['etag'];
+		liveHttpStatus($http('PUT', $paths[$index], $calendar->serialize(), $etag), array(200, 204), 'Sparse project task projection replay');
+		$calendar->destroy();
+		$again = $http('GET', $paths[$index]);
+		liveAssert($again['headers']['etag'] === $etag && $read() === $native, 'The sparse replay changed native fields or the project task ETag');
+		$etags[] = $etag;
+	}
+	$get = $http('GET', $paths[1]);
+	$calendar = \Sabre\VObject\Reader::read($get['body']);
+	$calendar->VTODO->STATUS = 'COMPLETED';
+	$calendar->VTODO->remove('PERCENT-COMPLETE');
+	$calendar->VTODO->PRIORITY = 3;
+	$calendar->VTODO->DESCRIPTION = '';
+	$deadline = $calendar->VTODO->DTSTART->getDateTime()->modify('+2 hours');
+	$calendar->VTODO->add('DUE', $deadline);
+	liveHttpStatus($http('PUT', $paths[1], $calendar->serialize(), $etags[1]), array(200, 204), 'Explicit project task completion, priority, deadline and cleared note');
+	$calendar->destroy();
+	$after = $read();
+	liveAssert((int) $after['progress'] === 100 && (int) $after['priority'] === 3 && (string) $after['description'] === ''
+		&& (int) $db->jdate($after['datee']) === $deadline->getTimestamp() && $after['fk_projet'] === $native['fk_projet']
+		&& $after['fk_task_parent'] === $native['fk_task_parent'], 'The explicit PT edit did not update the intended native project-task fields');
+	$get = $http('GET', $paths[0]);
+	$calendar = \Sabre\VObject\Reader::read($get['body']);
+	$calendar->VEVENT->SUMMARY = $context['prefix'].' Follow up';
+	foreach (array('DTEND', 'PRIORITY', 'DESCRIPTION') as $name) $calendar->VEVENT->remove($name);
+	$payload = $calendar->serialize();
+	$calendar->destroy();
+	liveHttpStatus($http('PUT', $paths[0], $payload, $etags[0]), array(412), 'The previous PE revision became stale after a PT edit');
+	liveHttpStatus($http('PUT', $paths[0], $payload, $get['headers']['etag']), array(200, 204), 'Rename the project task from the sparse PE projection');
+	$after['label'] = $context['prefix'].' Follow up';
+	liveAssert($read() === $after, 'Renaming from PE lost the deadline, progress, priority or parent project set from PT');
+	liveOk('Both native project-task projections retain omitted fields and deadlines across sparse CalDAV writes');
+}
+
+/**
  * Verify native project scope independently from an Agenda assignment.
  * @param DoliDB $db Native database
  * @param User $testUser Fixture creator with explicit project rights
@@ -228,6 +299,7 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 		liveAssert((string) liveRow($db, 'SELECT label FROM '.MAIN_DB_PREFIX.'projet_task WHERE rowid = '.((int) $task->id))->label === $newTitle,
 			'Project task echo stored the generated prefix in the native title');
 		liveOk('Project task title preserves brackets and strips only the generated project prefix');
+		businessLiveProjectTaskWrites($db, $testUser, $context, $task, $taskPaths);
 		require_once __DIR__.'/agenda_todo_live_cases.php';
 		agendaTodoLiveCases($db, $testUser, $admin, $context, $project, $task);
 	} finally {

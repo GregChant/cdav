@@ -19,6 +19,12 @@ entière**. Un changement de lieu porte sur l’adresse de cette visite. Lorsque
 le lieu est vide, l’agenda peut afficher l’adresse du tiers à titre indicatif.
 Les coordonnées du tiers se modifient sur sa fiche Dolibarr.
 
+Depuis la version 6.5.3, si le client renvoie seulement le nouveau titre et
+les dates, le lieu, les notes et la priorité conservent leur valeur dans Dolibarr.
+Pour effacer le lieu ou les notes, le client doit transmettre le champ vide.
+Une priorité iCalendar de `0` retire la priorité. Les sections générées à partir
+du projet, de la tâche ou du tiers sont reconstruites à la lecture.
+
 Le réglage **Libre/Occupé** porte sur l’affectation au calendrier concerné.
 Dans le corps du rendez-vous, modifier les notes de la visite en laissant les
 sections tâche, client, projet et documents telles qu’affichées. Les participants,
@@ -43,6 +49,14 @@ propre avancement.
 Quand Outlook renvoie une tâche déjà terminée avec les mêmes jours de début
 et de fin, CDav conserve les heures enregistrées dans Dolibarr. Un tel renvoi
 conserve aussi la révision du rendez-vous si les autres champs sont inchangés.
+
+### Tâches du module Projets
+
+Une tâche de projet peut aussi être publiée directement dans le calendrier,
+comme tâche ou comme événement selon la configuration du module. La renommer
+depuis un client qui omet l’avancement, la priorité ou l’échéance conserve ces
+valeurs dans le projet. Une tâche sans échéance peut ainsi rester ouverte sans
+qu’une date de fin lui soit ajoutée à chaque synchronisation.
 
 ### Invitations et rappels
 

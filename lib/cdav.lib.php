@@ -14,7 +14,7 @@ require_once __DIR__.'/cdav_transport.lib.php';
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-agenda-todo-v12';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-project-task-v13';
 
 	/** Series ID written by the native Agenda form when saving separate occurrences. */
 	private const AGENDA_SERIES_ID_PATTERN = '^[0-9]{14}$';
@@ -1462,17 +1462,15 @@ class CdavLib
 			$caldata.="SUMMARY:".$this->escapeICalendarText(trim($summary))."\n";
 			$caldata.="URL:".dol_buildpath("/projet/tasks/task.php?id=".$obj->id."&withproject=".$obj->fk_projet,2)."\n";
 			$caldata.="LOCATION:".$this->cleanAndEscapeICalendarText($location)."\n";
-			$caldata.="PRIORITY:".$obj->priority."\n";
+			$caldata.="PRIORITY:".((int) $obj->priority)."\n";
 
 			$caldata.="DTSTART;TZID=".$timezone.":".strtr($obj->dateo,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 			if($type=='VEVENT')
 			{
-				if(trim($obj->datee)>trim($obj->dateo))
+				if(trim((string) $obj->datee)>trim((string) $obj->dateo))
 					$caldata.="DTEND;TZID=".$timezone.":".strtr($obj->datee,array(" "=>"T", ":"=>"", "-"=>""))."\n";
-				else
-					$caldata.="DTEND;TZID=".$timezone.":".strtr($obj->dateo,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 			}
-			elseif(trim($obj->datee)!='')
+			elseif(trim((string) $obj->datee)!='')
 				$caldata.="DUE;TZID=".$timezone.":".strtr($obj->datee,array(" "=>"T", ":"=>"", "-"=>""))."\n";
 
 			$caldata.="CLASS:PUBLIC\n";

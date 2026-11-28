@@ -25,9 +25,10 @@ class InvitationPolicy
 	 * @param bool $allowExternalImport Backend-verified private DAV copy of an external invitation
 	 * @param array $descriptionContext Server-generated note boundaries for native organizer edits
 	 * @param bool $calendarPut Whether this is a resource PUT that can change the attendee's own availability
+	 * @param bool $outlookSynchronizer Whether the verified private copy is being written by Outlook's CalDAV add-in
 	 * @return array<string,mixed>|null Canonical plan, or null for a non-invitation
 	 */
-	public static function plan($current, $incoming, $actorEmail, $protectBusiness = true, $allowExternalImport = false, array $descriptionContext = array(), bool $calendarPut = false)
+	public static function plan($current, $incoming, $actorEmail, $protectBusiness = true, $allowExternalImport = false, array $descriptionContext = array(), bool $calendarPut = false, bool $outlookSynchronizer = false)
 	{
 		$before = self::read($current);
 		$after = null;
@@ -80,18 +81,25 @@ class InvitationPolicy
 			if ($allowExternalImport && !$protectBusiness) {
 				$personalDecline = isset($newAttendees[$actor]) && self::partstat($newAttendees[$actor]) === 'DECLINED'
 					&& self::partstat($oldAttendees[$actor]) !== 'DECLINED';
-				if (self::status($new) === 'CANCELLED' && self::status($old) !== 'CANCELLED' && !$personalDecline) {
-					return self::externalImportPlan($before, $after, $old, $new, $newAttendees, $actor, $organizer, $incomingSequence);
-				}
-				try {
-					$reply = self::replyPlan($before, $after, $old, $new, $oldAttendees, $newAttendees, $actor, $organizer, $sequence);
-					if ($incomingSequence > $sequence + 1) {
-						throw new PreconditionFailed('This personal response does not match the organizer revision.', 'If-Match');
+				$accepted = $calendarPut && isset($newAttendees[$actor]) && self::partstat($oldAttendees[$actor]) === 'ACCEPTED'
+					&& self::partstat($newAttendees[$actor]) === 'ACCEPTED' && self::rsvp($oldAttendees[$actor]) === self::rsvp($newAttendees[$actor]);
+				$stateUpdate = isset($new->STATUS) && self::status($new) !== self::status($old)
+					&& ((self::status($new) === 'CANCELLED' && !$personalDecline) || ($accepted && $incomingSequence > $sequence));
+				if (!$stateUpdate) {
+					try {
+						$reply = self::replyPlan($before, $after, $old, $new, $oldAttendees, $newAttendees, $actor, $organizer, $sequence,
+							$accepted, $outlookSynchronizer, $accepted ? $descriptionContext : array());
+						if ($incomingSequence > $sequence + 1) throw new PreconditionFailed('This personal response does not match the organizer revision.', 'If-Match');
+						return $reply;
+					} catch (Forbidden $exception) {
+						// A mailbox update can include a new subject, time or participant list from the external organizer.
 					}
-					return $reply;
-				} catch (Forbidden $exception) {
-					return self::externalImportPlan($before, $after, $old, $new, $newAttendees, $actor, $organizer, $incomingSequence);
 				}
+				$import = self::externalImportPlan($before, $after, $old, $new, $newAttendees, $actor, $organizer, $incomingSequence);
+				if ($accepted && $import['kind'] === 'organizer') {
+					$import['personal_transparency'] = (int) (CalendarWritePolicy::requestedTransparency($old, $new, $outlookSynchronizer) === 'OPAQUE');
+				}
+				return $import;
 			}
 			return self::replyPlan($before, $after, $old, $new, $oldAttendees, $newAttendees, $actor, $organizer, $sequence, $calendarPut);
 		} finally {
@@ -138,11 +146,34 @@ class InvitationPolicy
 			$old->SEQUENCE = $sequence;
 			$plan = self::result('cancel', $before->serialize(), true, $old, $organizer, $sequence, false, null, null, false);
 		} else {
-			$new->SEQUENCE = $sequence;
+			if (isset($new->SEQUENCE)) $new->SEQUENCE->setValue($sequence);
+			else $new->SEQUENCE = $sequence;
 			$plan = self::result('organizer', $after->serialize(), true, $new, $organizer, $sequence, false, null, null, $oldDates !== $newDates);
 		}
 		$plan['external_import'] = true;
 		return $plan;
+	}
+
+	/**
+	 * Compare a validated private mailbox PUT to the last organizer message.
+	 * Older imports reinserted SEQUENCE after the other properties when storing it.
+	 *
+	 * @param string $stored Last imported representation
+	 * @param string $incoming Validated mailbox representation
+	 * @return bool Whether repeating the message would overwrite a subsequent local choice
+	 */
+	public static function sameImportedRevision(string $stored, string $incoming): bool
+	{
+		if ($stored === $incoming) return true;
+		$calendar = self::read($incoming);
+		try {
+			if ($stored === $calendar->serialize()) return true;
+			$event = self::master(self::events($calendar));
+			$event->SEQUENCE = self::sequence($event);
+			return $calendar->serialize() === $stored;
+		} finally {
+			$calendar->destroy();
+		}
 	}
 
 	/**
@@ -158,9 +189,11 @@ class InvitationPolicy
 	 * @param string $organizer Organizer email
 	 * @param int $sequence Authoritative organizer revision
 	 * @param bool $calendarPut Whether independent personal availability changes are allowed
+	 * @param bool $preferOutlookHint Use the personal Show As value of an Outlook mailbox copy
+	 * @param array $descriptionContext Trusted note boundaries of the private mailbox copy
 	 * @return array<string,mixed> Canonical personal response
 	 */
-	private static function replyPlan($before, $after, $old, $new, array $oldAttendees, array $newAttendees, $actor, $organizer, $sequence, bool $calendarPut = false)
+	private static function replyPlan($before, $after, $old, $new, array $oldAttendees, array $newAttendees, $actor, $organizer, $sequence, bool $calendarPut = false, bool $preferOutlookHint = false, array $descriptionContext = array())
 	{
 		if (array_keys($oldAttendees) !== array_keys($newAttendees)) {
 			throw new Forbidden('An attendee cannot add, remove or replace invitation participants.');
@@ -178,7 +211,7 @@ class InvitationPolicy
 		$oldTransparency = self::transparency($old);
 		$availability = null;
 		if ($calendarPut && !$responseChanged && $partstat !== 'DECLINED' && self::status($old) !== 'CANCELLED') {
-			$requested = (int) (CalendarWritePolicy::requestedTransparency($old, $new) === 'OPAQUE');
+			$requested = (int) (CalendarWritePolicy::requestedTransparency($old, $new, $preferOutlookHint) === 'OPAQUE');
 			if ($requested !== $oldTransparency) $availability = $requested;
 		} elseif ($incomingTransparency === $personal && $oldTransparency !== $personal) {
 			$changed = true;
@@ -203,9 +236,17 @@ class InvitationPolicy
 			self::copyProperty($test, $old, 'STATUS');
 			self::copyProperty($test, $old, 'TRANSP');
 			self::copyAlarms($test, $old);
+			if ($descriptionContext && !$responseChanged) {
+				foreach (array('DESCRIPTION', 'LOCATION', 'PRIORITY') as $name) {
+					if (!isset($test->{$name})) self::copyProperty($test, $old, $name);
+				}
+			}
 			// Invitation bodies sent by email/inbox need not contain the CRM envelope.
 			// A real personal response never imports its description into native notes.
-			if ($responseChanged) self::copyProperty($test, $old, 'DESCRIPTION');
+			if ($responseChanged || ($descriptionContext && count($test->select('DESCRIPTION')) <= 1
+				&& CalendarWritePolicy::nativeNoteForReplacement($descriptionContext, (string) ($test->DESCRIPTION ?? '')) === $descriptionContext['native_note'])) {
+				self::copyProperty($test, $old, 'DESCRIPTION');
+			}
 			self::normalizeAttendeesForComparison($test);
 			self::normalizeAttendeesForComparison($base);
 			$dates = CalendarWritePolicy::assertMoveOnly($baseline->serialize(), $comparison->serialize());

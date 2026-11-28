@@ -87,19 +87,92 @@ foreach (array('ev' => 'VEVENT', 'pe' => 'VEVENT', 'pt' => 'VTODO', 'fi' => 'VEV
 $address = calendarFactorizationInvoke($lib, 'calendarAddress', array("Route 1\nBâtiment B", '1000', 'Lausanne', 'Suisse'));
 calendarFactorizationAssert($address === 'Route 1 Bâtiment B, 1000 Lausanne, Suisse', 'Native postal formatting must preserve country and normalize street line breaks');
 $backend = (new ReflectionClass(Sabre\CalDAV\Backend\Dolibarr::class))->newInstanceWithoutConstructor();
-$data = array('label' => 'Updated task', 'start' => 1000, 'end' => 2000, 'fullday' => 0,
-	'priority' => 3, 'note' => '<p>Exact native HTML note</p>', 'percent' => 80);
-foreach (array('pe', 'pt') as $source) {
-	$task = (object) array('progress' => 35, 'fk_project' => 8, 'contacts' => array(19));
-	calendarFactorizationInvoke($backend, '_applyProjectTaskData', array($task, $data + array('elem_source' => $source)));
-	calendarFactorizationAssert($task->progress === ($source === 'pt' ? 80 : 35), 'Only VTODO may update native task progress');
-	calendarFactorizationAssert($task->date_start === 1000 && $task->date_end === 2000 && $task->description === $data['note']
-		&& $task->fk_project === 8 && $task->contacts === array(19), 'Common Task mapping must preserve dates, rich notes and native project/contact links');
-	calendarFactorizationInvoke($backend, '_applyProjectTaskData', array($task, array_replace($data, array('elem_source' => $source, 'fullday' => 1))));
-	calendarFactorizationAssert($task->date_end === 1999, 'All-day exclusive DAV ends must remain native inclusive task ends');
-	calendarFactorizationInvoke($backend, '_applyProjectTaskData', array($task, array_replace($data, array('elem_source' => $source, 'end' => 500))));
-	calendarFactorizationAssert($task->date_end === $task->date_start, 'Task mapping must never persist an end before its start');
+foreach (array('pe' => 'VEVENT', 'pt' => 'VTODO') as $source => $type) {
+	$due = $type === 'VTODO' ? 'DUE' : 'DTEND';
+	$task = (object) array('label' => 'Native task', 'description' => '<p>Keep the formatting</p>', 'progress' => 35,
+		'priority' => 2, 'date_start' => strtotime('2026-11-20 09:00'), 'date_end' => null, 'fk_project' => 8, 'contacts' => array(19));
+	$selected = clone $row;
+	$selected->elem_source = $source;
+	$selected->datee = null;
+	$selected->priority = null;
+	$fragment = $lib->toVCalendar(7, $selected, false, true);
+	calendarFactorizationAssert(!str_contains($fragment, $due.';'), 'A project task without a native deadline must omit the calendar endpoint.');
+	calendarFactorizationAssert(str_contains($fragment, "\nPRIORITY:0\n"), 'A native NULL priority must export as unspecified in both project task projections.');
+	$calendar = new Sabre\VObject\Component\VCalendar();
+	$item = $calendar->add($type, array('UID' => '42-'.$source.'-'.CDAV_URI_KEY, 'DTSTART' => '20261120T080000Z', 'SUMMARY' => 'Native task'));
+	if ($type === 'VTODO') {
+		$item->STATUS = 'IN-PROCESS';
+		$item->{'PERCENT-COMPLETE'} = 35;
+	}
+	$before = $calendar->serialize();
+	$write = static function (array $data = array()) use ($backend, $task, $source, $before, $calendar) {
+		return calendarFactorizationInvoke($backend, '_applyProjectTaskData', array($task, $data + array('elem_source' => $source), $before, $calendar->serialize()));
+	};
+	$item->remove('SUMMARY');
+	if ($type === 'VTODO') $item->remove('PERCENT-COMPLETE');
+	else $item->DTEND = '20261120T080000Z'; // Historical PE echo repeated DTSTART when the deadline was absent.
+	$task->priority = null;
+	$legacy = str_replace("END:".$type, "PRIORITY:\r\nEND:".$type, $calendar->serialize());
+	calendarFactorizationAssert(!calendarFactorizationInvoke($backend, '_applyProjectTaskData', array($task, array('elem_source' => $source), $before, $legacy))
+		&& $task->priority === null, 'A legacy echo containing an empty priority must leave the unspecified native priority intact.');
+	$task->priority = 2;
+	calendarFactorizationAssert(!$write() && $task->date_end === null && $task->progress === 35 && $task->priority === 2
+		&& $task->description === '<p>Keep the formatting</p>', 'A sparse project-task replay must preserve native fields and avoid Task::update.');
+	$item->SUMMARY = 'Updated task';
+	$item->DESCRIPTION = 'Updated native note';
+	$item->PRIORITY = 0;
+	$item->{$due} = '20261120T093000Z';
+	if ($type === 'VTODO') $item->{'PERCENT-COMPLETE'} = 80;
+	calendarFactorizationAssert($write(array('label' => 'Updated task', 'note' => 'Updated native note'))
+		&& $task->date_end === strtotime('2026-11-20 10:30') && $task->label === 'Updated task' && $task->priority === 0
+		&& $task->description === 'Updated native note' && $task->progress === ($source === 'pt' ? 80 : 35)
+		&& $task->fk_project === 8 && $task->contacts === array(19), 'Project task edits must apply only to editable native fields.');
+	$item->remove('SUMMARY');
+	$item->remove($due);
+	$item->remove('PERCENT-COMPLETE');
+	$item->remove('STATUS');
+	$item->DESCRIPTION = '';
+	calendarFactorizationAssert($write(array('note' => '')) && $task->description === '' && $task->date_end === strtotime('2026-11-20 10:30'),
+		'An explicit note clear must retain an omitted deadline.');
+	$item->remove('DESCRIPTION');
+	$item->remove('DTSTART');
+	$item->add('DTSTART', '20261120', array('VALUE' => 'DATE'));
+	$item->add($due, '20261121', array('VALUE' => 'DATE'));
+	$write();
+	calendarFactorizationAssert($task->date_end === strtotime('2026-11-21') - (int) ($source === 'pe'),
+		'A VEVENT ends before DTEND while the VTODO remains due on its specified day.');
+	$calendar->destroy();
 }
+
+$task = (object) array('date_start' => strtotime('2026-11-20 09:00'), 'date_end' => strtotime('2026-11-20 16:00'), 'priority' => 2);
+$calendar = new Sabre\VObject\Component\VCalendar();
+$item = $calendar->add('VTODO', array('UID' => '42-pt-'.CDAV_URI_KEY, 'DTSTART' => '20261120T080000Z', 'DUE' => '20261120T150000Z', 'PRIORITY' => 2));
+$current = $calendar->serialize();
+$apply = static function () use ($backend, $task, $current, $calendar) {
+	return calendarFactorizationInvoke($backend, '_applyProjectTaskData', array($task, array('elem_source' => 'pt'), $current, $calendar->serialize()));
+};
+$item->DTSTART = '20261120T000000';
+$item->DUE = '20261120T235959';
+$item->PRIORITY = 1;
+$outlook = new ReflectionProperty($backend, 'outlookSynchronizer');
+$outlook->setValue($backend, true);
+calendarFactorizationAssert(!$apply() && $task->priority === 2 && $task->date_start === strtotime('2026-11-20 09:00')
+	&& $task->date_end === strtotime('2026-11-20 16:00'), 'The Outlook day-level VTODO replay must retain precise native project task times and priority.');
+$outlook->setValue($backend, false);
+calendarFactorizationAssert($apply() && $task->priority === 1 && $task->date_start === strtotime('2026-11-20')
+	&& $task->date_end === strtotime('2026-11-20 23:59:59'), 'Standard project VTODO updates must apply literal priority and local times.');
+$item->remove('DUE');
+$item->DURATION = 'PT90M';
+calendarFactorizationAssert($apply() && $task->date_start === strtotime('2026-11-20') && $task->date_end === strtotime('2026-11-20 01:30'),
+	'A relative project-task duration must change only its deadline.');
+$item->PRIORITY = 10;
+try {
+	$apply();
+	throw new RuntimeException('An out-of-range project task priority was applied.');
+} catch (Sabre\DAV\Exception\BadRequest $expected) {
+	calendarFactorizationAssert($task->priority === 1, 'An invalid priority must leave native fields intact.');
+}
+$calendar->destroy();
 
 $hook = new ActionsCDav();
 $labels = $descriptions = $durations = array();

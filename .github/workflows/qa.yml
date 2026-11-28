@@ -14,6 +14,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  calendar-http:
+    name: Calendar clients over HTTP / MariaDB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout CDav
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: module
+          persist-credentials: false
+      - name: Checkout Dolibarr 24.0.0
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Dolibarr/dolibarr
+          ref: 769c7db907099643558e77d7002c109cfda919e5
+          path: dolibarr
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          extensions: ctype, curl, dom, fileinfo, gd, iconv, intl, mbstring, mysqli, xml, xmlreader, xmlwriter
+          coverage: none
+      - name: Install private database tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends mariadb-server-core mariadb-client rsync
+      - name: Install disposable Dolibarr and run calendar client scenarios
+        working-directory: module
+        env:
+          DOLIBARR_ROOT: ${{ github.workspace }}/dolibarr/htdocs
+        run: bash tests/ci-calendar-http.sh
   duplication:
     name: Production duplication
     runs-on: ubuntu-24.04

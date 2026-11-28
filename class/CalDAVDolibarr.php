@@ -572,6 +572,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$createdAttachments = array();
 		try {
 			$this->_lockCalendarOwner((int) $calendarId);
+			$this->_lockProjectTask($internalObject);
 			$this->_findActionCommByUri((string) $objectUri, true);
 			$previousSchedulingObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 			// One occurrence is stored. Recurrence rules remain attached to that DAV object.
@@ -595,11 +596,6 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			{
 				$oid = (int) $internalObject['id'];
 				$elem_source = $internalObject['source'];
-				$sql = "SELECT rowid FROM ".MAIN_DB_PREFIX."projet_task WHERE rowid = ".$oid." AND entity IN (".getEntity('project').")";
-				$result = $this->db->query($sql);
-				if ($result===false || !$this->db->fetch_object($result)) {
-					throw new \Sabre\DAV\Exception\NotFound('Dolibarr project task not found');
-				}
 			}
 			elseif ($internalObject !== null && $internalObject['source'] === 'fi')
 			{
@@ -814,7 +810,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
 					'id' => (int) $calendarData['id'], 'previous_data' => (string) $previous['calendardata'],
 					'canonical_data' => (string) $committed['calendardata'], 'changed' => $invitationChange['_invitation_plan']['changed']
-						&& $invitationChange['_invitation_plan']['kind'] !== 'availability',
+						&& $invitationChange['_invitation_plan']['kind'] !== 'availability' && !$invitationChange['_invitation_plan']['external_import'],
 					'omit_location' => ($committed['_cdav_description']['note_prefix_fields']['original_location'] ?? '') === '',
 					'owner_principal' => $invitationChange['_invitation_plan']['delegated_principal'] ?? 'principals/'.(string) $this->user->login);
 				$this->managedAttachmentStore->discardCreatedFiles($removedAttachments);
@@ -842,8 +838,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($summaryPrefix !== '' && ($calendarData['label'] === $summaryPrefix || str_starts_with($calendarData['label'], $summaryPrefix.' '))) {
 					$calendarData['label'] = ltrim(substr($calendarData['label'], strlen($summaryPrefix)));
 				}
-				$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($currentObject['_cdav_description'], $calendarData['label'], $calendarData['location']);
-				$calendarData['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($currentObject['_cdav_description'], $calendarData['description'], $replacementPrefix);
+				$calendarData['note'] = $this->_nativeNoteForUpdate($currentObject['_cdav_description'], $calendarData);
 				$calendarData['_native_note_resolved'] = true;
 			}
 			$protectedMove = $invitationChange;
@@ -866,8 +861,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					|| !in_array((int) $task->entity, array_map('intval', explode(',', getEntity('project'))), true)) {
 					throw new \Sabre\DAV\Exception\NotFound('Dolibarr project task not found');
 				}
-				$this->_applyProjectTaskData($task, $calendarData);
-				if ($task->update($this->user) <= 0) {
+				$changed = $this->_applyProjectTaskData($task, $calendarData, (string) $currentObject['calendardata'], $origCalendarData);
+				if ($changed && $task->update($this->user) <= 0) {
 					throw new \Sabre\DAV\Exception('Unable to update the Dolibarr project task: '.$task->error);
 				}
 			}
@@ -1217,7 +1212,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			}
 			try {
 				$invitation = \Dolibarr\CDav\InvitationPolicy::plan((string) $existing['calendardata'], (string) $calendarData,
-					(string) $this->user->email, $protected, $externalImport, $descriptionContext, true);
+					(string) $this->user->email, $protected, $externalImport, $descriptionContext, true, $this->outlookSynchronizer);
 			} catch (Forbidden $exception) {
 				$organizer = $this->_hasAgendaRight('allactions', 'write')
 					? $this->_nativeOrganizerIdentity((int) $existing['id'], (string) $existing['calendardata']) : null;
@@ -1227,6 +1222,16 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				if ($invitation !== null) $invitation['delegated_principal'] = $organizer['principal'];
 			}
 			if ($invitation !== null) {
+				if ($externalImport && in_array($invitation['kind'], array('availability', 'organizer'), true) && $this->_schedulingTableAvailable()) {
+					// The last imported mailbox revision can be retried after a personal Show As override.
+					$result = $this->db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.((int) $existing['id']));
+					if (!$result) throw new \Sabre\DAV\Exception('Unable to read the last imported invitation.');
+					$row = $this->db->fetch_object($result);
+					if ($row && \Dolibarr\CDav\InvitationPolicy::sameImportedRevision((string) $row->calendardata, (string) $calendarData)) {
+						$invitation['kind'] = 'noop';
+						$invitation['changed'] = false;
+					}
+				}
 				if (!$protected && $personalRemindersEnabled && !$invitation['actor_is_organizer']) {
 					// Attendee comparisons ignore personal alarms even when shared business fields are editable.
 					list(, $reminders) = \Dolibarr\CDav\CalendarWritePolicy::personalReminderChange($existing['calendardata'], $calendarData);
@@ -1279,8 +1284,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$incoming = null;
 		if (isset($existing['_cdav_description'])) {
 			$incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
-			$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($existing['_cdav_description'], $incoming['label'], $incoming['location']);
-			\Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($existing['_cdav_description'], $incoming['description'], $replacementPrefix);
+			$this->_nativeNoteForUpdate($existing['_cdav_description'], $incoming);
 		}
 		if ($existing !== null && ($internal === null || $internal['source'] === 'ev')) {
 			if ($incoming === null) $incoming = $this->_parseData((string) $calendarData, (int) $calendarId);
@@ -1644,6 +1648,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	private function _lockAndResolveCalendarObject($calendarId, $objectUri)
 	{
 		$this->_lockCalendarOwner((int) $calendarId);
+		$this->_lockProjectTask($this->_parseInternalObjectUri($objectUri));
 		$lockedEventId = $this->_findActionCommByUri((string) $objectUri, true, (int) $calendarId);
 		$resolved = $this->_resolveCalendarObject($calendarId, $objectUri);
 		if ($resolved === null) throw new \Sabre\DAV\Exception\NotFound('Calendar object not found');
@@ -1651,6 +1656,20 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			throw new \Sabre\DAV\Exception\PreconditionFailed('The native appointment identity changed while its row was being locked', 'If-Match');
 		}
 		return $resolved;
+	}
+
+	/**
+	 * Lock the native row shared by both task projections and their calendar owners.
+	 * @param array|null $internal Identity from the requested DAV resource name
+	 * @return void
+	 */
+	private function _lockProjectTask(?array $internal): void
+	{
+		if ($internal === null || !in_array($internal['source'], array('pe', 'pt'), true)) return;
+		$result = $this->db->query('SELECT rowid FROM '.MAIN_DB_PREFIX.'projet_task WHERE rowid = '.((int) $internal['id'])
+			.' AND entity IN ('.getEntity('project').') FOR UPDATE');
+		if (!$result) throw new \Sabre\DAV\Exception('Unable to lock the native project task.');
+		if (!$this->db->fetch_object($result)) throw new \Sabre\DAV\Exception\NotFound('Dolibarr project task not found');
 	}
 
 	/**
@@ -1688,21 +1707,86 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	}
 
 	/**
-	 * Map calendar fields before the existing native Task::update call.
-	 * Only the VTODO representation owns progress; VEVENT preserves native progress.
+	 * Merge explicitly supplied calendar fields into a locked project task.
 	 *
 	 * @param object $task Fetched native project task
 	 * @param array<string,mixed> $data Validated calendar values
-	 * @return void
+	 * @param string $current Current projection of the native task
+	 * @param string $incoming Submitted projection before generic date defaults
+	 * @return bool Whether the native task needs updating
 	 */
-	private function _applyProjectTaskData($task, array $data)
+	private function _applyProjectTaskData($task, array $data, string $current, string $incoming): bool
 	{
-		$task->label = (string) $data['label'];
-		$task->date_start = (int) $data['start'];
-		$task->date_end = max($task->date_start, (int) $data['end'] - (!empty($data['fullday']) ? 1 : 0));
-		$task->priority = (int) $data['priority'];
-		$task->description = (string) $data['note'];
-		if ($data['elem_source'] === 'pt') $task->progress = (int) $data['percent'];
+		$before = VObject\Reader::read($current);
+		$after = null;
+		try {
+			$after = VObject\Reader::read($incoming);
+			$type = $data['elem_source'] === 'pt' ? 'VTODO' : 'VEVENT';
+			if (!isset($before->{$type}) || count($after->select($type)) !== 1) throw new Forbidden('The project task component type must be preserved.');
+			$old = $before->{$type};
+			$new = $after->{$type};
+			if (CalendarUid::read($old) !== CalendarUid::read($new)) throw new Forbidden('The native project task UID cannot be changed.');
+			$fields = array();
+			if (isset($new->SUMMARY)) $fields['label'] = $data['label'];
+			if (isset($new->DESCRIPTION)) $fields['description'] = $data['note'];
+			if ($type === 'VTODO') {
+				if ($this->outlookSynchronizer) \Dolibarr\CDav\CalendarWritePolicy::normalizeOutlookTask($old, $new);
+				if (isset($new->STATUS) || isset($new->{'PERCENT-COMPLETE'})) $fields['progress'] = \Dolibarr\CDav\CalendarWritePolicy::taskProgress($old, $new);
+			}
+			if (isset($new->PRIORITY)) {
+				$priority = (string) $new->PRIORITY;
+				if (count($new->select('PRIORITY')) !== 1 || !preg_match('/^[0-9]$/D', $priority)) {
+					throw new \Sabre\DAV\Exception\BadRequest('A project task must have a single priority between 0 and 9.');
+				}
+				$fields['priority'] = (int) $priority;
+			}
+			$zone = new \DateTimeZone(date_default_timezone_get());
+			$start = isset($new->DTSTART) ? $new->DTSTART->getDateTime($zone) : null;
+			if ($start !== null) $fields['date_start'] = $start->getTimestamp();
+			$endpoint = $type === 'VTODO' ? 'DUE' : 'DTEND';
+			if (isset($new->{$endpoint})) {
+				$end = $new->{$endpoint}->getDateTime($zone)->getTimestamp();
+				// Older PE exports repeated DTSTART in DTEND for tasks without a deadline.
+				if ($type !== 'VEVENT' || !empty($task->date_end) || $start === null || $end !== $start->getTimestamp()) {
+					$fields['date_end'] = $end - (int) ($type === 'VEVENT' && !$new->{$endpoint}->hasTime());
+				}
+			} elseif (isset($new->DURATION) && $start !== null) {
+				$end = (clone $start)->add(VObject\DateTimeParser::parse((string) $new->DURATION));
+				$fields['date_end'] = $end->getTimestamp() - (int) ($type === 'VEVENT' && !$new->DTSTART->hasTime());
+			}
+			$end = $fields['date_end'] ?? $task->date_end;
+			if ($end && $end < ($fields['date_start'] ?? $task->date_start)) {
+				throw new \Sabre\DAV\Exception\BadRequest('The project task deadline precedes its start.');
+			}
+			$changed = false;
+			foreach ($fields as $field => $value) {
+				$prior = is_int($value) ? (int) $task->{$field} : (string) $task->{$field};
+				if ($prior === $value) continue;
+				$task->{$field} = $value;
+				$changed = true;
+			}
+			return $changed;
+		} finally {
+			$before->destroy();
+			if ($after !== null) $after->destroy();
+		}
+	}
+
+	/**
+	 * Read edited notes against the native subject and location when a client omits fields.
+	 *
+	 * @param array $parts Trusted Dolibarr description envelope
+	 * @param array $data Parsed calendar write
+	 * @return string Native notes to retain or apply
+	 */
+	private function _nativeNoteForUpdate(array $parts, array $data): string
+	{
+		if (!isset($data['provided']['DESCRIPTION'])) return $parts['native_note'];
+		$original = $parts['note_prefix_fields'];
+		$title = isset($data['provided']['SUMMARY']) ? $data['label'] : $original['original_subject'];
+		$location = isset($data['provided']['LOCATION']) ? $data['location'] : $original['original_location'];
+		$prefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($parts, $title, $location);
+		return \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($parts, $data['description'], $prefix);
 	}
 
 	/** Populate an ActionComm through fields supported by Dolibarr's native API. */
@@ -1717,11 +1801,13 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$action->datep = $start;
 		$action->datef = !empty($data['fullday']) ? max($start, $end - 1) : max($start, $end);
 		$action->fulldayevent = (int) $data['fullday'];
-		$action->location = trim(str_replace(array("\r", "\t", "\n"), ' ', (string) $data['location']));
-		$action->priority = (int) $data['priority'];
+		$newOrTask = empty($action->id) || $data['componentType'] !== 'VEVENT';
+		if ($newOrTask || isset($data['provided']['LOCATION'])) {
+			$action->location = trim(str_replace(array("\r", "\t", "\n"), ' ', (string) $data['location']));
+		}
+		if ($newOrTask || isset($data['provided']['PRIORITY'])) $action->priority = (int) $data['priority'];
 		$action->transparency = (int) $data['transparency'];
-		$action->note = (string) $data['note'];
-		$action->note_private = (string) $data['note'];
+		if ($newOrTask || isset($data['provided']['DESCRIPTION'])) $action->note = $action->note_private = (string) $data['note'];
 		$action->percentage = (int) $data['percent'];
 		$action->context['cdav_status_managed'] = 1;
 		if ($data['componentType'] === 'VEVENT') {
@@ -1797,14 +1883,16 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		} elseif ($kind === 'organizer') {
 			$data = $this->_parseData($canonical, (int) $calendarId);
 			$data['_preserve_native_dates'] = empty($plan['date_changed']);
+			if ($plan['external_import'] && $plan['personal_transparency'] !== null) {
+				$data['_personal_transparency'] = $plan['personal_transparency'];
+			}
 			if ($protected) {
 				$data['_protected_fields'] = $plan['fields'] ?? array();
 				$data = array_replace($data, $plan['dates'] ?? array());
 			} else {
 				$current = $this->getCalendarObject((int) $calendarId, ((int) $eventId).'-ev-'.CDAV_URI_KEY);
 				if (isset($current['_cdav_description'])) {
-					$prefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($current['_cdav_description'], $data['label'], $data['location']);
-					$data['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($current['_cdav_description'], $data['description'], $prefix);
+					$data['note'] = $this->_nativeNoteForUpdate($current['_cdav_description'], $data);
 					$data['_native_note_resolved'] = true;
 				}
 			}
@@ -1915,8 +2003,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$sourceCalendar = !empty($event->userassigned[(int) $calendarId]) ? (int) $calendarId : (int) $event->userownerid;
 			$current = $this->getCalendarObject($sourceCalendar, ((int) $eventId).'-ev-'.CDAV_URI_KEY);
 			if (isset($current['_cdav_description'])) {
-				$replacementPrefix = $this->cdavLib->getCalendarDescriptionPrefixForFields($current['_cdav_description'], $data['label'], $data['location']);
-				$data['note'] = \Dolibarr\CDav\CalendarWritePolicy::nativeNoteForReplacement($current['_cdav_description'], $data['description'], $replacementPrefix);
+				$data['note'] = $this->_nativeNoteForUpdate($current['_cdav_description'], $data);
 			}
 		}
 		$actionType = $this->_getActionType($data['componentType']);
@@ -1942,7 +2029,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 		$ownerTransparency = isset($nativeAssignments[(int) $calendarId]['transparency'])
 			? (int) $nativeAssignments[(int) $calendarId]['transparency'] : $previousTransparency;
-		$transparencyChanged = $ownerTransparency !== (int) $data['transparency'];
+		$transparencyChanged = !isset($data['_personal_transparency']) && $ownerTransparency !== (int) $data['transparency'];
 		if ($preserveInvitationResponses && !$transparencyChanged) $event->transparency = $previousTransparency;
 		foreach ($event->userassigned as $id => &$assignment) {
 			if (is_array($assignment)) {
@@ -1958,6 +2045,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 		unset($assignment);
 		$event->userassigned[(int) $calendarId]['answer_status'] = (string) $data['answer_status'];
+		if (isset($data['_personal_transparency'])) {
+			$personal = $data['_personal_transparency'];
+			// An organizer revision may repeat the meeting's original occupancy while its owner has a local override.
+			if ($ownerTransparency !== $previousTransparency && $personal === $previousTransparency && $data['transparency'] === $previousTransparency) {
+				$personal = $ownerTransparency;
+			}
+			$event->userassigned[(int) $calendarId]['transparency'] = $personal;
+		}
 		if (empty($event->userassigned[(int) $event->userownerid])) {
 			$ownerId = (int) $event->userownerid;
 			if ($ownerId > 0) {
@@ -2828,6 +2923,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 
 		$componentType = $component->name;
+		$provided = array();
+		foreach ($component->children() as $property) $provided[$property->name] = true;
 		$uid = CalendarUid::read($component);
 		$id = null;
 		$elemSource = 'ev';
@@ -2974,6 +3071,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			'description' => $description,
 			'percent' => $percent,
 			'status' => $status,
+			'provided' => $provided,
 			'has_explicit_status' => isset($component->STATUS),
 			'answer_status' => $answerStatus,
 			'invitation' => $hasParticipants,

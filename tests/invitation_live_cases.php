@@ -278,6 +278,40 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		liveHttpStatus($http('PUT', $path, $accepted, array('If-Match: '.$fresh['headers']['etag'])), array(200, 204), 'INV21 external accepted response replay');
 		liveAssert(invitationLiveNoopState($db, $id) === $before, 'An accepted external invitation replay changed native identity, resources or scheduling state');
 	}
+	$outlookHeader = 'User-Agent: CalDavSynchronizer/4.5.0';
+	$availability = new \Dolibarr\CDav\BookingCalendarReader($db, $invitee, $langs);
+	foreach (array(false, true) as $busy) {
+		$body = businessLiveCalendar($fresh['body'], static function ($component) use ($busy) {
+			if ($busy) {
+				$component->TRANSP = 'OPAQUE';
+				foreach (array('DESCRIPTION', 'LOCATION', 'PRIORITY') as $name) $component->remove($name);
+			} else {
+				$component->{'X-MICROSOFT-CDO-BUSYSTATUS'} = 'FREE';
+				$component->DESCRIPTION = 'Mailbox invitation notes'; // A mail client may only retain the original note.
+				$component->SEQUENCE = 1; // Outlook increments even when the organizer made no change.
+			}
+		});
+		$headers = array($busy ? 'User-Agent: DAVx5' : $outlookHeader);
+		liveHttpStatus($http('PUT', $path, $body, array_merge($headers, array('If-Match: '.$fresh['headers']['etag']))),
+			array(200, 204), 'INV21 external personal availability');
+		$fresh = $http('GET', $path);
+		$personal = \Sabre\VObject\Reader::read($fresh['body'])->VEVENT;
+		liveAssert((string) $personal->UID === $uid && (int) $personal->SEQUENCE->getValue() === 0
+			&& (string) $personal->TRANSP === ($busy ? 'OPAQUE' : 'TRANSPARENT')
+			&& (string) invitationLiveAttendee($personal, $invitee->email)['PARTSTAT'] === 'ACCEPTED'
+			&& (bool) $availability->busy($start, $end, 'Europe/Zurich') === $busy, 'The imported meeting lost its response or personal free/busy slot');
+		$expected = $before;
+		foreach ($expected['resources'] as &$resource) {
+			if ($resource['element_type'] === 'user' && (int) $resource['fk_element'] === (int) $invitee->id) $resource['transparency'] = (string) (int) $busy;
+		}
+		unset($resource);
+		liveAssert(invitationLiveNoopState($db, $id) === $expected, 'Changing Show As on a mailbox copy rewrote the invitation, links, responses or scheduling journal');
+		if (!$busy) {
+			liveHttpStatus($http('PUT', $path, $body, $headers), array(200, 204), 'INV21 repeated Outlook Show As PUT');
+			liveAssert(invitationLiveNoopState($db, $id) === $expected && $http('GET', $path)['headers']['etag'] === $fresh['headers']['etag'],
+				'Retrying the same Outlook body toggled the availability or scheduled another operation');
+		}
+	}
 	foreach (array('another-external-organizer@example.test', (string) $organizer->email) as $forgedEmail) {
 		$forged = businessLiveCalendar($fresh['body'], static function ($component) use ($forgedEmail) {
 			$component->ORGANIZER = 'mailto:'.$forgedEmail;
@@ -293,10 +327,11 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		$component->SUMMARY = 'Updated external mailbox subject';
 		$component->DESCRIPTION = 'Updated mailbox invitation notes';
 		$component->LOCATION = 'Updated external meeting location';
+		$component->{'X-MICROSOFT-CDO-BUSYSTATUS'} = 'FREE';
 		$component->DTSTART->setDateTime(new DateTimeImmutable('@'.$updatedStart));
 		$component->DTEND->setDateTime(new DateTimeImmutable('@'.$updatedEnd));
 	});
-	liveHttpStatus($http('PUT', $path, $update, array('If-Match: '.$fresh['headers']['etag'])), array(200, 204), 'INV23 external organizer email update import');
+	liveHttpStatus($http('PUT', $path, $update, array($outlookHeader, 'If-Match: '.$fresh['headers']['etag'])), array(200, 204), 'INV23 external organizer email update and personal availability');
 	$changed = liveRow($db, 'SELECT label, note, datep, datep2, fk_soc, fk_project, fk_contact FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id);
 	liveAssert($changed !== null && (string) $changed->label === 'Updated external mailbox subject'
 		&& (string) $changed->note === 'Updated mailbox invitation notes' && (int) $db->jdate($changed->datep) === $updatedStart
@@ -308,6 +343,9 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	$component = \Sabre\VObject\Reader::read($actual['body'])->VEVENT;
 	liveAssert((string) $component->UID === $uid && (int) $component->SEQUENCE->getValue() === 3
 		&& $component->DTSTART->getDateTime()->getTimestamp() === $updatedStart && (string) $component->SUMMARY === 'Updated external mailbox subject'
+		&& (string) $component->ORGANIZER === 'mailto:office365-organizer@example.test' && (string) $component->TRANSP === 'TRANSPARENT'
+		&& (string) invitationLiveAttendee($component, $invitee->email)['PARTSTAT'] === 'ACCEPTED'
+		&& !$availability->busy($updatedStart, $updatedEnd, 'Europe/Zurich') && invitationLiveNoopState($db, $id)['journal_count'] === $before['journal_count']
 		&& (int) liveRow($db, $mapSql)->fk_object === $id
 		&& (int) liveRow($db, 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE sourceuid = \''.$db->escape($uid).'\'')->nb === 1,
 		'An external email update created a second appointment or changed its UID/revision');
@@ -315,8 +353,32 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	$stale = invitationLiveAnswer($fresh['body'], (string) $invitee->email, 'TENTATIVE', '-//DAVx5//EN');
 	liveHttpStatus($http('PUT', $path, $stale, array('If-Match: '.$actual['headers']['etag'])), array(403, 409, 412), 'INV23 stale external invitation response');
 	liveAssert(invitationLiveNoopState($db, $id) === $before, 'An old external invitation restored stale dates or business details');
+	foreach (array(4 => null, 5 => 'OPAQUE') as $sequence => $organizerTransparency) {
+		$revision = businessLiveCalendar($update, static function ($component) use ($sequence, $organizerTransparency) {
+			$component->SEQUENCE = $sequence;
+			$component->LOCATION = 'External room '.$sequence;
+			$component->remove('X-MICROSOFT-CDO-BUSYSTATUS');
+			if ($organizerTransparency === null) $component->remove('TRANSP');
+			else $component->TRANSP = $organizerTransparency;
+		});
+		liveHttpStatus($http('PUT', $path, $revision, array($outlookHeader, 'If-Match: '.$actual['headers']['etag'])),
+			array(200, 204), 'INV23 independent external room revision while the private copy is free');
+		$actual = $http('GET', $path);
+		$component = \Sabre\VObject\Reader::read($actual['body'])->VEVENT;
+		liveAssert((int) $component->SEQUENCE->getValue() === $sequence && (string) $component->LOCATION === 'External room '.$sequence
+			&& (string) $component->TRANSP === 'TRANSPARENT' && (string) invitationLiveAttendee($component, $invitee->email)['PARTSTAT'] === 'ACCEPTED'
+			&& !$availability->busy($updatedStart, $updatedEnd, 'Europe/Zurich') && invitationLiveNoopState($db, $id)['journal_count'] === $before['journal_count'],
+			'An external room change reset the participant availability, lost the revision or sent a reply');
+		$revisionState = invitationLiveNoopState($db, $id);
+		liveHttpStatus($http('PUT', $path, $revision, array($outlookHeader)), array(200, 204), 'INV23 repeated independent external revision');
+		$replayedState = invitationLiveNoopState($db, $id);
+		foreach ($revisionState as $field => $value) {
+			liveAssert($replayedState[$field] === $value, 'Retry of organizer revision '.$sequence.' changed '.$field);
+		}
+		liveAssert($http('GET', $path)['headers']['etag'] === $actual['headers']['etag'], 'Retry of organizer revision '.$sequence.' changed its ETag');
+	}
 	$cancel = businessLiveCalendar($update, static function ($component) {
-		$component->SEQUENCE = 4;
+		$component->SEQUENCE = 6;
 		$component->STATUS = 'CANCELLED';
 		$component->TRANSP = 'TRANSPARENT';
 	});
@@ -325,8 +387,10 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	$component = \Sabre\VObject\Reader::read($actual['body'])->VEVENT;
 	$cancelled = liveRow($db, 'SELECT id, fk_soc, fk_project, fk_contact, transparency FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id);
 	liveAssert($cancelled !== null && (string) $component->UID === $uid && (string) $component->STATUS === 'CANCELLED'
-		&& (int) $component->SEQUENCE->getValue() === 4 && (int) $cancelled->fk_soc === (int) $context['company_id']
+		&& (int) $component->SEQUENCE->getValue() === 6 && (int) $cancelled->fk_soc === (int) $context['company_id']
 		&& (int) $cancelled->fk_project === $projectId && (int) $cancelled->fk_contact === $contactId && (int) $cancelled->transparency === 0
+		&& (string) invitationLiveAttendee($component, $invitee->email)['PARTSTAT'] === 'ACCEPTED'
+		&& invitationLiveNoopState($db, $id)['journal_count'] === $before['journal_count']
 		&& (new \Dolibarr\CDav\BookingCalendarReader($db, $invitee, $langs))->busy($updatedStart, $updatedEnd, 'Europe/Zurich') === array(),
 		'An imported cancellation lost native links/identity or continued blocking availability');
 	$internalUid = $context['prefix'].'-local-organizer-private-uid';
@@ -522,9 +586,10 @@ function invitationLiveConcurrentCase($db, $organizer, $invitee, array $context,
  * @param User $organizer Native organizer
  * @param User $admin Native fixture administrator
  * @param array $context Existing isolated suite credentials and paths
+ * @param bool $calendarClientsOnly Run the native editor and external client workflows only
  * @return void
  */
-function invitationLiveCases($db, $organizer, $admin, array $context): void
+function invitationLiveCases($db, $organizer, $admin, array $context, bool $calendarClientsOnly = false): void
 {
 	global $langs;
 	require_once DOL_DOCUMENT_ROOT.'/projet/class/project.class.php';
@@ -560,6 +625,10 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 		liveAssert($project->create($organizer) > 0 && $project->setValid($organizer) > 0, 'Unable to open the native invitation project');
 		require_once __DIR__.'/status_live_cases.php';
 		appointmentStatusLiveChecks($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events, $proof);
+		if ($calendarClientsOnly) {
+			invitationLiveExternalCases($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events, $proof);
+			return;
+		}
 		$task = new Task($db);
 		$task->ref = 'INV-TASK-'.$context['token'];
 		$task->label = $context['prefix'].' Invitation task';

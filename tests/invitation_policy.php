@@ -126,8 +126,56 @@ invitationPolicyAssert($occupied['kind'] === 'availability' && $occupied['person
 	'DAVx5 may set a participant busy again without another RSVP, even with an echoed Outlook FREE hint');
 invitationPolicyAssert(InvitationPolicy::plan($acceptedFree, $acceptedFree, 'alice@example.test', true, false, array(), true)['kind'] === 'noop'
 	&& InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test')['kind'] === 'noop'
-	&& InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test', false, true, array(), true)['kind'] === 'noop',
-	'An echo, iTIP response or external mailbox import must not apply a new internal personal availability change');
+	&& InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test', false, true)['kind'] === 'noop',
+	'An echo or iTIP response must not set personal availability');
+$externalFree = InvitationPolicy::plan($acceptedBusy, $outlookFree, 'alice@example.test', false, true, array(), true, true);
+invitationPolicyAssert($externalFree === $free && !$externalFree['external_import'],
+	'Changing Show As on a private accepted external invitation must only update the participant occupancy');
+$plainNote = invitationPolicyChange($outlookFree, static function ($event) {
+	$event->DESCRIPTION = 'Native notes';
+});
+$noteContext = array('text' => "Native notes\nClient and private project context", 'native_note' => 'Native notes', 'notes_editable' => true,
+	'note_prefix' => '', 'note_suffix' => "\nClient and private project context");
+invitationPolicyAssert(InvitationPolicy::plan($acceptedBusy, $plainNote, 'alice@example.test', false, true, $noteContext, true, true) === $free,
+	'A client that kept its original mailbox note must not import the shared invitation again when marking itself free');
+$sparseFree = invitationPolicyChange($outlookFree, static function ($event) {
+	foreach (array('DESCRIPTION', 'LOCATION', 'PRIORITY') as $name) $event->remove($name);
+});
+$withPriority = invitationPolicyChange($acceptedBusy, static function ($event) {
+	$event->PRIORITY = 3;
+});
+$sparsePlan = InvitationPolicy::plan($withPriority, $sparseFree, 'alice@example.test', false, true, $noteContext, true, true);
+invitationPolicyAssert($sparsePlan['kind'] === 'availability' && $sparsePlan['personal_transparency'] === 0
+	&& (string) \Sabre\VObject\Reader::read($sparsePlan['calendar_data'])->VEVENT->PRIORITY === '3',
+	'An accepted attendee may omit notes, location and priority when choosing Show As');
+invitationPolicyAssert(InvitationPolicy::plan($acceptedFree, $outlookFree, 'alice@example.test', false, true, array(), true, true)['kind'] === 'noop'
+	&& InvitationPolicy::plan($acceptedFree, $backToBusy, 'alice@example.test', false, true, array(), true)['personal_transparency'] === 1,
+	'Replaying an Outlook PUT must keep the free slot, and a subsequent RFC client can explicitly occupy it');
+foreach (array('TENTATIVE', 'NEEDS-ACTION', 'DECLINED') as $partstat) {
+	$notAccepted = invitationPolicyChange($acceptedBusy, static function ($event) use ($partstat) {
+		$event->ATTENDEE['PARTSTAT'] = $partstat;
+	});
+	$requestFree = str_replace('BUSYSTATUS:BUSY', 'BUSYSTATUS:FREE', $notAccepted);
+	invitationPolicyAssert(InvitationPolicy::plan($notAccepted, $requestFree, 'alice@example.test', false, true, array(), true, true)['kind'] === 'noop',
+		'Only an accepted attendee can change Show As on an external mailbox copy');
+}
+$organizerRevision = invitationPolicyChange($outlookFree, static function ($event) {
+	$event->SEQUENCE = 5;
+	$event->STATUS = 'TENTATIVE';
+});
+$withOrganizerRevision = InvitationPolicy::plan($acceptedBusy, $organizerRevision, 'alice@example.test', false, true, array(), true, true);
+invitationPolicyAssert($withOrganizerRevision['kind'] === 'organizer' && $withOrganizerRevision['external_import']
+	&& $withOrganizerRevision['status'] === 'TENTATIVE' && $withOrganizerRevision['sequence'] === 5
+	&& $withOrganizerRevision['personal_transparency'] === 0 && !$withOrganizerRevision['actor_is_organizer'],
+	'An organizer status revision received with a personal availability change must retain both');
+$previousImport = invitationPolicyChange($organizerRevision, static function ($event) {
+	$event->SEQUENCE = 5; // The previous importer moved this property to the end.
+});
+invitationPolicyAssert($withOrganizerRevision['calendar_data'] === $organizerRevision
+	&& InvitationPolicy::sameImportedRevision($organizerRevision, str_replace("\r\n", "\n", $organizerRevision))
+	&& InvitationPolicy::sameImportedRevision($previousImport, $organizerRevision)
+	&& !InvitationPolicy::sameImportedRevision($previousImport, $acceptedBusy),
+	'Recognize an exact organizer retry for both new and historical property order without ignoring other changes');
 
 $davx5 = invitationPolicyChange($before, static function ($event) {
 	$event->ATTENDEE['PARTSTAT'] = 'TENTATIVE';
