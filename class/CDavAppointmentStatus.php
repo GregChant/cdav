@@ -103,11 +103,20 @@ class AppointmentStatus
 	 */
 	public static function synchronizeNative($db, $event, $user, $action): void
 	{
-		if (!empty($event->context['cdav_status_managed']) || (int) $event->percentage >= 0) return;
+		if (!empty($event->context['cdav_status_managed'])) return;
+		$percentage = (int) $event->percentage;
+		if ($percentage >= 0 && ($action !== 'ACTION_MODIFY' || $percentage >= 100)) return;
 		$result = $db->query('SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.((int) $event->id).' FOR UPDATE');
 		if (!$result) throw new \RuntimeException('Unable to lock the appointment state.');
 		$row = $db->fetch_object($result);
 		$stored = $row ? (string) $row->calendardata : '';
+		if ($percentage >= 0) {
+			$metadata = self::metadataForReopenedTask($stored);
+			if ($metadata !== null && !$db->query('UPDATE '.MAIN_DB_PREFIX."cdav_scheduling SET calendardata = '".$db->escape($metadata)."' WHERE fk_actioncomm = ".((int) $event->id))) {
+				throw new \RuntimeException('Unable to clear the previous completion date of the reopened Agenda task.');
+			}
+			return;
+		}
 		$previous = self::statusFromCalendar($stored) ?? 'CONFIRMED';
 		$value = $event->array_options['options_cdav_status'] ?? '';
 		$status = $value === null || $value === '' ? $previous : self::normalize($value);
@@ -138,6 +147,38 @@ class AppointmentStatus
 		}
 		if ($status === $previous) return;
 		self::storeNativeState($db, $event, $stored, $status);
+	}
+
+	/**
+	 * Discard the former completion of a task reopened in Agenda, keeping its exceptions.
+	 * @param string $stored Existing protocol metadata
+	 * @return string|null Updated metadata, or null when the native write requires no protocol change
+	 */
+	public static function metadataForReopenedTask(string $stored): ?string
+	{
+		if ($stored === '') return null;
+		require_once DOL_DOCUMENT_ROOT.'/includes/sabre/autoload.php';
+		try {
+			$calendar = \Sabre\VObject\Reader::read($stored);
+		} catch (\Sabre\VObject\ParseException $error) {
+			// A legacy unreadable sidecar has no exported completion. Leave it intact for repair.
+			return null;
+		}
+		try {
+			$changed = false;
+			foreach ($calendar->select('VTODO') as $task) {
+				if (isset($task->{'RECURRENCE-ID'})) continue;
+				$completedStatus = strtoupper((string) ($task->STATUS ?? '')) === 'COMPLETED';
+				if (!isset($task->COMPLETED) && !$completedStatus) continue;
+				$task->remove('COMPLETED');
+				if ($completedStatus) $task->remove('STATUS');
+				if ((string) ($task->{'PERCENT-COMPLETE'} ?? '') === '100') $task->remove('PERCENT-COMPLETE');
+				$changed = true;
+			}
+			return $changed ? $calendar->serialize() : null;
+		} finally {
+			$calendar->destroy();
+		}
 	}
 
 	/**

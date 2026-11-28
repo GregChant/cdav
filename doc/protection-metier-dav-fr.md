@@ -26,6 +26,11 @@ les liens métier et les règles de récurrence se gèrent dans Dolibarr. Si une
 modification touche aussi une de ces données protégées, le serveur refuse
 l’enregistrement entier. Le rendez-vous conserve son UID.
 
+Un client peut renvoyer un rendez-vous provisoire sans renseigner son état
+ni son lien vers la fiche. CDav conserve alors l’état et le lien. Une ligne
+vide ajoutée par l’éditeur à la fin du bloc projet ou contact conserve les
+notes et leur mise en forme dans Dolibarr.
+
 ### Tâches de l’Agenda dans Outlook
 
 Pour une action Agenda affichée comme tâche dans Outlook, le propriétaire ou

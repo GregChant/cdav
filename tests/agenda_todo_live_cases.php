@@ -37,8 +37,8 @@ function agendaTodoLiveCases($db, $owner, $admin, array $context, $project, $tas
 		$uri = $uid.'.ics';
 		liveAssert((bool) $db->query('INSERT INTO '.MAIN_DB_PREFIX.'actioncomm_cdav (fk_object,uuidext,sourceuid,dav_origin) VALUES ('
 			.$id.", '".$db->escape($uri)."', '".$db->escape($uid)."', 0)"), 'Unable to seed a historical calendar resource mapping');
-		$http = static function ($method, $body = null, $etag = null, $ownerCalendar = true) use ($context, $uri) {
-			$headers = array('Content-Type: text/calendar; charset=utf-8', 'User-Agent: CalDavSynchronizer/4.7');
+		$http = static function ($method, $body = null, $etag = null, $ownerCalendar = true, $agent = 'CalDavSynchronizer/4.7') use ($context, $uri) {
+			$headers = array('Content-Type: text/calendar; charset=utf-8', 'User-Agent: '.$agent);
 			if ($etag !== null) $headers[] = 'If-Match: '.$etag;
 			$prefix = $ownerCalendar ? '' : 'limited_';
 			return liveHttp($context['base_url'], $context[$prefix.'login'], $context[$prefix.'password'], $method,
@@ -120,7 +120,41 @@ function agendaTodoLiveCases($db, $owner, $admin, array $context, $project, $tas
 		$reopened = $http('GET');
 		$calendar = \Sabre\VObject\Reader::read($reopened['body']);
 		liveAssert(!$calendar->VTODO->select('COMPLETED') && $businessState() === $before, 'Reopening left a stale completion or rewrote protected task data');
+		$calendar->VTODO->STATUS = 'COMPLETED';
+		$calendar->VTODO->{'PERCENT-COMPLETE'} = 100;
+		$calendar->VTODO->COMPLETED = $completed;
+		$calendar->VTODO->PRIORITY = 3;
+		liveHttpStatus($http('PUT', $calendar->serialize(), $reopened['headers']['etag'], true, 'Standard task client'), array(200, 204), 'RFC client completes the Agenda task');
 		$calendar->destroy();
+		liveAssert($todo->fetch($id) > 0, 'Unable to reload the Agenda task for a native reopen');
+		$todo->percentage = 35;
+		liveAssert($todo->update($owner) > 0, 'Unable to reopen the completed task in Dolibarr');
+		$todo->percentage = 100;
+		liveAssert($todo->update($owner) > 0, 'Unable to complete the reopened task natively');
+		$nativeDone = $http('GET');
+		$calendar = \Sabre\VObject\Reader::read($nativeDone['body']);
+		$item = $calendar->VTODO;
+		liveAssert((string) $item->STATUS === 'COMPLETED' && !$item->select('COMPLETED') && (string) $item->PRIORITY === '3',
+			'Completing again in Dolibarr must not resurrect the previous DAV completion date');
+		foreach (array('URL', 'LOCATION', 'TRANSP') as $name) $item->remove($name);
+		$item->PRIORITY = 1;
+		$item->DTSTART->setDateTime($item->DTSTART->getDateTime()->setTime(0, 0));
+		$item->DUE->setDateTime($item->DUE->getDateTime()->setTime(23, 59, 59));
+		$sparse = $calendar->serialize();
+		$calendar->destroy();
+		liveHttpStatus($http('PUT', $sparse, $nativeDone['headers']['etag'], true, 'Standard task client'), array(200, 204), 'RFC client writes exact day-end and priority without an Agenda URL');
+		$literal = $http('GET');
+		$calendar = \Sabre\VObject\Reader::read($literal['body']);
+		$item = $calendar->VTODO;
+		liveAssert((string) $item->PRIORITY === '1' && $item->DTSTART->getDateTime()->format('His') === '000000'
+			&& $item->DUE->getDateTime()->format('His') === '235959' && (string) $item->UID === $uid
+			&& str_contains((string) $item->DESCRIPTION, (string) $task->ref) && (string) $item->{'PERCENT-COMPLETE'} === '100',
+			'RFC task values, progress or project-task relationship changed on export');
+		$calendar->destroy();
+		foreach (array('CalDavSynchronizer/4.7', 'Standard task client') as $agent) {
+			liveHttpStatus($http('PUT', $sparse, $literal['headers']['etag'], true, $agent), array(200, 204), 'Subsequent task echo with '.$agent);
+			liveAssert($http('GET')['headers']['etag'] === $literal['headers']['etag'], 'Alternating task clients changed an untouched Agenda task');
+		}
 		liveOk('Historical protected Agenda VTODO supports Outlook completion replay, owner edits and reopening without changing project-task links');
 	} finally {
 		liveAssert($todo->fetch($id) > 0 && $todo->delete($admin) > 0, 'Unable to clean up the Agenda task and its historical mapping');

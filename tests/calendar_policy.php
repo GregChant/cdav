@@ -183,15 +183,42 @@ $outlookTask = implode("\r\n", array('BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-
 	'UID:native-agenda-task', 'DTSTART:20261028T000000', 'DUE:20261029T235959', 'SUMMARY:Relire le dossier',
 	'DESCRIPTION:Appointment\nAppointment subject : Relire le dossier\n', 'PRIORITY:5', 'CLASS:PUBLIC', 'STATUS:COMPLETED',
 	'PERCENT-COMPLETE:100', 'COMPLETED:20261029T230000Z', 'SEQUENCE:8', 'END:VTODO', 'END:VCALENDAR', ''));
-$echo = CalendarWritePolicy::planTaskChange($task, $outlookTask);
+$echo = CalendarWritePolicy::planTaskChange($task, $outlookTask, array(), true);
 calendarPolicyAssert(!$echo['changed'] && !$echo['date_changed'] && $echo['sequence'] === 7 && !$echo['fields'],
 	'A rebuilt, already-completed Outlook task must preserve its hours, original priority, note and revision.');
 $allDayTask = str_replace(array('DTSTART;TZID=Europe/Zurich:20261028T093000', 'DUE;TZID=Europe/Zurich:20261029T164500'),
 	array('DTSTART;VALUE=DATE:20261028', 'DUE;VALUE=DATE:20261029'), $task);
-calendarPolicyAssert(!CalendarWritePolicy::planTaskChange($allDayTask, $outlookTask)['changed'],
+calendarPolicyAssert(!CalendarWritePolicy::planTaskChange($allDayTask, $outlookTask, array(), true)['changed'],
 	'An Outlook day-level echo must also retain the original native all-day flag.');
+$highPriority = str_replace('PRIORITY:0', 'PRIORITY:3', $task);
+$sparseHigh = str_replace('PRIORITY:5', 'PRIORITY:1', $outlookTask);
+calendarPolicyAssert(CalendarWritePolicy::isOutlookSynchronizer('CalDavSynchronizer/4.7.0.0')
+	&& !CalendarWritePolicy::isOutlookSynchronizer('CalDavSynchronizer/not-a-version'), 'Only the versioned Outlook add-in agent identifies its task mapping.');
+foreach (array('DAVx5/4', 'Mozilla Thunderbird', 'Apple Reminders', '') as $agent) {
+	$plan = CalendarWritePolicy::planTaskChange($highPriority, $sparseHigh, array(), CalendarWritePolicy::isOutlookSynchronizer($agent));
+	calendarPolicyAssert($plan['fields'] === array('priority' => 1) && $plan['date_changed']
+		&& date('Ymd His', $plan['dates']['start']) === '20261028 000000' && date('Ymd His', $plan['dates']['end']) === '20261029 235959',
+		'A standard CalDAV PUT without URL must apply the requested priority and both exact clock times.');
+}
+$literal = str_replace(array('20261028T000000', '20261029T235959'), array('20261028T113000', '20261029T172500'), $sparseHigh);
+$precise = CalendarWritePolicy::planTaskChange($highPriority, $literal, array(), true);
+calendarPolicyAssert($precise['fields'] === array('priority' => 1) && date('His', $precise['dates']['start']) === '113000',
+	'An identified add-in sending precise hours must also retain literal priority values.');
+// Model the next GET after ActionComm has applied the server plan: native priority is read from the row.
+$nextExport = str_replace('PRIORITY:3', 'PRIORITY:1', $precise['calendar_data']);
+$toOutlook = CalendarWritePolicy::planTaskChange($nextExport, $sparseHigh, array(), true);
+$toStandard = CalendarWritePolicy::planTaskChange($toOutlook['calendar_data'], $literal);
+$roundTrip = Sabre\VObject\Reader::read($toStandard['calendar_data']);
+calendarPolicyAssert(!$toOutlook['changed'] && !$toStandard['changed'] && $toOutlook['sequence'] === $toStandard['sequence']
+	&& (string) $roundTrip->VTODO->URL === 'https://example.test/comm/action/card.php?id=71'
+	&& (string) $roundTrip->VTODO->{'PERCENT-COMPLETE'} === '100', 'Consecutive Outlook and RFC echoes must keep native links, progress, exact times and revision.');
+$roundTrip->destroy();
+$dateOnly = str_replace(array('DTSTART:20261028T000000', 'DUE:20261029T235959', 'PRIORITY:5'),
+	array('DTSTART;VALUE=DATE:20261028', 'DUE;VALUE=DATE:20261029', 'PRIORITY:0'), $outlookTask);
+calendarPolicyAssert(!CalendarWritePolicy::planTaskChange($allDayTask, $dateOnly)['changed']
+	&& CalendarWritePolicy::planTaskChange($task, $dateOnly)['dates']['fullday'] === 1, 'Standard VALUE=DATE tasks remain date-only with or without an Agenda URL.');
 $inProgress = str_replace(array('STATUS:COMPLETED', 'PERCENT-COMPLETE:100'), array('STATUS:IN-PROCESS', 'PERCENT-COMPLETE:50'), $task);
-$complete = CalendarWritePolicy::planTaskChange($inProgress, $outlookTask);
+$complete = CalendarWritePolicy::planTaskChange($inProgress, $outlookTask, array(), true);
 calendarPolicyAssert($complete['fields'] === array('percentage' => 100) && $complete['sequence'] === 8 && !$complete['date_changed'],
 	'Marking a native task complete must change only its progress.');
 $taskMetadata = CalendarWritePolicy::metadataAfterStatusChange('', $complete);
@@ -204,14 +231,14 @@ calendarPolicyAssert($reopen['fields'] === array('percentage' => 0)
 	'Reopening a native task must clear its completion date even if a client echoed the previous one.');
 $edited = str_replace(array('SUMMARY:Relire le dossier', '20261029T235959', 'STATUS:COMPLETED', 'PERCENT-COMPLETE:100', "COMPLETED:20261029T230000Z\r\n"),
 	array('SUMMARY:Rapport final', '20261030T235959', 'STATUS:IN-PROCESS', 'PERCENT-COMPLETE:30', ''), $outlookTask);
-$plan = CalendarWritePolicy::planTaskChange($task, $edited);
+$plan = CalendarWritePolicy::planTaskChange($task, $edited, array(), true);
 calendarPolicyAssert($plan['fields'] === array('label' => 'Rapport final', 'percentage' => 30) && $plan['resized']
 	&& date('Ymd His', $plan['dates']['end']) === '20261030 164500',
 	'Editing the day of the deadline in Outlook must keep its native clock time while updating authorized fields.');
 $noDue = preg_replace('/DUE:[^\r]+\r\n/', '', $outlookTask);
-calendarPolicyAssert(CalendarWritePolicy::planTaskChange($task, $noDue)['dates']['task_without_due'],
+calendarPolicyAssert(CalendarWritePolicy::planTaskChange($task, $noDue, array(), true)['dates']['task_without_due'],
 	'Clearing a deadline must leave a missing native end instead of creating a synthetic duration.');
-$addDue = CalendarWritePolicy::planTaskChange(str_replace("DUE;VALUE=DATE:20261029\r\n", '', $allDayTask), $outlookTask);
+$addDue = CalendarWritePolicy::planTaskChange(str_replace("DUE;VALUE=DATE:20261029\r\n", '', $allDayTask), $outlookTask, array(), true);
 calendarPolicyAssert($addDue['resized'] && !$addDue['dates']['task_without_due'] && $addDue['dates']['fullday'] === 1
 	&& date('Ymd His', $addDue['dates']['end']) === '20261029 000000', 'Adding a deadline to an all-day task must preserve its native date type.');
 $fractionOnly = str_replace(array("STATUS:COMPLETED\r\n", 'PERCENT-COMPLETE:100'), array('', 'PERCENT-COMPLETE:30'), $task);
@@ -417,6 +444,38 @@ $descriptionContext = array('text' => $heading.'Meeting notes'.$suffix, 'note_pr
 		.($location === '' ? '' : "\nAppointment address : ".$location)."\n\n");
 $fieldsCalendar->VEVENT->DESCRIPTION = $descriptionContext['text'];
 $sourceFields = $fieldsCalendar->serialize();
+$nativeAppointment = clone $fieldsCalendar;
+$nativeAppointment->VEVENT->URL = 'https://example.test/comm/action/card.php?id=42';
+$nativeAppointment->VEVENT->STATUS = 'TENTATIVE';
+$nativeAppointment->VEVENT->SEQUENCE = 8;
+$sparse = clone $nativeAppointment;
+foreach (array('STATUS', 'URL', 'CLASS') as $name) $sparse->VEVENT->remove($name);
+$sparse->VEVENT->DESCRIPTION = $descriptionContext['text']."\n";
+$replay = CalendarWritePolicy::planStatusChange($nativeAppointment->serialize(), $sparse->serialize(), $descriptionContext);
+$replayedCalendar = Sabre\VObject\Reader::read($replay['calendar_data']);
+calendarPolicyAssert(!$replay['changed'] && $replay['sequence'] === 8 && $replay['status'] === 'TENTATIVE'
+	&& (string) $replayedCalendar->VEVENT->URL === (string) $nativeAppointment->VEVENT->URL,
+	'A partial client representation must retain the native link, rich text and provisional state.');
+$replayedCalendar->destroy();
+$sparse->VEVENT->DESCRIPTION = $heading.'Updated visit note'.$suffix."\n";
+$fields = CalendarWritePolicy::planStatusChange($replay['calendar_data'], $sparse->serialize(), $descriptionContext)['fields'];
+calendarPolicyAssert($fields === array('note' => 'Updated visit note'), 'A notes edit followed by a final paragraph must preserve the generated project and task.');
+$sparse->VEVENT->DESCRIPTION = $descriptionContext['text'];
+$sparse->VEVENT->STATUS = 'CONFIRMED';
+$confirmed = CalendarWritePolicy::planStatusChange($replay['calendar_data'], $sparse->serialize(), $descriptionContext);
+calendarPolicyAssert($confirmed['status'] === 'CONFIRMED' && $confirmed['sequence'] === 9,
+	'A second client can explicitly confirm a provisional appointment.');
+$sparse->VEVENT->remove('STATUS');
+calendarPolicyAssert(!CalendarWritePolicy::planStatusChange($confirmed['calendar_data'], $sparse->serialize(), $descriptionContext)['changed'],
+	'Replaying the sparse representation after another client confirms must keep the new state.');
+foreach (array('URL' => 'https://example.test/other', 'CLASS' => 'PRIVATE') as $property => $replacement) {
+	$changedProperty = clone $nativeAppointment;
+	$changedProperty->VEVENT->{$property} = $replacement;
+	calendarPolicyRejects($nativeAppointment->serialize(), $changedProperty->serialize(), 'An explicit alteration of a protected property must still fail.');
+	$changedProperty->destroy();
+}
+$sparse->destroy();
+$nativeAppointment->destroy();
 $fieldsCalendar->VEVENT->SUMMARY = 'Client review';
 $newHeading = $descriptionContext['prefix_for_fields']($descriptionContext, 'Client review', '');
 $fieldsCalendar->VEVENT->DESCRIPTION = $newHeading.'Meeting notes'.$suffix;

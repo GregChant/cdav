@@ -246,7 +246,7 @@ class CalendarWritePolicy
 		$description = self::withoutDocumentsFooter($description, (string) ($parts['documents_url'] ?? ''));
 		$text = (string) $parts['text'];
 		$native = (string) $parts['native_note'];
-		if ($description === $text) {
+		if (rtrim($description, "\n") === rtrim($text, "\n")) {
 			return $native;
 		}
 		if (empty($parts['notes_editable'])) {
@@ -254,6 +254,8 @@ class CalendarWritePolicy
 		}
 		$prefix = (string) $parts['note_prefix'];
 		$suffix = (string) $parts['note_suffix'];
+		// Some text editors append a paragraph after the generated project/contact section.
+		if ($suffix !== '' && !str_ends_with($suffix, "\n")) $description = rtrim($description, "\n");
 		$noteLength = strlen($text) - strlen($prefix) - strlen($suffix);
 		$currentNote = $noteLength >= 0 ? substr($text, strlen($prefix), $noteLength) : '';
 		if ($description === $currentNote || $description === $native) {
@@ -299,6 +301,10 @@ class CalendarWritePolicy
 		try {
 			$old = self::item($before);
 			$new = self::item($after);
+			if ($old->name === 'VEVENT' && $new->name === 'VEVENT' && count($old->select('URL')) === 1 && !isset($new->URL)) {
+				// Dolibarr generates this link on export, including when the client has no field for it.
+				$new->add(clone $old->URL);
+			}
 			$stored = self::projection($old);
 			$submitted = self::projection($new);
 			$changed = array();
@@ -538,11 +544,11 @@ class CalendarWritePolicy
 	 */
 	public static function normalizeAppointmentStatus($current, $incoming)
 	{
-		self::eventStatus($current);
-		$status = self::eventStatus($incoming);
+		$previous = self::eventStatus($current);
+		$status = isset($incoming->STATUS) ? self::eventStatus($incoming) : $previous;
 		$previousBusy = self::outlookBusyStatus($current);
 		$busy = self::outlookBusyStatus($incoming);
-		if ($status !== 'CANCELLED' && (!isset($incoming->STATUS) || $busy !== $previousBusy)) {
+		if ($status !== 'CANCELLED' && $busy !== $previousBusy) {
 			if ($busy === 'TENTATIVE') $status = 'TENTATIVE';
 			if ($busy === 'BUSY') $status = 'CONFIRMED';
 		}
@@ -647,19 +653,29 @@ class CalendarWritePolicy
 	}
 
 	/**
+	 * Identify the Outlook add-in's versioned HTTP agent for representation compatibility.
+	 * @param string $userAgent HTTP User-Agent
+	 * @return bool Whether CalDavSynchronizer identified itself on this request
+	 */
+	public static function isOutlookSynchronizer(string $userAgent): bool
+	{
+		return (bool) preg_match('#^CalDavSynchronizer/\d+\.\d+(?:\.\d+){0,2}(?:\s|$)#i', $userAgent);
+	}
+
+	/**
 	 * Outlook tasks expose only the local day and send midnight / 23:59:59.
 	 * Keep Dolibarr's clock times when applying the days from that representation.
 	 * @param VObject\Component $old Authoritative task
 	 * @param VObject\Component $new Comparison task
-	 * @return void
+	 * @return bool Whether the add-in sent its day-level representation
 	 */
-	private static function normalizeTaskDays($old, $new): void
+	private static function normalizeTaskDays($old, $new): bool
 	{
-		if (isset($new->DURATION)) return;
+		if (isset($new->DURATION) || (!$new->DTSTART->hasTime() && !isset($new->DUE))) return false;
 		$zone = new \DateTimeZone(date_default_timezone_get());
 		$start = $new->DTSTART->getDateTime($zone);
-		if ($start->format('His') !== '000000') return;
-		if (isset($new->DUE) && $new->DUE->getDateTime($zone)->format('His') !== '235959') return;
+		if ($start->format('His') !== '000000') return false;
+		if (isset($new->DUE) && $new->DUE->getDateTime($zone)->format('His') !== '235959') return false;
 		foreach (array('DTSTART', 'DUE') as $name) {
 			if (!isset($new->{$name})) continue;
 			$day = $new->{$name}->getDateTime($zone);
@@ -676,6 +692,7 @@ class CalendarWritePolicy
 			$new->remove($name);
 			$new->add($original);
 		}
+		return true;
 	}
 
 	/**
@@ -683,9 +700,10 @@ class CalendarWritePolicy
 	 * @param string $current Calendar generated from the native Agenda record
 	 * @param string $incoming Replacement VTODO
 	 * @param array $descriptionContext Trusted boundaries of the editable note
+	 * @param bool $outlookSynchronizer Whether the request is from the Outlook add-in
 	 * @return array Native changes and canonical scheduling metadata
 	 */
-	public static function planTaskChange(string $current, string $incoming, array $descriptionContext = array()): array
+	public static function planTaskChange(string $current, string $incoming, array $descriptionContext = array(), bool $outlookSynchronizer = false): array
 	{
 		self::validateTaskPercent($incoming);
 		$before = VObject\Reader::read($current);
@@ -700,7 +718,6 @@ class CalendarWritePolicy
 				if (count($new->select($name)) > 1) throw new BadRequest('The task field is ambiguous: '.$name);
 			}
 			// Outlook rebuilds a task from scratch and does not map the Agenda URL, task location or occupancy.
-			$omitsUrl = isset($old->URL) && !isset($new->URL);
 			foreach (array('URL', 'CLASS', 'TRANSP', 'LOCATION', 'DESCRIPTION', 'PRIORITY') as $name) {
 				if (!isset($new->{$name}) && isset($old->{$name})) $new->add(clone $old->{$name});
 			}
@@ -709,9 +726,9 @@ class CalendarWritePolicy
 				$new->DESCRIPTION->setValue((string) $old->DESCRIPTION);
 			}
 			$oldDates = self::dates($old);
-			if ($omitsUrl) self::normalizeTaskDays($old, $new);
+			$outlookDays = $outlookSynchronizer && self::normalizeTaskDays($old, $new);
 			$fields = self::appointmentFieldChanges($old, $new, $descriptionContext);
-			if ($omitsUrl && isset($fields['priority'])) {
+			if ($outlookDays && isset($fields['priority'])) {
 				$prior = (int) (string) $old->PRIORITY;
 				$outlookPriority = $prior === 0 || $prior === 5 ? 5 : ($prior < 5 ? 1 : 9);
 				if ($fields['priority'] === $outlookPriority) unset($fields['priority']);
@@ -896,6 +913,8 @@ class CalendarWritePolicy
 			}
 			ksort($parameters);
 			$value = $child->getParts();
+			if (!$nested && $component->name === 'VEVENT' && $name === 'CLASS' && !$parameters
+				&& count($component->select('CLASS')) === 1 && strtoupper((string) $child) === 'PUBLIC') continue;
 			if (in_array($name, array('PRIORITY', 'PERCENT-COMPLETE'), true)) {
 				$value = array((string) ((int) $child->getValue()));
 			} elseif (in_array($name, array('TRANSP', 'STATUS', 'CLASS'), true)) {

@@ -156,6 +156,36 @@ function appointmentStatusLiveChecks($db, $organizer, $invitee, array $context, 
 	liveAssert(appointmentStatusLiveNative($db, $organizer, $id, 'TENTATIVE') > 0, 'Native owner could not select a provisional appointment');
 	$current = $http('owner', 'GET', $fixture['organizer_path']);
 	$native = appointmentStatusLiveState($current);
+	$noOp = invitationLiveNoopState($db, $id);
+	$sparse = businessLiveCalendar($current['body'], static function ($event) {
+		foreach (array('URL', 'STATUS', 'CLASS', 'X-MICROSOFT-CDO-BUSYSTATUS') as $name) $event->remove($name);
+		$event->DESCRIPTION = (string) $event->DESCRIPTION."\n";
+	});
+	liveHttpStatus($http('owner', 'PUT', $fixture['organizer_path'], $sparse, array('If-Match: '.$current['headers']['etag'])),
+		array(200, 204), 'A calendar client echoes its supported fields on a provisional appointment');
+	$reread = $http('owner', 'GET', $fixture['organizer_path']);
+	liveAssert($reread['headers']['etag'] === $current['headers']['etag'] && appointmentStatusLiveState($reread) === $native
+		&& invitationLiveNoopState($db, $id) === $noOp, 'A sparse calendar echo changed native state, generated notes, associations or revision');
+	$uid = 'personal-state-'.$context['token'];
+	$personalPath = $context['calendar_path'].$uid.'.ics';
+	$personal = new \Sabre\VObject\Component\VCalendar();
+	$personal->add('VEVENT', array('UID' => $uid, 'SUMMARY' => 'Provisional personal appointment', 'STATUS' => 'TENTATIVE',
+		'DTSTART' => gmdate('Ymd\THis\Z', time() + 86400), 'DTEND' => gmdate('Ymd\THis\Z', time() + 90000)));
+	liveHttpStatus($http('owner', 'PUT', $personalPath, $personal->serialize(), array('If-None-Match: *')), array(201), 'Create a personal provisional appointment');
+	$personal->destroy();
+	$personalId = (int) liveRow($db, 'SELECT fk_object FROM '.MAIN_DB_PREFIX."actioncomm_cdav WHERE sourceuid = '".$db->escape($uid)."'")->fk_object;
+	$events[] = $personalId;
+	$personalGet = $http('owner', 'GET', $personalPath);
+	$personalChange = businessLiveCalendar($personalGet['body'], static function ($event) {
+		$event->remove('STATUS');
+		$event->remove('X-MICROSOFT-CDO-BUSYSTATUS');
+		$event->SUMMARY = 'Revised personal appointment';
+	});
+	liveHttpStatus($http('owner', 'PUT', $personalPath, $personalChange, array('If-Match: '.$personalGet['headers']['etag'])),
+		array(204, 200), 'Rename a DAV-created provisional appointment from a client without STATUS');
+	liveAssert(appointmentStatusLiveState($http('owner', 'GET', $personalPath))['status'] === 'TENTATIVE'
+		&& liveRow($db, 'SELECT label FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$personalId)->label === 'Revised personal appointment',
+		'The native update of a DAV-created event must preserve its existing state and apply the new title');
 	liveAssert($native['status'] === 'TENTATIVE' && $native['uid'] === $initial['uid'] && $native['sequence'] > $initial['sequence']
 		&& invitationLiveProtectedState($db, $id) === $protected, 'Native state edit lost business values or failed to advance the DAV revision');
 	$dates = liveRow($db, 'SELECT datep,datep2 FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$id);

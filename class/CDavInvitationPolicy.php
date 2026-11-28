@@ -13,6 +13,8 @@ require_once __DIR__.'/CDavCalendarWritePolicy.php';
 /** Authorize invitation responses without trusting client copies of business data. */
 class InvitationPolicy
 {
+	private const ATTENDEE_DEFAULTS = array('CUTYPE' => 'INDIVIDUAL', 'PARTSTAT' => 'NEEDS-ACTION', 'ROLE' => 'REQ-PARTICIPANT', 'RSVP' => 'FALSE');
+
 	/**
 	 * Merge an authenticated attendee response or an organizer change.
 	 *
@@ -204,8 +206,8 @@ class InvitationPolicy
 			// Invitation bodies sent by email/inbox need not contain the CRM envelope.
 			// A real personal response never imports its description into native notes.
 			if ($responseChanged) self::copyProperty($test, $old, 'DESCRIPTION');
-			self::normalizeDefaults($test);
-			self::normalizeDefaults($base);
+			self::normalizeAttendeesForComparison($test);
+			self::normalizeAttendeesForComparison($base);
 			$dates = CalendarWritePolicy::assertMoveOnly($baseline->serialize(), $comparison->serialize());
 			$oldDates = CalendarWritePolicy::assertMoveOnly($baseline->serialize(), $baseline->serialize());
 			if ($dates !== $oldDates) throw new Forbidden('An attendee response cannot move or resize the invitation.');
@@ -262,8 +264,8 @@ class InvitationPolicy
 				self::copyProperty($test, $old, 'TRANSP');
 				self::copyAlarms($test, $old);
 			}
-			self::normalizeDefaults($base);
-			self::normalizeDefaults($test);
+			self::normalizeAttendeesForComparison($base);
+			self::normalizeAttendeesForComparison($test);
 			$oldDates = CalendarWritePolicy::assertMoveOnly($baseline->serialize(), $baseline->serialize());
 			$newDates = CalendarWritePolicy::assertMoveOnly($comparison->serialize(), $comparison->serialize());
 			$dateChanged = $oldDates !== $newDates;
@@ -357,15 +359,17 @@ class InvitationPolicy
 	}
 
 	/**
-	 * Normalize explicit RFC defaults before comparing immutable attendee data.
+	 * Compare the same addresses and explicit RFC defaults as duplicate detection.
 	 *
 	 * @param VObject\Component $event Invitation master
 	 * @return void
 	 */
-	private static function normalizeDefaults($event)
+	private static function normalizeAttendeesForComparison($event)
 	{
 		foreach ($event->select('ATTENDEE') as $property) {
-			foreach (array('ROLE' => 'REQ-PARTICIPANT', 'CUTYPE' => 'INDIVIDUAL') as $name => $default) {
+			$email = self::email((string) $property);
+			if ($email !== '') $property->setValue('mailto:'.$email);
+			foreach (self::ATTENDEE_DEFAULTS as $name => $default) {
 				if (isset($property[$name]) && strtoupper(trim((string) $property[$name])) === $default) unset($property[$name]);
 			}
 		}
@@ -451,8 +455,11 @@ class InvitationPolicy
 			try {
 				foreach ($before->select('VTIMEZONE') as $zone) $left->add(clone $zone);
 				foreach ($after->select('VTIMEZONE') as $zone) $right->add(clone $zone);
-				$left->add(clone $event);
+				$base = clone $event;
+				self::normalizeAttendeesForComparison($base);
+				$left->add($base);
 				$test = clone $incoming[$key];
+				self::normalizeAttendeesForComparison($test);
 				CalendarWritePolicy::normalizeCancelledSummary($event, $test);
 				$right->add($test);
 				$dates = CalendarWritePolicy::assertMoveOnly($left->serialize(), $right->serialize());
@@ -585,12 +592,12 @@ class InvitationPolicy
 	 */
 	private static function attendeeParameters($attendee): array
 	{
-		$parameters = array('CUTYPE' => array('INDIVIDUAL'), 'PARTSTAT' => array('NEEDS-ACTION'),
-			'ROLE' => array('REQ-PARTICIPANT'), 'RSVP' => array('FALSE'), 'VALUE' => array($attendee->getValueType()));
+		$parameters = array('VALUE' => array($attendee->getValueType()));
 		foreach ($attendee->parameters() as $parameter) {
 			$name = $parameter->name;
 			$parts = $parameter->getParts();
-			if (in_array($name, array('CUTYPE', 'PARTSTAT', 'ROLE', 'RSVP', 'VALUE'), true)) $parts = array_map('strtoupper', $parts);
+			if ($name === 'VALUE' || isset(self::ATTENDEE_DEFAULTS[$name])) $parts = array_map('strtoupper', $parts);
+			if (isset(self::ATTENDEE_DEFAULTS[$name]) && $parts === array(self::ATTENDEE_DEFAULTS[$name])) continue;
 			$parameters[$name] = $parts;
 		}
 		ksort($parameters, SORT_STRING);

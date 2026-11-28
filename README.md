@@ -112,6 +112,13 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.5.2 preserves the exact task times and priorities sent by other
+CalDAV clients when they share a calendar with Outlook. Reopening a task in
+Dolibarr clears the completion date from its previous cycle. A client that
+omits the appointment state can edit a provisional appointment while keeping
+it provisional. Invitations accept equivalent attendee addresses and default
+parameters across successive syncs, including an unchanged recurring series.
+
 Version 6.5.1 accepts Outlook sync updates for completed Agenda tasks and
 preserves their native hours and project-task links. The owner or an authorized
 delegate can update the task's progress or reopen it. Invitations with equivalent
@@ -355,13 +362,13 @@ Repeat with the other target core and `CDAV_PHP_BIN=php8.5`. The optional
 `CDAV_PHPCS_STANDARD` uses Dolibarr's native code-style rules when PHP_CodeSniffer
 is installed.
 
-[GitHub Actions](.github/workflows/qa.yml) runs the twelve database-free PHP suites
-and the JavaScript selection regressions,
-PHP lint for the whole module and native PHPCS on the booking/transport files
-for every pull request and every push to `23.0` or `master`. All four combinations
-of Dolibarr 23.0.4 / 24.0.0 and PHP 8.4 / 8.5 must pass. Dependencies are the
-libraries shipped with each native Dolibarr core; there is no test framework in
-production. See the [test guide](tests/README.md) for coverage and limitations.
+GitHub Actions runs the database-free PHP suites, JavaScript selection tests,
+PHP lint and Dolibarr coding-standard checks on pull requests and pushes to
+`23.0` and `master`. Six jobs cover PHP 8.4 and 8.5 with Dolibarr 23.0.4,
+24.0.0 and a pinned 24.0.4 revision. The calendar tests replay successive
+iCalendar writes from different clients and check native dates, progress,
+participant responses and revisions. The tests use the Sabre libraries shipped
+with each Dolibarr version. [CI workflow](.github/workflows/qa.yml) · [Test guide](tests/README.md).
 
 The opt-in live suite exercises Basic authentication and real HTTP
 CardDAV/CalDAV requests against an explicitly named test database. It creates

@@ -416,6 +416,52 @@ invitationPolicyAssert($deduplicated['kind'] === 'reply' && invitationPolicyStat
 	&& substr_count($deduplicated['calendar_data'], 'ATTENDEE;') === 2,
 	'Equivalent repeated attendees must yield one canonical response per address');
 
+// Two clients may put the equivalent, expanded row first on different syncs.
+$clientAttendees = static function ($calendarData, $product, $expandedFirst, $bareAddress) {
+	return invitationPolicyChange($calendarData, static function ($master, $calendar) use ($product, $expandedFirst, $bareAddress) {
+		$calendar->PRODID = $product;
+		foreach ($calendar->select('VEVENT') as $event) {
+			$compact = clone $event->select('ATTENDEE')[1]; // Bob, the peer whose answer must survive Alice's response.
+			unset($compact['RSVP']);
+			$expanded = clone $compact;
+			$expanded->setValue($bareAddress ? 'BOB@EXAMPLE.TEST' : 'MAILTO:BOB@EXAMPLE.TEST');
+			$expanded['ROLE'] = 'req-participant';
+			$expanded['CUTYPE'] = 'individual';
+			$expanded['RSVP'] = 'false';
+			$expanded['PARTSTAT'] = 'accepted';
+			$event->remove($event->select('ATTENDEE')[1]);
+			$event->add($expandedFirst ? $expanded : $compact);
+			$event->add($expandedFirst ? $compact : $expanded);
+		}
+	});
+};
+foreach (array(false, true) as $expandedFirst) {
+	$stored = $clientAttendees($before, '-//Outlook CalDavSynchronizer//EN', $expandedFirst, true);
+	$answer = $clientAttendees($accept, '-//DAVx5//EN', !$expandedFirst, true);
+	$echo = $clientAttendees($before, '-//DAVx5//EN', !$expandedFirst, true);
+	invitationPolicyAssert(InvitationPolicy::plan($stored, $echo, 'organizer@example.test')['kind'] === 'noop'
+		&& InvitationPolicy::plan($stored, $echo, 'alice@example.test')['kind'] === 'noop', 'Reordering equivalent address forms must preserve an unchanged appointment');
+	$reply = InvitationPolicy::plan($stored, $answer, 'alice@example.test');
+	$answers = invitationPolicyState($reply)['attendees'];
+	$bob = $answers['mailto:bob@example.test'] ?? $answers['bob@example.test'];
+	invitationPolicyAssert($reply['kind'] === 'reply' && $reply['sequence'] === 4 && count($answers) === 2
+		&& $answers['mailto:alice@example.test']['partstat'] === 'ACCEPTED' && strtoupper($bob['partstat']) === 'ACCEPTED'
+		&& InvitationPolicy::plan($reply['calendar_data'], $answer, 'alice@example.test')['kind'] === 'noop',
+		'A response and its replay must preserve the peer response regardless of which equivalent attendee was first');
+	$series = $clientAttendees($exceptions, '-//DAVx5//EN', $expandedFirst, false);
+	$seriesEcho = $clientAttendees($exceptions, '-//Outlook CalDavSynchronizer//EN', !$expandedFirst, false);
+	invitationPolicyAssert(InvitationPolicy::plan($series, $seriesEcho, 'alice@example.test')['kind'] === 'noop',
+		'A series with an exception must recognize equivalent attendee defaults in either order');
+}
+foreach (array('CN' => 'Another person', 'ROLE' => 'NON-PARTICIPANT', 'PARTSTAT' => 'DECLINED') as $parameter => $value) {
+	$ambiguous = invitationPolicyChange($accept, static function ($event) use ($parameter, $value) {
+		$copy = clone $event->ATTENDEE;
+		$copy[$parameter] = $value;
+		$event->add($copy);
+	});
+	invitationPolicyRejects($before, $ambiguous, 'alice@example.test', 'Attendee copies with contradictory '.$parameter.' must be rejected', BadRequest::class);
+}
+
 foreach (array('duplicate-attendee', 'empty-attendee', 'duplicate-uid', 'duplicate-sequence', 'negative-sequence', 'invalid-rsvp') as $invalid) {
 	$bad = invitationPolicyChange($accept, static function ($event) use ($invalid) {
 		if ($invalid === 'duplicate-attendee') {

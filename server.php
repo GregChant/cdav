@@ -205,9 +205,10 @@ $principalBackend = new DAVACL\PrincipalBackend\Dolibarr($user,$db);
 $carddavBackend   = new Sabre\CardDAV\Backend\Dolibarr($user,$db,$langs);
 $schedulingEnabled = (bool) getDolGlobalInt('CDAV_SCHEDULING');
 $cacheCalendarReads = in_array($_SERVER['REQUEST_METHOD'] ?? '', array('GET', 'HEAD', 'PROPFIND', 'REPORT'), true);
+$davUserAgent = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
 $caldavBackend = $schedulingEnabled
-	? new Sabre\CalDAV\Backend\DolibarrScheduling($user, $db, $langs, $cdavLib, $cacheCalendarReads)
-	: new Sabre\CalDAV\Backend\Dolibarr($user, $db, $langs, $cdavLib, $cacheCalendarReads);
+	? new Sabre\CalDAV\Backend\DolibarrScheduling($user, $db, $langs, $cdavLib, $cacheCalendarReads, $davUserAgent)
+	: new Sabre\CalDAV\Backend\Dolibarr($user, $db, $langs, $cdavLib, $cacheCalendarReads, $davUserAgent);
 $managedAttachmentStore = new \Dolibarr\CDav\ManagedAttachmentStore($db, $user);
 
 // Setting up the directory tree //

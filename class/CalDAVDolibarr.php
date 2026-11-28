@@ -74,6 +74,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * */
 	private $cdavLib;
 
+	/** @var bool Whether this request uses the Outlook CalDavSynchronizer mapping */
+	private $outlookSynchronizer;
+
 	/** @var bool|null Whether the optional metadata table is installed. */
 	private $hasSchedulingTable = null;
 
@@ -131,8 +134,9 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 * @param object $langs Native translations
 	 * @param object $cdavLib Native calendar exporter
 	 * @param bool $cacheReads Whether this HTTP request permits read reuse
+	 * @param string $userAgent HTTP User-Agent for client-specific mapping
 	 */
-	public function __construct($user, $db, $langs, $cdavLib, bool $cacheReads = false)
+	public function __construct($user, $db, $langs, $cdavLib, bool $cacheReads = false, string $userAgent = '')
 	{
 		global $conf;
 
@@ -140,6 +144,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		$this->db = $db;
 		$this->langs = $langs;
 		$this->cdavLib = $cdavLib;
+		$this->outlookSynchronizer = \Dolibarr\CDav\CalendarWritePolicy::isOutlookSynchronizer($userAgent);
 		$this->calendarReadCache = new \Dolibarr\CDav\CalendarReadCache((bool) $cacheReads);
 		$this->syncStore = new \Dolibarr\CDav\SyncStore($db, (int) ($conf->entity ?? 1));
 		$this->managedAttachmentStore = new \Dolibarr\CDav\ManagedAttachmentStore($db, $user);
@@ -826,6 +831,12 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 					'canonical_data' => (string) $committed['calendardata'], 'changed' => $plan['changed'] && !isset($invitationChange['_agenda_task_plan']));
 				return;
 			}
+			// A DAV-created standalone event also keeps its state when an editor omits STATUS.
+			// Explicit transitions already went through the locked appointment plan above.
+			if ($calendarData['elem_source'] === 'ev' && $calendarData['componentType'] === 'VEVENT'
+				&& !$calendarData['has_explicit_status'] && isset($currentObject['calendardata'])) {
+				$calendarData['status'] = \Dolibarr\CDav\AppointmentStatus::statusFromCalendar($currentObject['calendardata']) ?? $calendarData['status'];
+			}
 			if (isset($currentObject['_cdav_description'])) {
 				$summaryPrefix = (string) ($currentObject['_cdav_description']['summary_prefix'] ?? '');
 				if ($summaryPrefix !== '' && ($calendarData['label'] === $summaryPrefix || str_starts_with($calendarData['label'], $summaryPrefix.' '))) {
@@ -1239,7 +1250,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$after = null;
 			try {
 				if ($protected && isset($before->VTODO)) {
-					$plan = \Dolibarr\CDav\CalendarWritePolicy::planTaskChange((string) $existing['calendardata'], (string) $calendarData, $descriptionContext);
+					$plan = \Dolibarr\CDav\CalendarWritePolicy::planTaskChange((string) $existing['calendardata'], (string) $calendarData,
+						$descriptionContext, $this->outlookSynchronizer);
 					if ($plan['resized'] || array_diff_key($plan['fields'], array('transparency' => true))) {
 						$this->_assertAppointmentStatusAuthority((int) $existing['id']);
 					}
@@ -2962,6 +2974,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			'description' => $description,
 			'percent' => $percent,
 			'status' => $status,
+			'has_explicit_status' => isset($component->STATUS),
 			'answer_status' => $answerStatus,
 			'invitation' => $hasParticipants,
 			'has_participants' => $hasParticipants,

@@ -75,6 +75,18 @@ class AppointmentStateDatabase
 }
 
 $tentative = appointmentStateCalendar("STATUS:TENTATIVE\r\nX-MICROSOFT-CDO-BUSYSTATUS:BUSY\r\n");
+$completedTask = appointmentStateCalendar("COMPLETED:20261120T120000Z\r\nSTATUS:COMPLETED\r\nPERCENT-COMPLETE:100\r\nSEQUENCE:8\r\n", 'VTODO');
+$exception = "BEGIN:VTODO\r\nUID:state-fixture@example.test\r\nRECURRENCE-ID:20261119T090000Z\r\nSTATUS:COMPLETED\r\nCOMPLETED:20261119T120000Z\r\nEND:VTODO\r\n";
+$completedTask = str_replace("END:VCALENDAR\r\n", $exception."END:VCALENDAR\r\n", $completedTask);
+$reopened = AppointmentStatus::metadataForReopenedTask($completedTask);
+$state = Sabre\VObject\Reader::read($reopened);
+$items = array_values($state->select('VTODO'));
+appointmentStateAssert(!isset($items[0]->COMPLETED) && !isset($items[0]->STATUS) && !isset($items[0]->{'PERCENT-COMPLETE'})
+	&& (string) $items[0]->SEQUENCE === '8' && (string) $items[1]->COMPLETED === '20261119T120000Z',
+	'A native reopen clears the master completion while retaining the identity, revision and independent completed occurrence.');
+$state->destroy();
+appointmentStateAssert(AppointmentStatus::metadataForReopenedTask($reopened) === null && AppointmentStatus::metadataForReopenedTask($tentative) === null,
+	'A later native update and unrelated appointments must not write task metadata.');
 appointmentStateAssert(AppointmentStatus::statusFromCalendar('') === null, 'Missing legacy metadata must retain the native default');
 appointmentStateAssert(AppointmentStatus::statusFromCalendar($tentative) === 'TENTATIVE', 'An explicit global RFC state must take precedence over a preserved Outlook hint');
 appointmentStateAssert(AppointmentStatus::statusFromCalendar(appointmentStateCalendar("X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE\r\n")) === 'TENTATIVE', 'An initial Outlook-only provisional appointment must be recognized');

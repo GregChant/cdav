@@ -4,6 +4,7 @@ namespace Dolibarr\CDav;
 
 require_once __DIR__.'/CDavMultiGetReport.php';
 require_once __DIR__.'/CDavRequestGuardPlugin.php';
+require_once __DIR__.'/CDavCalendarWritePolicy.php';
 
 /** CalDAV compatibility fixes layered on Dolibarr's bundled Sabre plugin. */
 class CalDAVPlugin extends \Sabre\CalDAV\Plugin
@@ -61,7 +62,7 @@ class CalDAVPlugin extends \Sabre\CalDAV\Plugin
 		if (preg_match('/^(\d+)-cal-/', $calendarUri, $match)) {
 			$calendarId = (int) $match[1];
 			$restored = !$isNew && $request->getMethod() === 'PUT'
-				&& preg_match('#^CalDavSynchronizer/\d+\.\d+(?:\.\d+){0,2}(?:\s|$)#i', (string) $request->getHeader('User-Agent'))
+				&& CalendarWritePolicy::isOutlookSynchronizer((string) $request->getHeader('User-Agent'))
 				&& $this->restoreOutlookAttachments($calendar, $calendarId, $objectUri);
 			$calendarData = $calendar->serialize();
 			if ($restored) {

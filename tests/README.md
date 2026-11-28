@@ -95,6 +95,15 @@ ne sont pas pilotées par ces tests.
 Les résultats 6.3.1 sont détaillés dans le
 [rapport des invitations](../doc/validation-invitations-dav.md).
 
+Les suites `calendar_policy.php` et `invitation_policy.php` rejouent en CI
+des écritures successives de clients différents sur le même objet. Les tests
+vérifient la révision après un renvoi identique, les horaires et priorités
+explicites, ainsi que les réponses des invités d’une série. Sur une instance
+jetable, `agenda_todo_live_cases.php` vérifie aussi l’ETag et les valeurs
+natives après un passage d’Outlook à un autre client et une réouverture dans
+Dolibarr. Pour reproduire un nouvel écart, conserver dans le test une version
+anonymisée des seuls champs iCalendar nécessaires et de leur ordre d’envoi.
+
 `status_live_cases.php`, appelé par la même suite HTTP, vérifie les états de
 rendez-vous depuis le vrai formulaire Agenda et les écritures DAV. Les cas
 couvrent les permissions, les réponses et disponibilités des participants,
