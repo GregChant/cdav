@@ -7,13 +7,14 @@
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 require_once dirname(__DIR__).'/class/CDavAppointmentStatus.php';
+require_once dirname(__DIR__).'/class/CDavBusinessPolicy.php';
 require_once __DIR__.'/cdav_transport.lib.php';
 
 
 class CdavLib
 {
 	/** Change this value whenever the generated DAV representation changes. */
-	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-agenda-task-v11';
+	private const CALENDAR_SERIALIZATION_VERSION = '2026-11-agenda-todo-v12';
 
 	/** Series ID written by the native Agenda form when saving separate occurrences. */
 	private const AGENDA_SERIES_ID_PATTERN = '^[0-9]{14}$';
@@ -618,6 +619,17 @@ class CdavLib
 				return $calendarData;
 			}
 
+			if ($target->name === 'VEVENT' && $bookingRow === null) {
+				require_once dirname(__DIR__).'/class/CDavInvitationPolicy.php';
+				foreach ($stored->select('VEVENT') as $event) {
+					if (!isset($event->ORGANIZER) || count($event->select('ATTENDEE')) < 2) continue;
+					try {
+						\Dolibarr\CDav\InvitationPolicy::indexAttendees($event, true);
+					} catch (\Sabre\DAV\Exception\BadRequest $e) {
+						// Keep ambiguous historical entries visible. A write will identify the conflict.
+					}
+				}
+			}
 			$propertyNames = array(
 				'ORGANIZER', 'ATTENDEE', 'RRULE', 'RDATE', 'EXDATE',
 				'RECURRENCE-ID', 'SEQUENCE', 'ATTACH',
@@ -630,11 +642,18 @@ class CdavLib
 			}
 			if ($target->name === 'VEVENT') {
 				$target->STATUS = \Dolibarr\CDav\AppointmentStatus::componentStatus($source);
-			} elseif (isset($source->STATUS)) {
+			} elseif (isset($source->STATUS) && ((string) $source->STATUS === (string) $target->STATUS
+				|| (string) $source->STATUS === 'CANCELLED' || !\Dolibarr\CDav\BusinessPolicy::protectNativeEvents()
+				|| \Dolibarr\CDav\BusinessPolicy::isDavCreated($this->db, (int) $eventId))) {
+				// A historical scheduling copy cannot override progress since edited in the native Agenda.
 				$target->remove('STATUS');
 				foreach ($source->select('STATUS') as $property) {
 					$target->add(clone $property);
 				}
+			}
+			if ($target->name === 'VTODO' && (string) $target->{'PERCENT-COMPLETE'} === '100'
+				&& (string) $target->STATUS === 'COMPLETED' && isset($source->COMPLETED)) {
+				$target->add(clone $source->COMPLETED);
 			}
 			$target->remove('VALARM');
 			foreach ($source->getComponents() as $component) {

@@ -174,6 +174,70 @@ foreach (array('New notes', $bookingParts['native_note'], $bookingParts['note_pr
 }
 
 date_default_timezone_set('Europe/Zurich');
+$task = implode("\r\n", array('BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CDav//EN', 'BEGIN:VTODO',
+	'UID:native-agenda-task', 'DTSTART;TZID=Europe/Zurich:20261028T093000', 'DUE;TZID=Europe/Zurich:20261029T164500',
+	'SUMMARY:Relire le dossier', 'DESCRIPTION:Appointment\nAppointment subject : Relire le dossier',
+	'URL:https://example.test/comm/action/card.php?id=71', 'LOCATION:Native office', 'TRANSP:TRANSPARENT', 'CLASS:PUBLIC',
+	'PRIORITY:0', 'STATUS:COMPLETED', 'PERCENT-COMPLETE:100', 'SEQUENCE:7', 'END:VTODO', 'END:VCALENDAR', ''));
+$outlookTask = implode("\r\n", array('BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Task client//EN', 'BEGIN:VTODO',
+	'UID:native-agenda-task', 'DTSTART:20261028T000000', 'DUE:20261029T235959', 'SUMMARY:Relire le dossier',
+	'DESCRIPTION:Appointment\nAppointment subject : Relire le dossier\n', 'PRIORITY:5', 'CLASS:PUBLIC', 'STATUS:COMPLETED',
+	'PERCENT-COMPLETE:100', 'COMPLETED:20261029T230000Z', 'SEQUENCE:8', 'END:VTODO', 'END:VCALENDAR', ''));
+$echo = CalendarWritePolicy::planTaskChange($task, $outlookTask);
+calendarPolicyAssert(!$echo['changed'] && !$echo['date_changed'] && $echo['sequence'] === 7 && !$echo['fields'],
+	'A rebuilt, already-completed Outlook task must preserve its hours, original priority, note and revision.');
+$allDayTask = str_replace(array('DTSTART;TZID=Europe/Zurich:20261028T093000', 'DUE;TZID=Europe/Zurich:20261029T164500'),
+	array('DTSTART;VALUE=DATE:20261028', 'DUE;VALUE=DATE:20261029'), $task);
+calendarPolicyAssert(!CalendarWritePolicy::planTaskChange($allDayTask, $outlookTask)['changed'],
+	'An Outlook day-level echo must also retain the original native all-day flag.');
+$inProgress = str_replace(array('STATUS:COMPLETED', 'PERCENT-COMPLETE:100'), array('STATUS:IN-PROCESS', 'PERCENT-COMPLETE:50'), $task);
+$complete = CalendarWritePolicy::planTaskChange($inProgress, $outlookTask);
+calendarPolicyAssert($complete['fields'] === array('percentage' => 100) && $complete['sequence'] === 8 && !$complete['date_changed'],
+	'Marking a native task complete must change only its progress.');
+$taskMetadata = CalendarWritePolicy::metadataAfterStatusChange('', $complete);
+calendarPolicyAssert(str_contains($taskMetadata, 'COMPLETED:20261029T230000Z') && !str_contains($taskMetadata, 'STATUS:')
+	&& !str_contains($taskMetadata, 'DESCRIPTION:'), 'Completion metadata must retain only the verified timestamp and server-owned protocol fields.');
+$reopen = CalendarWritePolicy::planTaskChange($complete['calendar_data'], str_replace(array('STATUS:COMPLETED', 'PERCENT-COMPLETE:100'),
+	array('STATUS:NEEDS-ACTION', 'PERCENT-COMPLETE:0'), $complete['calendar_data']));
+calendarPolicyAssert($reopen['fields'] === array('percentage' => 0)
+	&& !str_contains(CalendarWritePolicy::metadataAfterStatusChange($taskMetadata, $reopen), 'COMPLETED:'),
+	'Reopening a native task must clear its completion date even if a client echoed the previous one.');
+$edited = str_replace(array('SUMMARY:Relire le dossier', '20261029T235959', 'STATUS:COMPLETED', 'PERCENT-COMPLETE:100', "COMPLETED:20261029T230000Z\r\n"),
+	array('SUMMARY:Rapport final', '20261030T235959', 'STATUS:IN-PROCESS', 'PERCENT-COMPLETE:30', ''), $outlookTask);
+$plan = CalendarWritePolicy::planTaskChange($task, $edited);
+calendarPolicyAssert($plan['fields'] === array('label' => 'Rapport final', 'percentage' => 30) && $plan['resized']
+	&& date('Ymd His', $plan['dates']['end']) === '20261030 164500',
+	'Editing the day of the deadline in Outlook must keep its native clock time while updating authorized fields.');
+$noDue = preg_replace('/DUE:[^\r]+\r\n/', '', $outlookTask);
+calendarPolicyAssert(CalendarWritePolicy::planTaskChange($task, $noDue)['dates']['task_without_due'],
+	'Clearing a deadline must leave a missing native end instead of creating a synthetic duration.');
+$addDue = CalendarWritePolicy::planTaskChange(str_replace("DUE;VALUE=DATE:20261029\r\n", '', $allDayTask), $outlookTask);
+calendarPolicyAssert($addDue['resized'] && !$addDue['dates']['task_without_due'] && $addDue['dates']['fullday'] === 1
+	&& date('Ymd His', $addDue['dates']['end']) === '20261029 000000', 'Adding a deadline to an all-day task must preserve its native date type.');
+$fractionOnly = str_replace(array("STATUS:COMPLETED\r\n", 'PERCENT-COMPLETE:100'), array('', 'PERCENT-COMPLETE:30'), $task);
+calendarPolicyAssert(CalendarWritePolicy::planTaskChange($task, $fractionOnly)['fields'] === array('percentage' => 30),
+	'Clients may send just a native percentage and the exported status follows Dolibarr.');
+$statusOnly = str_replace(array("PERCENT-COMPLETE:100\r\n", 'STATUS:COMPLETED'), array('', 'STATUS:NEEDS-ACTION'), $task);
+calendarPolicyAssert(CalendarWritePolicy::planTaskChange($task, $statusOnly)['fields'] === array('percentage' => 0),
+	'Clients may reopen a completed task using only STATUS.');
+foreach (array(str_replace('UID:native-agenda-task', 'UID:other', $outlookTask),
+	str_replace('END:VTODO', "ATTENDEE:mailto:another@example.test\r\nEND:VTODO", $outlookTask),
+	str_replace('END:VTODO', "URL:https://example.test/other\r\nEND:VTODO", $outlookTask),
+	str_replace('STATUS:COMPLETED', 'STATUS:CANCELLED', $outlookTask), str_replace('20261029T230000Z', '20260230T230000Z', $outlookTask),
+	str_replace('PERCENT-COMPLETE:100', 'PERCENT-COMPLETE:101', $outlookTask),
+	str_replace('PERCENT-COMPLETE:100', 'PERCENT-COMPLETE:40', $outlookTask),
+	str_replace('PERCENT-COMPLETE:100', 'PERCENT-COMPLETE:12foo', $outlookTask),
+	str_replace('PERCENT-COMPLETE:100', "PERCENT-COMP\r\n LETE;VALUE=INTEGER:bad", $outlookTask),
+	str_replace('PERCENT-COMPLETE:100', "PERCENT-COMPLETE:100\r\nPERCENT-COMPLETE:20", $outlookTask),
+	str_replace(array('STATUS:COMPLETED', 'PERCENT-COMPLETE:100'), array('STATUS:NEEDS-ACTION', 'PERCENT-COMPLETE:30'), $outlookTask),
+	str_replace('VTODO', 'VEVENT', $outlookTask)) as $invalidTask) {
+	try {
+		CalendarWritePolicy::planTaskChange($task, $invalidTask);
+		throw new RuntimeException('An invalid or protected native task change was accepted.');
+	} catch (Sabre\DAV\Exception\Forbidden | Sabre\DAV\Exception\BadRequest $e) {
+		// A failed task plan must produce no native or protocol writes.
+	}
+}
 $before = calendarPolicyEvent("DTSTART;TZID=Europe/Zurich:20261120T100000\r\nDTEND;TZID=Europe/Zurich:20261120T110000",
 	"ATTENDEE;CN=Alice;PARTSTAT=ACCEPTED:mailto:alice@example.test\r\n");
 $moved = str_replace(array('20261120T100000', '20261120T110000'), array('20261121T140000', '20261121T150000'), $before);
@@ -229,6 +293,14 @@ foreach (array('SUMMARY:Native appointment' => 'SUMMARY:Changed subject', 'LOCAT
 		$changed = str_replace('END:VEVENT', 'END:VTODO', $changed);
 	}
 	calendarPolicyRejects($before, $changed, 'Protected field change must fail: '.$old);
+}
+$modifiedIdentity = str_replace(array('UID:42-ev-policy', 'alice@example.test'), array('UID:private-record', 'private@example.test'), $before);
+try {
+	CalendarWritePolicy::assertMoveOnly($before, $modifiedIdentity);
+	throw new RuntimeException('A protected identity change was accepted');
+} catch (Sabre\DAV\Exception\Forbidden $e) {
+	calendarPolicyAssert(str_contains($e->getMessage(), 'UID') && str_contains($e->getMessage(), 'ATTENDEE')
+		&& !str_contains($e->getMessage(), 'private'), 'The diagnostic must identify changed fields without including personal values');
 }
 foreach (array("ATTACH:https://files.example.test/new.pdf\r\n", "RRULE:FREQ=DAILY\r\n", "RDATE:20261201T090000Z\r\n",
 	"EXDATE:20261120T090000Z\r\n", "RECURRENCE-ID:20261120T090000Z\r\n", "ORGANIZER:mailto:owner@example.test\r\n",

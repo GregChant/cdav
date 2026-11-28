@@ -26,6 +26,21 @@ les liens métier et les règles de récurrence se gèrent dans Dolibarr. Si une
 modification touche aussi une de ces données protégées, le serveur refuse
 l’enregistrement entier. Le rendez-vous conserve son UID.
 
+### Tâches de l’Agenda dans Outlook
+
+Pour une action Agenda affichée comme tâche dans Outlook, le propriétaire ou
+le collaborateur disposant du droit de modifier tous les événements peut
+changer le titre, les notes libres, la priorité et l’échéance. Il peut aussi
+marquer la tâche comme terminée ou la rouvrir et régler son avancement. Ces
+changements portent sur l’action Agenda. La tâche de projet liée conserve son
+propre avancement.
+
+Quand Outlook renvoie une tâche déjà terminée avec les mêmes jours de début
+et de fin, CDav conserve les heures enregistrées dans Dolibarr. Un tel renvoi
+conserve aussi la révision du rendez-vous si les autres champs sont inchangés.
+
+### Invitations et rappels
+
 Depuis 6.3.1, une invitation permet aussi au participant authentifié de répondre
 sans modifier les autres données métier. Son refus n'annule pas le rendez-vous
 des autres. L'organisateur peut annuler explicitement son invitation ; les

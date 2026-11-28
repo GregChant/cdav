@@ -95,6 +95,9 @@ class RequestGuardPlugin extends DAV\ServerPlugin
 			if (strlen($body) > $this->maxRequestBytes) {
 				throw new RequestEntityTooLarge('The DAV request body is too large');
 			}
+			if ($root === 'calendars' && $request->getMethod() === 'PUT' && strncasecmp($body, 'BEGIN:VCALENDAR', 15) === 0) {
+				CalendarWritePolicy::validateTaskPercent($body);
+			}
 			$request->setBody($body);
 		}
 

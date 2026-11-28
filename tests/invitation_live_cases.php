@@ -21,6 +21,25 @@ function invitationLiveAttendee($component, string $email)
 }
 
 /**
+ * Repeat one Outlook attendee, optionally with a conflicting participation status.
+ * @param string $body Invitation with a single matching participant
+ * @param string $email Participant's native address
+ * @param string|null $otherStatus Optional response on the repeated property
+ * @return string Invitation containing the repeated participant
+ */
+function invitationLiveDuplicateAttendee(string $body, string $email, ?string $otherStatus = null): string
+{
+	return businessLiveCalendar($body, static function ($component) use ($email, $otherStatus) {
+		$attendee = invitationLiveAttendee($component, $email);
+		liveAssert($attendee !== null, 'The fixture must contain the attendee being repeated');
+		$duplicate = clone $attendee;
+		$duplicate->setValue('MAILTO:'.strtoupper($email));
+		if ($otherStatus !== null) $duplicate['PARTSTAT'] = $otherStatus;
+		$component->add($duplicate);
+	});
+}
+
+/**
  * Produce a client PUT that changes only the authenticated attendee's answer.
  * @param string $body Current calendar representation
  * @param string $email Native account email
@@ -212,8 +231,18 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 		liveHttpStatus($rejected, array(400), 'INV20 invalid UID');
 		liveAssert(liveDavErrorMessage($rejected) === $message, 'An invalid UID did not return its specific DAV error');
 	}
-	liveHttpStatus($http('PUT', $path, $raw, $creationHeaders), array(201), 'INV20 Outlook long-UID invitation import');
 	$mapSql = 'SELECT fk_object, dav_origin, sourceuid FROM '.MAIN_DB_PREFIX.'actioncomm_cdav WHERE sourceuid = \''.$db->escape($uid).'\'';
+	$submittedConflict = 'The submitted invitation has conflicting ATTENDEE entries for the same calendar address.';
+	$nativeCountSql = 'SELECT COUNT(*) AS nb FROM '.MAIN_DB_PREFIX."actioncomm WHERE label = 'External mailbox invitation'";
+	$nativeCount = (int) liveRow($db, $nativeCountSql)->nb;
+	$invalidCreate = $http('PUT', $path, invitationLiveDuplicateAttendee($raw, $invitee->email, 'DECLINED'), $creationHeaders);
+	liveHttpStatus($invalidCreate, array(400), 'INV20 conflicting participants during Outlook invitation creation');
+	liveAssert(liveDavErrorMessage($invalidCreate) === $submittedConflict && liveRow($db, $mapSql) === null
+		&& (int) liveRow($db, $nativeCountSql)->nb === $nativeCount,
+		'A conflicting invitation creation must identify the submitted data and leave no native appointment or UID mapping');
+	liveHttpStatus($http('GET', $path), array(404), 'INV20 rejected Outlook invitation creation left no resource');
+	liveHttpStatus($http('PUT', $path, invitationLiveDuplicateAttendee($raw, $invitee->email), $creationHeaders),
+		array(201), 'INV20 Outlook long-UID invitation import with an equivalent duplicate');
 	$mapping = liveRow($db, $mapSql);
 	liveAssert($mapping !== null && (int) $mapping->dav_origin === 1, 'External import did not record immutable DAV creation provenance');
 	$id = (int) $mapping->fk_object;
@@ -232,14 +261,17 @@ function invitationLiveExternalCases($db, $organizer, $invitee, array $context, 
 	$before = invitationLiveNoopState($db, $id);
 	$fresh = $http('GET', $path);
 	liveHttpStatus($fresh, array(200), 'INV20 private imported invitation GET');
-	liveAssert((string) \Sabre\VObject\Reader::read($fresh['body'])->VEVENT->UID === $uid,
-		'GET truncated or changed the Outlook UID after creation');
-	$ambiguousAttendee = businessLiveCalendar($fresh['body'], static function ($component) use ($invitee) {
-		$component->add('ATTENDEE', 'mailto:'.$invitee->email);
-	});
-	$rejected = $http('PUT', $path, $ambiguousAttendee);
+	$created = \Sabre\VObject\Reader::read($fresh['body'])->VEVENT;
+	liveAssert((string) $created->UID === $uid && count($created->select('ATTENDEE')) === 1
+		&& (string) invitationLiveAttendee($created, $invitee->email)['PARTSTAT'] === 'ACCEPTED',
+		'GET must preserve the long Outlook UID and one canonical, accepted attendee');
+	$equivalent = invitationLiveDuplicateAttendee($fresh['body'], $invitee->email);
+	liveHttpStatus($http('PUT', $path, $equivalent, array('If-Match: '.$fresh['headers']['etag'])),
+		array(200, 204), 'INV20 equivalent incoming attendee replay');
+	liveAssert(invitationLiveNoopState($db, $id) === $before, 'An equivalent attendee replay changed the native meeting or scheduling state');
+	$rejected = $http('PUT', $path, invitationLiveDuplicateAttendee($fresh['body'], $invitee->email, 'DECLINED'));
 	liveHttpStatus($rejected, array(400), 'INV20 duplicate invitee');
-	liveAssert(liveDavErrorMessage($rejected) === 'Invitation attendee identities are missing or duplicated.'
+	liveAssert(liveDavErrorMessage($rejected) === $submittedConflict
 		&& invitationLiveNoopState($db, $id) === $before, 'The ambiguous invitee did not fail cleanly');
 	for ($attempt = 0; $attempt < 2; $attempt++) {
 		$accepted = invitationLiveAnswer($fresh['body'], (string) $invitee->email, 'ACCEPTED', '-//CalDavSynchronizer//Outlook//EN');
@@ -780,13 +812,44 @@ function invitationLiveCases($db, $organizer, $admin, array $context): void
 		liveHttpStatus($http('invitee', 'PUT', $fixture['invitee_path'], $staleAnswer), array(403, 409, 412), 'INV14 answer after organizer cancellation');
 		liveAssert(invitationLiveNoopState($db, $id) === $before, 'A late answer resurrected a cancelled invitation');
 
-		$detached = invitationLiveCreate($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events);
-		liveHttpStatus($http('invitee', 'DELETE', $detached['invitee_path']), array(200, 204), 'INV15 attendee calendar removal');
+		$detached = invitationLiveCreate($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events, (int) $task->id);
+		$metadata = liveRow($db, 'SELECT calendardata FROM '.MAIN_DB_PREFIX.'cdav_scheduling WHERE fk_actioncomm = '.$detached['id']);
+		// Old versions stored the original request, including duplicate attendees.
+		$storeLegacyAttendees = static function (?string $secondStatus) use ($db, $metadata, $invitee, $detached) {
+			$historical = invitationLiveDuplicateAttendee($metadata->calendardata, $invitee->email, $secondStatus);
+			liveAssert((bool) $db->query('UPDATE '.MAIN_DB_PREFIX."cdav_scheduling SET calendardata = '".$db->escape($historical)
+				."' WHERE fk_actioncomm = ".$detached['id']), 'Unable to seed a legacy invitation');
+		};
+		$storeLegacyAttendees('ACCEPTED');
+		$before = invitationLiveNoopState($db, $detached['id']);
+		$legacyRead = $http('invitee', 'GET', $detached['invitee_path']);
+		liveHttpStatus($legacyRead, array(200), 'INV15 stored conflicting attendees remain readable');
+		$legacyComponent = \Sabre\VObject\Reader::read($legacyRead['body'])->VEVENT;
+		liveAssert(count($legacyComponent->select('ATTENDEE')) === 3 && invitationLiveNoopState($db, $detached['id']) === $before,
+			'Reading an ambiguous invitation must retain both responses and leave stored state untouched');
+		$rejected = $http('invitee', 'DELETE', $detached['invitee_path']);
+		liveHttpStatus($rejected, array(400), 'INV15 attendee removal with conflicting stored responses');
+		liveAssert(liveDavErrorMessage($rejected) === 'The stored invitation has conflicting ATTENDEE entries for the same calendar address.'
+			&& invitationLiveNoopState($db, $detached['id']) === $before, 'Ambiguous stored responses must leave all assignments and notifications intact');
+		$storeLegacyAttendees(null);
+		$before = invitationLiveNoopState($db, $detached['id']);
+		$legacyRead = $http('invitee', 'GET', $detached['invitee_path']);
+		liveHttpStatus($legacyRead, array(200), 'INV15 readable canonical representation of equivalent stored attendees');
+		$legacyComponent = \Sabre\VObject\Reader::read($legacyRead['body'])->VEVENT;
+		liveAssert(count($legacyComponent->select('ATTENDEE')) === 2 && invitationLiveNoopState($db, $detached['id']) === $before,
+			'Reading equivalent historical attendees must expose one entry per participant without any database or calendar write');
+		$expected = businessLiveEventState($db, $detached['id']);
+		$expected['resources'] = array_values(array_filter($expected['resources'],
+			static fn($resource) => $resource['element_type'] !== 'user' || (int) $resource['fk_element'] !== (int) $invitee->id));
+		liveHttpStatus($http('invitee', 'DELETE', $detached['invitee_path']), array(200, 204), 'INV15 attendee removal from a legacy invitation with equivalent duplicates');
 		$remaining = $http('organizer', 'GET', $detached['organizer_path']);
 		liveHttpStatus($remaining, array(200), 'INV15 organizer keeps the appointment');
-		liveAssert((string) \Sabre\VObject\Reader::read($remaining['body'])->VEVENT->STATUS !== 'CANCELLED'
-			&& liveRow($db, 'SELECT rowid FROM '.MAIN_DB_PREFIX.'actioncomm_resources WHERE fk_actioncomm = '.$detached['id']
-			.' AND element_type = \'user\' AND fk_element = '.((int) $invitee->id)) === null, 'An attendee removal globally cancelled the native appointment');
+		$eventAfterRemoval = \Sabre\VObject\Reader::read($remaining['body'])->VEVENT;
+		liveAssert((string) $eventAfterRemoval->STATUS !== 'CANCELLED' && count($eventAfterRemoval->select('ATTENDEE')) === 2
+			&& (string) invitationLiveAttendee($eventAfterRemoval, $invitee->email)['PARTSTAT'] === 'DECLINED'
+			&& businessLiveEventState($db, $detached['id']) === $expected,
+			'Attendee removal must decline once and preserve the organizer, other assignments, project and task');
+		liveHttpStatus($http('invitee', 'GET', $detached['invitee_path']), array(404), 'INV15 attendee calendar no longer contains the detached appointment');
 		$deleted = invitationLiveCreate($db, $organizer, $invitee, $context, (int) $project->id, (int) $contact->id, $events);
 		liveHttpStatus($http('organizer', 'DELETE', $deleted['organizer_path']), array(200, 204), 'INV16 organizer invitation deletion');
 		liveAssert(liveRow($db, 'SELECT id FROM '.MAIN_DB_PREFIX.'actioncomm WHERE id = '.$deleted['id']) === null,

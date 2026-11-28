@@ -402,9 +402,28 @@ $exceptionReply = invitationPolicyChange($exceptions, static function ($event) {
 });
 invitationPolicyRejects($exceptions, $exceptionReply, 'alice@example.test', 'Scoped recurrence responses must fail explicitly until their native persistence is implemented');
 
-foreach (array('duplicate-attendee', 'duplicate-uid', 'duplicate-sequence', 'negative-sequence', 'invalid-rsvp') as $invalid) {
+$repeatedAttendee = static function ($event) {
+	$copy = clone $event->ATTENDEE;
+	$copy->setValue(strtoupper((string) $copy));
+	$copy['ROLE'] = 'req-participant';
+	$copy['CUTYPE'] = 'INDIVIDUAL';
+	$event->add($copy);
+};
+$legacyRepeated = invitationPolicyChange($before, $repeatedAttendee);
+$repeatedReply = invitationPolicyChange($accept, $repeatedAttendee);
+$deduplicated = InvitationPolicy::plan($legacyRepeated, $repeatedReply, 'alice@example.test');
+invitationPolicyAssert($deduplicated['kind'] === 'reply' && invitationPolicyState($deduplicated) === $state
+	&& substr_count($deduplicated['calendar_data'], 'ATTENDEE;') === 2,
+	'Equivalent repeated attendees must yield one canonical response per address');
+
+foreach (array('duplicate-attendee', 'empty-attendee', 'duplicate-uid', 'duplicate-sequence', 'negative-sequence', 'invalid-rsvp') as $invalid) {
 	$bad = invitationPolicyChange($accept, static function ($event) use ($invalid) {
-		if ($invalid === 'duplicate-attendee') $event->add(clone $event->ATTENDEE);
+		if ($invalid === 'duplicate-attendee') {
+			$copy = clone $event->ATTENDEE;
+			$copy['ROLE'] = 'NON-PARTICIPANT';
+			$event->add($copy);
+		}
+		if ($invalid === 'empty-attendee') $event->add('ATTENDEE', 'mailto:');
 		if ($invalid === 'duplicate-uid') $event->add('UID', 'another-uid');
 		if ($invalid === 'duplicate-sequence') $event->add('SEQUENCE', 5);
 		if ($invalid === 'negative-sequence') $event->SEQUENCE = -1;

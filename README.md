@@ -112,6 +112,13 @@ native public-field visibility preferences. Reactivate CDav once after updating
 to install the technical group-receipt mapping table; profiles and publication
 keys are preserved.
 
+Version 6.5.1 accepts Outlook sync updates for completed Agenda tasks and
+preserves their native hours and project-task links. The owner or an authorized
+delegate can update the task's progress or reopen it. Invitations with equivalent
+entries for the same attendee now synchronize once per address. For conflicting
+entries, the DAV error identifies whether they came from the stored invitation
+or the client. [Invitation guide (French)](doc/invitations-outlook-davx5-fr.md).
+
 Version 6.5.0 shows the linked project task on the Dolibarr appointment form
 and includes its reference, name and direct link in the calendar description
 for users who can read the task. The owner or an authorized delegate can edit

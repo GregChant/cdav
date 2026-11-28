@@ -44,8 +44,14 @@ class InvitationPolicy
 				throw new Forbidden('The invitation UID and organizer cannot be changed.');
 			}
 			$actor = self::email($actorEmail);
-			$oldAttendees = self::attendees($old);
-			$newAttendees = self::attendees($new);
+			$oldAttendees = self::indexAttendees($old, true);
+			$newAttendees = self::indexAttendees($new);
+			foreach ($events as $event) {
+				if ($event !== $old) self::indexAttendees($event, true);
+			}
+			foreach ($newEvents as $event) {
+				if ($event !== $new) self::indexAttendees($event);
+			}
 			$isOrganizer = $actor !== '' && $actor === $organizer;
 			if (!$isOrganizer && ($actor === '' || !isset($oldAttendees[$actor]))) {
 				throw new Forbidden('Only the organizer or an authenticated attendee may change an invitation.');
@@ -544,21 +550,51 @@ class InvitationPolicy
 	}
 
 	/**
-	 * Index participant identities and reject duplicates before merging responses.
+	 * Index attendees and collapse equivalent repetitions in this parsed component.
 	 *
 	 * @param VObject\Component $event Invitation event
+	 * @param bool $stored Whether the component is the existing server copy
 	 * @return array<string,object> Attendee properties
 	 */
-	private static function attendees($event)
+	public static function indexAttendees($event, bool $stored = false): array
 	{
 		$values = array();
+		$source = $stored ? 'stored' : 'submitted';
 		foreach ($event->select('ATTENDEE') as $property) {
 			$key = self::address((string) $property);
-			if ($key === '' || isset($values[$key])) throw new BadRequest('Invitation attendee identities are missing or duplicated.');
+			if ($key === '' || strcasecmp($key, 'mailto:') === 0) {
+				throw new BadRequest('The '.$source.' invitation contains an ATTENDEE without a calendar address.');
+			}
+			if (isset($values[$key])) {
+				if (self::attendeeParameters($values[$key]) !== self::attendeeParameters($property)) {
+					throw new BadRequest('The '.$source.' invitation has conflicting ATTENDEE entries for the same calendar address.');
+				}
+				$event->remove($property);
+				continue;
+			}
 			$values[$key] = $property;
 		}
 		ksort($values, SORT_STRING);
 		return $values;
+	}
+
+	/**
+	 * Compare the fields on repeated identities before using a single copy.
+	 * @param VObject\Property $attendee Calendar address property
+	 * @return array Effective parameters including iCalendar attendee defaults
+	 */
+	private static function attendeeParameters($attendee): array
+	{
+		$parameters = array('CUTYPE' => array('INDIVIDUAL'), 'PARTSTAT' => array('NEEDS-ACTION'),
+			'ROLE' => array('REQ-PARTICIPANT'), 'RSVP' => array('FALSE'), 'VALUE' => array($attendee->getValueType()));
+		foreach ($attendee->parameters() as $parameter) {
+			$name = $parameter->name;
+			$parts = $parameter->getParts();
+			if (in_array($name, array('CUTYPE', 'PARTSTAT', 'ROLE', 'RSVP', 'VALUE'), true)) $parts = array_map('strtoupper', $parts);
+			$parameters[$name] = $parts;
+		}
+		ksort($parameters, SORT_STRING);
+		return $parameters;
 	}
 
 	/**

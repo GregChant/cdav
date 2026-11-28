@@ -549,7 +549,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		}
 		$origCalendarData = $calendarData;
 		$this->managedAttachmentStore->validateInlineCalendarData($origCalendarData);
-		$calendarData = $this->_parseData($calendarData, $calendarId);
+		$calendarData = $this->_parseData($calendarData, $calendarId, true);
+		$origCalendarData = $calendarData['normalized_invitation'] ?? $origCalendarData;
 		if (getDolGlobalInt('CDAV_MANAGED_ATTACHMENTS') && $this->_containsManagedAttachment($origCalendarData)) {
 			throw new \Sabre\DAV\Exception\Conflict('Managed attachments must first be created through RFC 8607 POST');
 		}
@@ -764,7 +765,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 
 		$origCalendarData = $calendarData;
 		$this->managedAttachmentStore->validateInlineCalendarData($origCalendarData);
-		$calendarData = $this->_parseData($calendarData, $calendarId);
+		$calendarData = $this->_parseData($calendarData, $calendarId, true);
+		$origCalendarData = $calendarData['normalized_invitation'] ?? $origCalendarData;
 
 		if (! $calendarData || empty($calendarData))
 		{
@@ -814,14 +816,14 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 				return;
 			}
 			$currentObject = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
-			if (is_array($invitationChange) && isset($invitationChange['_appointment_status_plan'])) {
-				$plan = $invitationChange['_appointment_status_plan'];
+			if (isset($invitationChange['_appointment_status_plan']) || isset($invitationChange['_agenda_task_plan'])) {
+				$plan = $invitationChange['_agenda_task_plan'] ?? $invitationChange['_appointment_status_plan'];
 				$this->_applyAppointmentStatusPlan((int) $calendarData['id'], (int) $calendarId, $plan);
 				$committed = $this->getCalendarObject((int) $calendarId, (string) $objectUri);
 				if (!$this->db->commit()) throw new \Sabre\DAV\Exception('Unable to commit the appointment state.');
 				$this->committedSchedulingChanges[((int) $calendarId).'\n'.(string) $objectUri] = array(
 					'id' => (int) $calendarData['id'], 'previous_data' => (string) $currentObject['calendardata'],
-					'canonical_data' => (string) $committed['calendardata'], 'changed' => (bool) $plan['changed']);
+					'canonical_data' => (string) $committed['calendardata'], 'changed' => $plan['changed'] && !isset($invitationChange['_agenda_task_plan']));
 				return;
 			}
 			if (isset($currentObject['_cdav_description'])) {
@@ -1236,6 +1238,13 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			$before = VObject\Reader::read((string) $existing['calendardata']);
 			$after = null;
 			try {
+				if ($protected && isset($before->VTODO)) {
+					$plan = \Dolibarr\CDav\CalendarWritePolicy::planTaskChange((string) $existing['calendardata'], (string) $calendarData, $descriptionContext);
+					if ($plan['resized'] || array_diff_key($plan['fields'], array('transparency' => true))) {
+						$this->_assertAppointmentStatusAuthority((int) $existing['id']);
+					}
+					return $plan['dates'] + array('_agenda_task_plan' => $plan);
+				}
 				if (isset($before->VEVENT)) {
 					$after = VObject\Reader::read((string) $calendarData);
 					if (!isset($after->VEVENT)) throw new Forbidden('An appointment must remain a VEVENT.');
@@ -1850,7 +1859,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 		if ($protectedMove) {
 			// Only apply validated calendar fields to the freshly loaded native relationships.
 			$fields = $data['_protected_fields'] ?? array();
-			foreach (array('label', 'location', 'priority') as $field) {
+			foreach (array('label', 'location', 'priority', 'percentage') as $field) {
 				if (isset($fields[$field])) $event->{$field} = $fields[$field];
 			}
 			if (isset($fields['note'])) $event->note = $event->note_private = $fields['note'];
@@ -1870,7 +1879,8 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			}
 			if (empty($data['_preserve_native_dates'])) {
 				$event->datep = (int) $data['start'];
-				$event->datef = !empty($data['fullday']) ? (int) $data['end'] - 1 : (int) $data['end'];
+				$event->datef = !empty($data['fullday']) && $data['componentType'] === 'VEVENT' ? (int) $data['end'] - 1 : (int) $data['end'];
+				if (!empty($data['task_without_due'])) $event->datef = null;
 				$event->fulldayevent = (int) $data['fullday'];
 			}
 			if ($event->update($this->user) <= 0) {
@@ -2778,12 +2788,22 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 	 *   * percent
 	 *   * status
 	 * @param string $calendarData
+	 * @param int|null $calendarId Calendar used to resolve native identities
+	 * @param bool $submitted Validate and normalize invitation attendees for a client write
 	 * @return array
 	 */
-	protected function _parseData($calendarData, $calendarId = null) {
+	protected function _parseData($calendarData, $calendarId = null, bool $submitted = false) {
 
 		debug_log('_parseData('.strlen((string) $calendarData).' bytes)');
 		$vObject = $this->_readCalendarData($calendarData);
+		$normalizedInvitation = false;
+		if ($submitted) {
+			foreach ($vObject->select('VEVENT') as $event) {
+				if (!isset($event->ORGANIZER)) continue;
+				$count = count($event->select('ATTENDEE'));
+				if (count(\Dolibarr\CDav\InvitationPolicy::indexAttendees($event)) < $count) $normalizedInvitation = true;
+			}
+		}
 		$component = null;
 		foreach ($vObject->getComponents() as $candidate) {
 			if (in_array($candidate->name, array('VEVENT', 'VTODO'), true)) {
@@ -2952,6 +2972,7 @@ class Dolibarr extends AbstractBackend implements SyncSupport {
 			'native_reminders' => $nativeReminders,
 			'elem_source' => $elemSource,
 		);
+		if ($normalizedInvitation) $ret['normalized_invitation'] = $vObject->serialize();
 		debug_log('   parsed '.$componentType.' UID '.$uid);
 		return $ret;
 	}

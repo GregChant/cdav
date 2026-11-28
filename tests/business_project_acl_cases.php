@@ -228,6 +228,8 @@ function businessLiveProjectAccess($db, $testUser, $admin, array $context): void
 		liveAssert((string) liveRow($db, 'SELECT label FROM '.MAIN_DB_PREFIX.'projet_task WHERE rowid = '.((int) $task->id))->label === $newTitle,
 			'Project task echo stored the generated prefix in the native title');
 		liveOk('Project task title preserves brackets and strips only the generated project prefix');
+		require_once __DIR__.'/agenda_todo_live_cases.php';
+		agendaTodoLiveCases($db, $testUser, $admin, $context, $project, $task);
 	} finally {
 		foreach (array_keys($grantedRights) as $rightId) {
 			liveAssert($limited->delrights((int) $rightId, '', '', $entity) > 0, 'Unable to restore native project reader permissions');

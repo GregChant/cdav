@@ -299,13 +299,24 @@ class CalendarWritePolicy
 		try {
 			$old = self::item($before);
 			$new = self::item($after);
-			if (self::projection($old) !== self::projection($new)
-				|| self::calendarMethod($before) !== self::calendarMethod($after)) {
-				throw new Forbidden('This change affects protected Dolibarr appointment information. Edit its business links and participants in Dolibarr.');
+			$stored = self::projection($old);
+			$submitted = self::projection($new);
+			$changed = array();
+			foreach (array_keys($stored + $submitted) as $field) {
+				if (($stored[$field] ?? null) === ($submitted[$field] ?? null)) continue;
+				// Only report standard field names. A DAV error can appear in a shared client log.
+				$changed[] = in_array($field, array('UID', 'SUMMARY', 'LOCATION', 'DESCRIPTION', 'CLASS', 'STATUS', 'TRANSP',
+					'PRIORITY', 'PERCENT-COMPLETE', 'COMPLETED', 'URL', 'CATEGORIES', 'ORGANIZER', 'ATTENDEE', 'VALARM',
+					'ATTACH', 'RRULE', 'RDATE', 'EXDATE', 'RECURRENCE-ID', 'RELATED-TO'), true) ? $field : 'other property';
+			}
+			if ($old->name !== $new->name) $changed[] = 'component type';
+			if (self::calendarMethod($before) !== self::calendarMethod($after)) $changed[] = 'METHOD';
+			if ($changed) {
+				throw new Forbidden('This update changes protected Dolibarr fields: '.implode(', ', array_unique($changed)).'.');
 			}
 			$oldDates = self::dates($old);
 			$newDates = self::dates($new);
-			$canResize = $allowResize && $old->name === 'VEVENT'
+			$canResize = $allowResize
 				&& !isset($old->RRULE) && !isset($old->RDATE) && !isset($old->{'RECURRENCE-ID'});
 			if (!$canResize && ($oldDates['fullday'] !== $newDates['fullday'] || $oldDates['duration'] !== $newDates['duration'])) {
 				throw new Forbidden('Moving a protected Dolibarr appointment must preserve its duration and all-day status.');
@@ -429,17 +440,9 @@ class CalendarWritePolicy
 				|| ($oldStatus === 'CANCELLED' && ($statusChanged || $dateChanged))) {
 				throw new Forbidden('A cancelled appointment cannot be restored or moved through CalDAV.');
 			}
-			$sequenceProperties = $old->select('SEQUENCE');
-			$sequenceValue = isset($old->SEQUENCE) ? (string) $old->SEQUENCE : '0';
-			if (count($sequenceProperties) > 1 || !preg_match('/^[0-9]+$/D', $sequenceValue)
-				|| (float) $sequenceValue > 2147483647) {
-				throw new BadRequest('The appointment revision is invalid or ambiguous.');
-			}
-			$sequence = (int) $sequenceValue;
 			$changed = $statusChanged || $dateChanged || (bool) $fields;
+			$sequence = self::nextSequence($old, $changed);
 			if ($changed) {
-				if ($sequence >= 2147483647) throw new Forbidden('The appointment revision cannot be advanced safely.');
-				$sequence++;
 				foreach (array('DTSTART', 'DTEND', 'DUE', 'DURATION') as $name) {
 					$old->remove($name);
 					foreach ($new->select($name) as $property) $old->add(clone $property);
@@ -503,12 +506,17 @@ class CalendarWritePolicy
 				$target->remove($name);
 				foreach ($source->select($name) as $property) $target->add(clone $property);
 			}
-			if ($plan['status'] !== $plan['previous_status']) {
+			if ($source->name === 'VTODO') {
+				// Native progress supplies STATUS after both DAV and Dolibarr edits.
+				if ((string) $source->STATUS !== 'CANCELLED') $target->remove('STATUS');
+				$target->remove('COMPLETED');
+				if (isset($source->COMPLETED)) $target->add(clone $source->COMPLETED);
+			} elseif ($plan['status'] !== $plan['previous_status']) {
 				$target->STATUS = $plan['status'];
 				$target->remove('X-MICROSOFT-CDO-BUSYSTATUS');
 			}
 			$target->SEQUENCE = (int) $plan['sequence'];
-			if ($plan['status'] === 'CANCELLED') {
+			if ($source->name === 'VEVENT' && $plan['status'] === 'CANCELLED') {
 				$target->TRANSP = 'TRANSPARENT';
 				$target->remove('VALARM');
 			}
@@ -597,6 +605,182 @@ class CalendarWritePolicy
 	}
 
 	/**
+	 * Reconcile the native Agenda percentage with the client's VTODO status.
+	 * @param VObject\Component $old Current task
+	 * @param VObject\Component $new Incoming task
+	 * @return int Native percentage
+	 */
+	private static function taskProgress($old, $new): int
+	{
+		$prior = (int) (string) $old->{'PERCENT-COMPLETE'};
+		$percent = isset($new->{'PERCENT-COMPLETE'}) ? (int) (string) $new->{'PERCENT-COMPLETE'} : $prior;
+		$previous = strtoupper((string) $old->STATUS);
+		$status = strtoupper((string) ($new->STATUS ?? $previous));
+		if ($prior < 0 || $prior > 100 || $percent < 0 || $percent > 100) throw new BadRequest('Task progress must be between 0 and 100.');
+		if ($status === 'CANCELLED' && $status === $previous && $percent === $prior) return $prior;
+		if (!in_array($status, array('NEEDS-ACTION', 'IN-PROCESS', 'COMPLETED'), true)
+			|| $previous === 'CANCELLED') throw new Forbidden('The requested task status cannot be represented by native Agenda progress.');
+		if (isset($new->STATUS) && !isset($new->{'PERCENT-COMPLETE'})) {
+			if ($status === 'COMPLETED') return 100;
+			if ($status === 'NEEDS-ACTION') return 0;
+			return $prior > 0 && $prior < 100 ? $prior : 1;
+		}
+		if (isset($new->STATUS, $new->{'PERCENT-COMPLETE'})
+			&& (($status === 'COMPLETED') !== ($percent === 100) || ($status === 'NEEDS-ACTION') !== ($percent === 0))) {
+			throw new BadRequest('The task status and percentage disagree.');
+		}
+		return $percent;
+	}
+
+	/**
+	 * Sabre's INTEGER reader casts even malformed input such as "40%" to 40.
+	 * @param string $data Original text/calendar body before Sabre parses integers
+	 * @return void
+	 */
+	public static function validateTaskPercent(string $data): void
+	{
+		$unfolded = preg_replace('/\r?\n[ \t]/', '', $data);
+		if (!preg_match_all('/^(?:[\w-]+\.)?PERCENT-COMPLETE(?:;(?:"[^"\r\n]*"|[^":\r\n])*)?:([^\r\n]*)/im', $unfolded, $matches)) return;
+		foreach ($matches[1] as $value) {
+			if (!preg_match('/^\+?0*(?:\d{1,2}|100)$/D', $value)) throw new BadRequest('Task progress must be an integer between 0 and 100.');
+		}
+	}
+
+	/**
+	 * Outlook tasks expose only the local day and send midnight / 23:59:59.
+	 * Keep Dolibarr's clock times when applying the days from that representation.
+	 * @param VObject\Component $old Authoritative task
+	 * @param VObject\Component $new Comparison task
+	 * @return void
+	 */
+	private static function normalizeTaskDays($old, $new): void
+	{
+		if (isset($new->DURATION)) return;
+		$zone = new \DateTimeZone(date_default_timezone_get());
+		$start = $new->DTSTART->getDateTime($zone);
+		if ($start->format('His') !== '000000') return;
+		if (isset($new->DUE) && $new->DUE->getDateTime($zone)->format('His') !== '235959') return;
+		foreach (array('DTSTART', 'DUE') as $name) {
+			if (!isset($new->{$name})) continue;
+			$day = $new->{$name}->getDateTime($zone);
+			if (!isset($old->{$name})) {
+				if (!$old->DTSTART->hasTime()) {
+					$new->remove($name);
+					$new->add($name, $day->format('Ymd'), array('VALUE' => 'DATE'));
+				}
+				continue;
+			}
+			$original = clone $old->{$name};
+			$time = $original->getDateTime($zone);
+			$original->setDateTime($time->setDate((int) $day->format('Y'), (int) $day->format('m'), (int) $day->format('d')));
+			$new->remove($name);
+			$new->add($original);
+		}
+	}
+
+	/**
+	 * Plan a write to an Agenda ActionComm exported as VTODO.
+	 * @param string $current Calendar generated from the native Agenda record
+	 * @param string $incoming Replacement VTODO
+	 * @param array $descriptionContext Trusted boundaries of the editable note
+	 * @return array Native changes and canonical scheduling metadata
+	 */
+	public static function planTaskChange(string $current, string $incoming, array $descriptionContext = array()): array
+	{
+		self::validateTaskPercent($incoming);
+		$before = VObject\Reader::read($current);
+		$after = null;
+		try {
+			$after = VObject\Reader::read($incoming);
+			$old = self::item($before);
+			$new = self::item($after);
+			if ($old->name !== 'VTODO' || $new->name !== 'VTODO') throw new Forbidden('A native Agenda task must remain a VTODO.');
+			if (!isset($new->DTSTART) || isset($new->DTEND)) throw new BadRequest('Use DTSTART and an optional DUE or DURATION for an Agenda task.');
+			foreach (array('DTSTART', 'DUE', 'DURATION', 'STATUS', 'PERCENT-COMPLETE', 'COMPLETED') as $name) {
+				if (count($new->select($name)) > 1) throw new BadRequest('The task field is ambiguous: '.$name);
+			}
+			// Outlook rebuilds a task from scratch and does not map the Agenda URL, task location or occupancy.
+			$omitsUrl = isset($old->URL) && !isset($new->URL);
+			foreach (array('URL', 'CLASS', 'TRANSP', 'LOCATION', 'DESCRIPTION', 'PRIORITY') as $name) {
+				if (!isset($new->{$name}) && isset($old->{$name})) $new->add(clone $old->{$name});
+			}
+			if (isset($old->DESCRIPTION, $new->DESCRIPTION)
+				&& rtrim((string) $new->DESCRIPTION, "\r\n") === rtrim((string) $old->DESCRIPTION, "\r\n")) {
+				$new->DESCRIPTION->setValue((string) $old->DESCRIPTION);
+			}
+			$oldDates = self::dates($old);
+			if ($omitsUrl) self::normalizeTaskDays($old, $new);
+			$fields = self::appointmentFieldChanges($old, $new, $descriptionContext);
+			if ($omitsUrl && isset($fields['priority'])) {
+				$prior = (int) (string) $old->PRIORITY;
+				$outlookPriority = $prior === 0 || $prior === 5 ? 5 : ($prior < 5 ? 1 : 9);
+				if ($fields['priority'] === $outlookPriority) unset($fields['priority']);
+			}
+			$prior = (int) (string) $old->{'PERCENT-COMPLETE'};
+			$percent = self::taskProgress($old, $new);
+			if ($percent !== $prior) $fields['percentage'] = $percent;
+			$completed = isset($new->COMPLETED) ? (string) $new->COMPLETED : null;
+			if ($percent < 100 && $prior === 100 && $completed === (string) ($old->COMPLETED ?? '')) $completed = null;
+			if ($completed !== null) {
+				$stamp = \DateTimeImmutable::createFromFormat('!Ymd\THis\Z', $completed, new \DateTimeZone('UTC'));
+				if (!$stamp || $stamp->format('Ymd\THis\Z') !== $completed || $percent !== 100) {
+					throw new BadRequest('COMPLETED requires a completed task and a UTC completion date.');
+				}
+			}
+			foreach (array('STATUS', 'PERCENT-COMPLETE', 'COMPLETED') as $name) {
+				$new->remove($name);
+				if (isset($old->{$name})) $new->add(clone $old->{$name});
+			}
+			$dates = self::assertMoveOnly($before->serialize(), $after->serialize(), true);
+			$hadDue = isset($old->DUE) || isset($old->DURATION);
+			$hasDue = isset($new->DUE) || isset($new->DURATION);
+			$resized = $hadDue !== $hasDue || $dates['fullday'] !== $oldDates['fullday'] || self::dates($new)['duration'] !== $oldDates['duration'];
+			unset($oldDates['duration']);
+			$dateChanged = $hadDue !== $hasDue || $dates !== $oldDates;
+			$changed = (bool) $fields || $dateChanged;
+			if ((string) $old->STATUS === 'CANCELLED' && $changed) throw new Forbidden('A cancelled Agenda task cannot be edited through CalDAV.');
+			$sequence = self::nextSequence($old, $changed);
+			if ($changed) {
+				foreach (array('DTSTART', 'DUE', 'DURATION') as $name) {
+					$old->remove($name);
+					if (isset($new->{$name})) $old->add(clone $new->{$name});
+				}
+				$old->SEQUENCE = $sequence;
+				if ($percent !== $prior) {
+					$old->{'PERCENT-COMPLETE'} = $percent;
+					$old->STATUS = $percent === 100 ? 'COMPLETED' : ($percent === 0 ? 'NEEDS-ACTION' : 'IN-PROCESS');
+					$old->remove('COMPLETED');
+					if ($completed !== null) $old->add('COMPLETED', $completed);
+				}
+			}
+			$dates['task_without_due'] = !$hasDue;
+			return array('changed' => $changed, 'date_changed' => $dateChanged, 'resized' => $resized, 'fields' => $fields,
+				'dates' => $dates, 'sequence' => $sequence, 'calendar_data' => $before->serialize());
+		} catch (VObject\InvalidDataException $error) {
+			throw new BadRequest('The task contains an invalid iCalendar date or duration.');
+		} finally {
+			$before->destroy();
+			if ($after !== null) $after->destroy();
+		}
+	}
+
+	/**
+	 * Advance the original server revision only for a material change.
+	 * @param VObject\Component $item Original Agenda component
+	 * @param bool $changed Whether native data or state changed
+	 * @return int Canonical server revision
+	 */
+	private static function nextSequence($item, bool $changed): int
+	{
+		$value = (string) ($item->SEQUENCE ?? '0');
+		if (count($item->select('SEQUENCE')) > 1 || !preg_match('/^[0-9]+$/D', $value) || (float) $value > 2147483647) {
+			throw new BadRequest('The calendar revision is invalid or ambiguous.');
+		}
+		if ($changed && (int) $value >= 2147483647) throw new Forbidden('The calendar revision cannot be advanced safely.');
+		return (int) $value + (int) $changed;
+	}
+
+	/**
 	 * Advance the server-owned iTIP revision while retaining only original metadata.
 	 *
 	 * @param string $stored Original metadata, empty when no sidecar exists
@@ -679,14 +863,14 @@ class CalendarWritePolicy
 	 *
 	 * @param VObject\Component $component Calendar item or nested alarm
 	 * @param bool $nested Whether dates belong to a protected nested component
-	 * @return string Stable protected-property representation
+	 * @return array Stable property signatures grouped by field or subcomponent
 	 */
 	private static function projection($component, $nested = false)
 	{
 		$properties = array();
 		foreach ($component->children() as $child) {
 			if ($child instanceof VObject\Component) {
-				$properties[] = self::projection($child, true);
+				$properties[$child->name][] = json_encode(self::projection($child, true));
 				continue;
 			}
 			$name = strtoupper($child->name);
@@ -722,10 +906,12 @@ class CalendarWritePolicy
 				$value = explode(';', strtoupper((string) $child));
 				sort($value);
 			}
-			$properties[] = json_encode(array($name, $child->getValueType(), $parameters, $value), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+			$properties[$name][] = json_encode(array($child->getValueType(), $parameters, $value), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 		}
-		sort($properties);
-		return $component->name.':'.json_encode($properties, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		foreach ($properties as &$values) sort($values, SORT_STRING);
+		unset($values);
+		ksort($properties, SORT_STRING);
+		return $properties;
 	}
 
 	/**
@@ -766,7 +952,7 @@ class CalendarWritePolicy
 			throw new Forbidden('The appointment end cannot precede its start.');
 		}
 		$fullday = !$startProperty->hasTime();
-		if ($fullday && ($start == $end || $end->format('His') !== '000000')) {
+		if ($fullday && (($component->name === 'VEVENT' && $start == $end) || $end->format('His') !== '000000')) {
 			throw new Forbidden('An all-day appointment must span whole calendar days.');
 		}
 		$duration = $fullday
